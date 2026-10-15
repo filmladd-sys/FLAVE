@@ -646,7 +646,9 @@ class SequenceTimeline(QMainWindow):
 
 
     def _linked_clips(self, clip):
-        # Other clips sharing clip's link_id (any track), as live lists
+        # Other clips sharing clip's link_id (any track), as live lists.
+        # Keyframe clips participate (same link_id on keyframe_clips); captions
+        # do not start a link group.
         link_id = clip[8] if len(clip) > 8 else None
         if link_id is None or is_caption_id(clip[0]):
             return []
@@ -1247,9 +1249,17 @@ class SequenceTimeline(QMainWindow):
         from keyframe import is_keyframe_clip_id
         if is_keyframe_clip_id(clip[0]):
             menu = QMenu(self)
+            link_action = menu.addAction("Link")
+            link_action.setEnabled(len(self._selected_clips()) >= 2)
+            unlink_action = menu.addAction("Unlink")
+            menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            if action == delete_action:
+            if action == link_action:
+                self.link_selected_clips()
+            elif action == unlink_action:
+                self.unlink_clips(clip)
+            elif action == delete_action:
                 self.delete_selected_clip()
             return
         if is_caption_id(clip[0]):
@@ -1299,15 +1309,21 @@ class SequenceTimeline(QMainWindow):
 
     def link_selected_clips(self):
         # Link: every selected clip gets link_id = first selected clip's id
+        # (captions stay unlinked; keyframe clips use keyframe_clips.link_id)
         selected = [c for c in self._selected_clips() if not is_caption_id(c[0])]
         if len(selected) < 2:
             return
         new_link = selected[0][0]
         try:
+            from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
-            cur.executemany("UPDATE clips SET link_id = ? WHERE id = ?",
-                            [(new_link, c[0]) for c in selected])
+            for c in selected:
+                if is_keyframe_clip_id(c[0]):
+                    persist_keyframe_link_id(cur, c[0], new_link)
+                else:
+                    cur.execute("UPDATE clips SET link_id = ? WHERE id = ?",
+                                (new_link, c[0]))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -1324,10 +1340,15 @@ class SequenceTimeline(QMainWindow):
         else:
             ids = [clip[0]]
         try:
+            from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
-            cur.executemany("UPDATE clips SET link_id = NULL WHERE id = ?",
-                            [(cid,) for cid in ids])
+            for cid in ids:
+                if is_keyframe_clip_id(cid):
+                    persist_keyframe_link_id(cur, cid, None)
+                else:
+                    cur.execute("UPDATE clips SET link_id = NULL WHERE id = ?",
+                                (cid,))
             conn.commit()
             conn.close()
         except Exception as e:

@@ -154,6 +154,16 @@ def persist_keyframe_clip_track(cur, clip, track_id):
     )
 
 
+def persist_keyframe_link_id(cur, clip_mem_id, link_id):
+    # Same link_id group semantics as clips.link_id (may be a clips.id or
+    # another member's mem id). None clears membership.
+    db_id = db_id_from_mem(clip_mem_id)
+    cur.execute(
+        "UPDATE keyframe_clips SET link_id = ? WHERE id = ?",
+        (link_id, db_id)
+    )
+
+
 class AddKeyframeClipDialog(QDialog):
     # Name + type (X / Y / Scale) + Add
     def __init__(self, parent=None):
