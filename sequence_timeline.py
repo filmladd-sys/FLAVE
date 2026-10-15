@@ -76,10 +76,6 @@ class ClipDelegate(QStyledItemDelegate):
         track_id = name_item.data(Qt.UserRole) if name_item is not None else None
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
         ppf = tl.pixels_per_frame
-        # keyframe tracks are empty for now (no clip painting / no special look)
-        if track_type == "keyframe":
-            painter.restore()
-            return
         for clip in tl.clips_by_track.get(track_id, []):
             (clip_id, footage_id, start_frame, length_frames, filename,
              clip_enabled, clip_solo, in_frame) = clip[:8]
@@ -91,6 +87,16 @@ class ClipDelegate(QStyledItemDelegate):
             clip_rect = QRect(x, rect.top(), w, rect.height())
             # Disabled clips draw dimmer
             painter.setOpacity(1.0 if clip_enabled else 0.4)
+            if track_type == "keyframe":
+                from keyframe import paint_keyframe_clip
+                paint_keyframe_clip(painter, clip_rect, filename or "")
+                if clip_id in tl._selected_clip_ids:
+                    painter.setPen(QColor(255, 255, 160))
+                else:
+                    painter.setPen(QColor(160, 180, 220))
+                painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
+                painter.setOpacity(1.0)
+                continue
             if track_type == "caption":
                 paint_caption_bar(painter, clip_rect)
             else:
@@ -295,8 +301,12 @@ class SequenceTimeline(QMainWindow):
     _clip_is_video = _clip_is_video
     # Image methods live in sequence_timeline_image.py
     _add_image_track = _add_image_track
-    # Keyframe methods live in sequence_timeline_keyframe.py
+    # Keyframe methods live in sequence_timeline_keyframe.py / keyframe.py
     _add_keyframe_track = _add_keyframe_track
+
+    def add_keyframe_clip(self, track_id, click_frame):
+        from keyframe import add_keyframe_clip as _add_kf_clip
+        _add_kf_clip(self, track_id, click_frame)
     # SQL and data methods live in sequence_timeline_sql.py
     _add_track = _add_track
     _save_track_display = _save_track_display
@@ -504,14 +514,22 @@ class SequenceTimeline(QMainWindow):
         display_action = menu.addAction("Track Display Properties")
         ripple_action = None
         add_caption_action = None
+        add_keyframe_action = None
         x_in_clips = self._x_in_clips(pos)
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower()
-        if x_in_clips >= 0 and track_type in EDIT_TRACK_TYPES:
+        if x_in_clips >= 0 and track_type == "keyframe":
+            menu.addSeparator()
+            add_keyframe_action = menu.addAction("Add Keyframe Clip")
+        elif x_in_clips >= 0 and track_type in EDIT_TRACK_TYPES:
             menu.addSeparator()
             if track_type == "caption":
                 add_caption_action = menu.addAction("Add Caption")
             ripple_action = menu.addAction("Ripple Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if add_keyframe_action is not None and action == add_keyframe_action:
+            click_frame = self.view_start_frame + x_in_clips / self.pixels_per_frame
+            self.add_keyframe_clip(track_id, click_frame)
+            return
         if add_caption_action is not None and action == add_caption_action:
             click_frame = self.view_start_frame + x_in_clips / self.pixels_per_frame
             self.add_caption(track_id, click_frame)
@@ -1176,6 +1194,10 @@ class SequenceTimeline(QMainWindow):
             cur = conn.cursor()
             for m in group:
                 c = m["clip"]
+                from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
+                if is_keyframe_clip_id(c[0]):
+                    persist_keyframe_clip_time(cur, c)
+                    continue
                 table, row_id = clip_table_and_id(c[0])
                 cur.execute(f"UPDATE {table} SET start_frame = ? WHERE id = ?",
                             (max(0, int(c[2])), row_id))
@@ -1214,6 +1236,14 @@ class SequenceTimeline(QMainWindow):
         # Right-click on an unselected clip selects it like a normal click
         if clip[0] not in self._selected_clip_ids:
             self._select_clip(clip, "normal")
+        from keyframe import is_keyframe_clip_id
+        if is_keyframe_clip_id(clip[0]):
+            menu = QMenu(self)
+            delete_action = menu.addAction("Delete")
+            action = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if action == delete_action:
+                self.delete_selected_clip()
+            return
         if is_caption_id(clip[0]):
             # Caption clip menu: Edit, Slice, Delete (no link this pass)
             menu = QMenu(self)
@@ -1324,6 +1354,10 @@ class SequenceTimeline(QMainWindow):
             cur = conn.cursor()
             for m in group:
                 c = m["clip"]
+                from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
+                if is_keyframe_clip_id(c[0]):
+                    persist_keyframe_clip_time(cur, c)
+                    continue
                 if is_caption_id(c[0]):
                     cur.execute(
                         "UPDATE captions SET start_frame = ?, length_frames = ? WHERE id = ?",

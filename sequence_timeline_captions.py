@@ -32,12 +32,26 @@ def ensure_captions_table(project_db):
 
 
 def is_caption_id(clip_id):
-    # Caption clips use negative in-memory ids
-    return clip_id is not None and clip_id < 0
+    # Caption clips use negative in-memory ids (not keyframe negatives)
+    if clip_id is None or clip_id >= 0:
+        return False
+    try:
+        from keyframe import is_keyframe_clip_id
+        if is_keyframe_clip_id(clip_id):
+            return False
+    except ImportError:
+        pass
+    return True
 
 
 def clip_table_and_id(clip_id):
-    # ("captions", row id) for caption clips, else ("clips", id)
+    # (table, row id) for caption / keyframe / clips
+    try:
+        from keyframe import is_keyframe_clip_id, db_id_from_mem
+        if is_keyframe_clip_id(clip_id):
+            return "keyframe_clips", db_id_from_mem(clip_id)
+    except ImportError:
+        pass
     if is_caption_id(clip_id):
         return "captions", -clip_id
     return "clips", clip_id

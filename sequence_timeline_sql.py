@@ -14,6 +14,10 @@ from sequence_timeline_audio import AUDIO_EXTENSIONS
 from sequence_timeline_captions import (
     ensure_captions_table, is_caption_id, clip_table_and_id, load_captions,
 )
+from keyframe import (
+    ensure_keyframe_tables, load_keyframe_clips, is_keyframe_clip_id,
+    keyframe_range_overlaps, persist_keyframe_clip_time,
+)
 
 EDGE_HIT_PX = 6
 OUT_ICON_MIN_PX = 4   # smallest visible out-icon block on narrow clips
@@ -23,13 +27,11 @@ DEFAULT_TRACK_HEIGHT = 64
 
 
 # Track types whose clips can be dropped, moved, trimmed and toggled.
-# keyframe is an empty track type (no clips yet): not listed here, so
-# footage drops are rejected the same as on caption / other non-clip types.
+# keyframe is not listed: footage drops are rejected like caption.
 CLIP_TRACK_TYPES = ("image", "video", "audio")
 # Track types whose clips can be hit, dragged, trimmed, sliced and deleted.
-# Caption clips live in the captions table and use negative in-memory ids
-# (-captions.id) so they never collide with clips.id.
-EDIT_TRACK_TYPES = CLIP_TRACK_TYPES + ("caption",)
+# Caption / keyframe clips use negative in-memory ids (separate ranges).
+EDIT_TRACK_TYPES = CLIP_TRACK_TYPES + ("caption", "keyframe")
 TRACK_FOOTAGE_EXTENSIONS = {
     "image": IMAGE_EXTENSIONS,
     "video": VIDEO_EXTENSIONS,
@@ -360,6 +362,11 @@ def refresh(self):
         ensure_clips_table(project_db)
         ensure_captions_table(project_db)
         conn = sqlite3.connect(project_db)
+        try:
+            ensure_keyframe_tables(conn)
+            conn.commit()
+        except Exception:
+            pass
         cur = conn.cursor()
         cur.execute(
             "SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
@@ -387,6 +394,7 @@ def refresh(self):
                  max(0, int(in_frame or 0)), link_id]
             )
         load_captions(cur, self.sequence_id, clips)
+        load_keyframe_clips(cur, self.sequence_id, clips)
         for track_clips in clips.values():
             track_clips.sort(key=lambda c: (c[2], c[0]))
         self.clips_by_track = clips
@@ -600,7 +608,10 @@ def drop_footage(self, footage_id, row, x_in_clips):
 
 def _range_overlaps(self, cur, track_id, start, length):
     # True if [start, start + length) overlaps any clip on track_id
-    table = "captions" if self._track_type(track_id) == "caption" else "clips"
+    ttype = self._track_type(track_id)
+    if ttype == "keyframe":
+        return keyframe_range_overlaps(cur, track_id, start, length)
+    table = "captions" if ttype == "caption" else "clips"
     cur.execute(
         f"SELECT 1 FROM {table} WHERE track_id = ? "
         "AND start_frame < ? AND start_frame + length_frames > ? LIMIT 1",
@@ -640,6 +651,9 @@ def slice_clip(self, clip, x_in_clips):
     # Split clip in two at the mark x (clips-column x where the menu
     # opened). Linked partners are sliced at the same timeline frame; the
     # left pieces keep the old link_id, the right pieces share a new one.
+    if is_keyframe_clip_id(clip[0]):
+        self.status_bar.showMessage("Slice not available for keyframe clips", 3000)
+        return
     start, length = clip[2], clip[3]
     if length < 2:
         return
@@ -748,6 +762,10 @@ def ripple_delete(self, track_id, click_frame):
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
         for c in moving.values():
+            if is_keyframe_clip_id(c[0]):
+                c[2] = c[2] + delta
+                persist_keyframe_clip_time(cur, c)
+                continue
             table, row_id = clip_table_and_id(c[0])
             cur.execute(f"UPDATE {table} SET start_frame = ? WHERE id = ?",
                         (c[2] + delta, row_id))
