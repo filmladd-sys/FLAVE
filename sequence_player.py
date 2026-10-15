@@ -1029,15 +1029,14 @@ SequencePlayer._frame_locked = _frame_locked
 
 def open_player_for(timeline):
     # One player per timeline: raise it if open, else create and show.
-    # show() on a fullscreen window brings the title bar back, so keep it.
+    # show()/raise_()/requestActivate() on a fullscreen (or already visible)
+    # QWindow bring the title bar back on Play -- leave those alone.
     player = getattr(timeline, "_player", None)
     if player is not None and not player.closed:
-        if player.visibility() == QWindow.FullScreen:
-            player.requestActivate()
+        if (player.visibility() == QWindow.FullScreen
+                or player.isExposed() or player.isVisible()):
             return player
         player.show()
-        player.raise_()
-        player.requestActivate()
         return player
     player = SequencePlayer(timeline)
     timeline._player = player

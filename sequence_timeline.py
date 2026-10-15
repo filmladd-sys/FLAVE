@@ -394,6 +394,7 @@ class SequenceTimeline(QMainWindow):
         self._play_start_time = 0.0
         self._play_shown_count = 0
         self._play_last_shown = None
+        self._play_audio_clock = False  # True after first video frame is ready/shown
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(20)
         self._play_timer.timeout.connect(self._play_tick)
@@ -1406,6 +1407,7 @@ class SequenceTimeline(QMainWindow):
                 self._play_start_frame = frame
                 self._play_start_time = time.perf_counter()
                 self._play_cursor = frame
+                self._play_audio_clock = False
                 player = getattr(self, "_player", None)
                 if player is not None and not getattr(player, "closed", False):
                     try:
@@ -1548,6 +1550,7 @@ class SequenceTimeline(QMainWindow):
         self._play_cursor = int(self._play_from)
         self._play_shown_count = 0
         self._play_last_shown = None
+        self._play_audio_clock = False
         self._playing = True
         player = getattr(self, "_player", None)
         if player is not None and not getattr(player, "closed", False):
@@ -1568,8 +1571,9 @@ class SequenceTimeline(QMainWindow):
         return max(1, min(30, n))
 
     def _play_tick(self):
-        # Audio position is the master clock when the WAV has started; wall
-        # clock is the fallback (no audio, or position still 0 at start).
+        # Audio position is the master clock only after the first video frame
+        # is ready or shown; until then wait on the start frame / wall clock
+        # so play_show is not skipped while the first nvJPEG batch fills.
         # The playhead moves silent, so no scrub or preview events fire.
         import time
         if not self._playing:
@@ -1578,21 +1582,32 @@ class SequenceTimeline(QMainWindow):
         if player is None or player.closed:
             self._stop_play()
             return
-        clock = None
-        try:
-            pos = player.preview_audio_position_ms()
-        except Exception:
-            pos = None
-        # position > 0 means audio has begun (also covers mid-sequence seeks)
-        if pos is not None and int(pos) > 0:
+        start = int(self._play_start_frame)
+        if not self._play_audio_clock:
             try:
-                from sequence_player_audio import sequence_frame_from_position_ms
-                clock = sequence_frame_from_position_ms(pos, self.fps)
+                if player.play_has(start):
+                    self._play_audio_clock = True
             except Exception:
-                clock = None
+                pass
+        clock = None
+        if self._play_audio_clock:
+            try:
+                pos = player.preview_audio_position_ms()
+            except Exception:
+                pos = None
+            if pos is not None and int(pos) > 0:
+                try:
+                    from sequence_player_audio import sequence_frame_from_position_ms
+                    clock = sequence_frame_from_position_ms(pos, self.fps)
+                except Exception:
+                    clock = None
         if clock is None:
-            elapsed = time.perf_counter() - self._play_start_time
-            clock = self._play_start_frame + int(elapsed * self.fps)
+            if not self._play_audio_clock:
+                # Hold on the start frame until the first batch is presentable
+                clock = start
+            else:
+                elapsed = time.perf_counter() - self._play_start_time
+                clock = self._play_start_frame + int(elapsed * self.fps)
         last = self.total_frames() - 1
         if clock < 0:
             clock = 0
@@ -1607,6 +1622,7 @@ class SequenceTimeline(QMainWindow):
             player.play_fill(self._play_cursor, self._play_batch_n())
         if not player.play_show(self._play_cursor):
             return
+        self._play_audio_clock = True
         self.set_current_frame(self._play_cursor, silent=True)
         visible = self.visible_frames()
         if not (self.view_start_frame <= self._play_cursor <
