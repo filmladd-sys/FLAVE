@@ -12,6 +12,7 @@ from sequence_timeline_ruler import (
     PlayheadOverlay,
 )
 from sequence_timeline_image import IMAGE_EXTENSIONS, _add_image_track
+from sequence_timeline_keyframe import _add_keyframe_track
 from sequence_timeline_video import (
     VIDEO_EXTENSIONS, out_frame_for, video_out_pixmap,
     _add_video_track, _generate_out_icon, _clip_is_video,
@@ -75,6 +76,10 @@ class ClipDelegate(QStyledItemDelegate):
         track_id = name_item.data(Qt.UserRole) if name_item is not None else None
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
         ppf = tl.pixels_per_frame
+        # keyframe tracks are empty for now (no clip painting / no special look)
+        if track_type == "keyframe":
+            painter.restore()
+            return
         for clip in tl.clips_by_track.get(track_id, []):
             (clip_id, footage_id, start_frame, length_frames, filename,
              clip_enabled, clip_solo, in_frame) = clip[:8]
@@ -290,6 +295,8 @@ class SequenceTimeline(QMainWindow):
     _clip_is_video = _clip_is_video
     # Image methods live in sequence_timeline_image.py
     _add_image_track = _add_image_track
+    # Keyframe methods live in sequence_timeline_keyframe.py
+    _add_keyframe_track = _add_keyframe_track
     # SQL and data methods live in sequence_timeline_sql.py
     _add_track = _add_track
     _save_track_display = _save_track_display
@@ -441,7 +448,7 @@ class SequenceTimeline(QMainWindow):
 
         # Tracks menu
         tracks_menu = menubar.addMenu("Tracks")
-        for label in ["+ Video", "+ Audio", "+ Image", "+ Caption"]:
+        for label in ["+ Video", "+ Audio", "+ Image", "+ Caption", "+ Keyframe"]:
             action = QAction(label, self)
             if label == "+ Image":
                 action.triggered.connect(self._add_image_track)
@@ -451,6 +458,8 @@ class SequenceTimeline(QMainWindow):
                 action.triggered.connect(self._add_audio_track)
             elif label == "+ Caption":
                 action.triggered.connect(self._add_caption_track)
+            elif label == "+ Keyframe":
+                action.triggered.connect(self._add_keyframe_track)
             else:
                 action.triggered.connect(lambda checked=False, l=label: self._stub(l))
             tracks_menu.addAction(action)

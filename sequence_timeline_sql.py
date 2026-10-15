@@ -22,7 +22,9 @@ DEFAULT_FPS = 29.97
 DEFAULT_TRACK_HEIGHT = 64
 
 
-# Track types whose clips can be dropped, moved, trimmed and toggled
+# Track types whose clips can be dropped, moved, trimmed and toggled.
+# keyframe is an empty track type (no clips yet): not listed here, so
+# footage drops are rejected the same as on caption / other non-clip types.
 CLIP_TRACK_TYPES = ("image", "video", "audio")
 # Track types whose clips can be hit, dragged, trimmed, sliced and deleted.
 # Caption clips live in the captions table and use negative in-memory ids
@@ -306,7 +308,7 @@ def _load_sequence_fps(sequence_id):
     return DEFAULT_FPS
 
 
-def _add_track(self, track_type, title, name=None, language=""):
+def _add_track(self, track_type, title, name=None, language="", bg_color=None):
     project_db = self._project_db()
     if not project_db:
         QMessageBox.warning(self, title, "No project open")
@@ -325,11 +327,19 @@ def _add_track(self, track_type, title, name=None, language=""):
             (self.sequence_id,)
         )
         sort_order = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO tracks (sequence_id, name, track_type, sort_order, language) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (self.sequence_id, name, track_type, sort_order, language or "")
-        )
+        if bg_color:
+            cur.execute(
+                "INSERT INTO tracks (sequence_id, name, track_type, sort_order, "
+                "language, bg_color) VALUES (?, ?, ?, ?, ?, ?)",
+                (self.sequence_id, name, track_type, sort_order,
+                 language or "", bg_color)
+            )
+        else:
+            cur.execute(
+                "INSERT INTO tracks (sequence_id, name, track_type, sort_order, "
+                "language) VALUES (?, ?, ?, ?, ?)",
+                (self.sequence_id, name, track_type, sort_order, language or "")
+            )
         conn.commit()
         conn.close()
     except Exception as e:
