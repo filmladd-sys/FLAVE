@@ -351,6 +351,10 @@ def _libs():
     cudart = _load_cudart()
     cudart.cudaGLSetGLDevice.argtypes = [c.c_int]
     cudart.cudaGLSetGLDevice.restype = c.c_int
+    cudart.cudaSetDevice.argtypes = [c.c_int]
+    cudart.cudaSetDevice.restype = c.c_int
+    cudart.cudaGetLastError.argtypes = []
+    cudart.cudaGetLastError.restype = c.c_int
     cudart.cudaMalloc.argtypes = [c.POINTER(c.c_void_p), c.c_size_t]
     cudart.cudaMalloc.restype = c.c_int
     cudart.cudaFree.argtypes = [c.c_void_p]

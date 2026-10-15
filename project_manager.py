@@ -411,6 +411,13 @@ def print_build():
 
 def main():
     print_build()
+    # Shared CUDA primary context before any window or preview worker
+    try:
+        from cuda_context import ensure_cuda
+        ensure_cuda(0)
+    except Exception as e:
+        # print("CUDA launch init failed: %s" % e)
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName("LaddVideoEditor")
     window = ProjectManager()

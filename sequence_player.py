@@ -324,9 +324,31 @@ class SequencePlayer(QWindow):
         if not self.ctx.create():
             raise RuntimeError("QOpenGLContext.create failed")
         self.ctx.makeCurrent(self)
-        _check(cudart.cudaGLSetGLDevice(0), "cudaGLSetGLDevice")
-        _check(cudart.cudaFree(None), "cuda init")
-        _check(nvcuda.cuCtxGetCurrent(ctypes.byref(self.cuda_ctx)), "cuCtxGetCurrent")
+        # Soft attach: do not abort on 708 (context already active in process)
+        try:
+            from cuda_context import soft_cuda_gl_set_device, ensure_current, get_context
+            soft_cuda_gl_set_device(0)
+            ensure_current()
+            shared = get_context()
+            self.cuda_ctx = ctypes.c_void_p(int(shared.value)) if shared and shared.value else ctypes.c_void_p()
+        except Exception as e:
+            # print("shared CUDA attach failed: %s" % e)
+            try:
+                cudart.cudaGetLastError()
+            except Exception:
+                pass
+            self.cuda_ctx = ctypes.c_void_p()
+        if not self.cuda_ctx.value:
+            # Fallback if launch-time init did not run
+            err = cudart.cudaGLSetGLDevice(0)
+            if err not in (0, 708):
+                _check(err, "cudaGLSetGLDevice")
+            if hasattr(cudart, "cudaGetLastError"):
+                cudart.cudaGetLastError()
+            _check(cudart.cudaFree(None), "cuda init")
+            _check(nvcuda.cuCtxGetCurrent(ctypes.byref(self.cuda_ctx)), "cuCtxGetCurrent")
+        else:
+            _check(nvcuda.cuCtxSetCurrent(self.cuda_ctx), "cuCtxSetCurrent")
         _check(cudart.cudaStreamCreate(ctypes.byref(self.stream)), "stream")
         gl.glGenTextures(1, ctypes.byref(self.tex))
         gl.glBindTexture(GL_TEXTURE_2D, self.tex)

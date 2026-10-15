@@ -61,6 +61,13 @@ class PreviewWorker(object):
     # ---- worker thread
 
     def _run(self):
+        # Attach the process-wide CUDA context on this worker thread
+        try:
+            from cuda_context import ensure_current
+            ensure_current()
+        except Exception as e:
+            # print("Preview worker CUDA attach failed: %s" % e)
+            pass
         while True:
             with self._cond:
                 while self._target is None or self._done_gen == self._gen:
