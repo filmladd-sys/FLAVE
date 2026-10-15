@@ -1399,7 +1399,6 @@ class SequenceTimeline(QMainWindow):
             self.current_frame = frame
             self.ruler.viewport().update()
             self.playhead_overlay.update()
-            self._save_view_state()
         self._update_status()
 
     def refresh(self):
@@ -1566,6 +1565,7 @@ class SequenceTimeline(QMainWindow):
             self._stop_play()
 
     def _stop_play(self):
+        was = self._playing or self._play_filling
         self._playing = False
         self._play_filling = False
         self._play_timer.stop()
@@ -1574,6 +1574,8 @@ class SequenceTimeline(QMainWindow):
             set_play_priority(False)
         except Exception:
             pass
+        if was:
+            self._save_view_state()
 
     def open_player(self):
         # Player menu: open this timeline's Sequence Player, or raise it
