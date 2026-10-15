@@ -141,8 +141,7 @@ class PreviewReader(object):
             except Exception as e:
                 print(f"Play decode batch failed: {e}")
             t_dec = (time.perf_counter() - t1) * 1000.0
-            print(f"PLAY: batch n={len(items)} decoded={len(decoded)} "
-                  f"sql={t_sql:.1f} decode={t_dec:.1f}")
+            self.player._last_batch = (len(items), len(decoded), t_sql, t_dec)
             got = {frame for frame, _buf in decoded}
             with self.lock:
                 for frame, buf in decoded:
@@ -225,6 +224,8 @@ class SequencePlayer(QWindow):
         self._waiting = None             # frame we asked the worker for
         self._retry_armed = False
         self._reader = PreviewReader(self)
+        self._last_batch = (0, 0, 0.0, 0.0)  # n, decoded, sql ms, decode ms
+        self._behind_at = 0.0                # last once-a-second behind check
         self._nvdec = None               # _NvJpegDecoder, playback only
         self._play_bufs = []             # device RGB buffers for decoded play frames
         self._play_free = []             # indexes into _play_bufs not in the ring
@@ -679,13 +680,15 @@ class SequencePlayer(QWindow):
             except Exception as e:
                 print(f"Sequence Player device show failed: {e}")
                 self._present(dark, self.shown_frame is not None)
+            self._check_behind(frame)
             return
-        if item is not None and item[0] == "cpu":
-            print(f"PLAY: frame={frame} cpu fallback")
+        if self._reader.running():
+            # Play: the reader owns the JPEGs. A miss holds the last picture.
+            # The database is not touched here.
+            self._check_behind(frame)
+            return
         jpeg = item[1] if item is not None else None
         if jpeg is None:
-            if self._reader.running():
-                print(f"PLAY: frame={frame} miss")
             try:
                 from sequence_preview import FrameRetrieve
                 jpeg = FrameRetrieve(self.timeline._project_db(),
@@ -711,6 +714,18 @@ class SequencePlayer(QWindow):
                 print(f"Sequence Player preview ask failed: {e}")
         self._present(dark, self.shown_frame is not None)
         self._arm_retry()
+
+    def _check_behind(self, frame):
+        # Once a second: how far the picture is behind the clock
+        now = time.perf_counter()
+        if now - self._behind_at < 1.0:
+            return
+        self._behind_at = now
+        shown = self.shown_frame
+        behind = (frame - shown) if shown is not None else frame
+        n, decoded, sql, dec = self._last_batch
+        print(f"PLAY: behind clock={frame} shown={shown} behind={behind} "
+              f"batch n={n} decoded={decoded} sql={sql:.1f} decode={dec:.1f}")
 
     def _set_wait(self, frame):
         if self._waiting is None:
