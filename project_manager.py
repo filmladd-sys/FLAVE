@@ -108,6 +108,22 @@ def _ensure_audiotmp_for(project_db):
         pass
 
 
+def _ensure_keyframe_tables_for(project_db):
+    # keyframe_clips + keyframes on the project DB (open / create / autoload)
+    if not project_db:
+        return
+    try:
+        from keyframe import ensure_keyframe_tables
+        conn = sqlite3.connect(project_db)
+        try:
+            ensure_keyframe_tables(conn)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 class ProjectManager(QMainWindow):
     TRACKED_WINDOWS = [
         ("footage", "footage_window"),
@@ -210,6 +226,7 @@ class ProjectManager(QMainWindow):
             self.status_label.setText(f"Project: {path}")
             self.status_bar.showMessage("Project loaded")
             _ensure_audiotmp_for(path)
+            _ensure_keyframe_tables_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -229,6 +246,7 @@ class ProjectManager(QMainWindow):
             _set_global_setting("last_project_folder", folder)
         _set_global_setting("current_project", db_path)
         _ensure_audiotmp_for(db_path)
+        _ensure_keyframe_tables_for(db_path)
         self._update_windows_menu()
 
     def _open_project(self):
@@ -245,6 +263,7 @@ class ProjectManager(QMainWindow):
                 _set_global_setting("last_project_folder", folder)
             _set_global_setting("current_project", path)
             _ensure_audiotmp_for(path)
+            _ensure_keyframe_tables_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

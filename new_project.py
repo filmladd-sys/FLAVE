@@ -181,6 +181,12 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
+        try:
+            from keyframe import ensure_keyframe_tables
+            ensure_keyframe_tables(conn)
+        except Exception:
+            pass
+
         conn.commit()
         conn.close()
 
