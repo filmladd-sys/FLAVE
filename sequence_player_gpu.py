@@ -541,6 +541,38 @@ BLEND:
 DONE:
     ret;
 }
+.visible .entry expand_rgba(
+    .param .u64 src, .param .u64 dst, .param .u32 count)
+{
+    .reg .pred p;
+    .reg .u32 idx, n, r, g, b;
+    .reg .u64 srcv, dstv, saddr, daddr;
+    mov.u32 idx, %tid.x;
+    mov.u32 n, %ctaid.x;
+    mul.lo.u32 n, n, 256;
+    add.u32 idx, idx, n;
+    ld.param.u32 n, [count];
+    setp.ge.u32 p, idx, n;
+    @p bra EXPAND_DONE;
+    ld.param.u64 srcv, [src];
+    mul.lo.u32 n, idx, 3;
+    cvt.u64.u32 saddr, n;
+    add.u64 saddr, srcv, saddr;
+    ld.global.u8 r, [saddr];
+    ld.global.u8 g, [saddr+1];
+    ld.global.u8 b, [saddr+2];
+    ld.param.u64 dstv, [dst];
+    mul.lo.u32 n, idx, 4;
+    cvt.u64.u32 daddr, n;
+    add.u64 daddr, dstv, daddr;
+    st.global.u8 [daddr], r;
+    st.global.u8 [daddr+1], g;
+    st.global.u8 [daddr+2], b;
+    mov.u32 r, 255;
+    st.global.u8 [daddr+3], r;
+EXPAND_DONE:
+    ret;
+}
 """
 
 

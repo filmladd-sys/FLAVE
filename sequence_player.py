@@ -196,7 +196,10 @@ class SequencePlayer(QWindow):
         self.stream = ctypes.c_void_p()
         self.cuda_ctx = ctypes.c_void_p()
         self.kernel = ctypes.c_void_p()
+        self.expand = ctypes.c_void_p()
         self.dst = ctypes.c_void_p()     # sequence-size RGB composite buffer
+        self.rgba = ctypes.c_void_p()    # sequence-size RGBA for the texture
+        self.img_res = ctypes.c_void_p() # CUDA registration of the RGBA texture
         self.tex = ctypes.c_uint(0)
         self.pbo = ctypes.c_uint(0)      # GL unpack buffer the RGB dst is copied into
         self.res = ctypes.c_void_p()     # CUDA registration of the PBO
@@ -308,9 +311,13 @@ class SequencePlayer(QWindow):
         gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, self.seq_w, self.seq_h, 0,
-                        GL_RGB, GL_UNSIGNED_BYTE, None)
-        # RGB cannot be registered as a CUDA image: present through a PBO
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, self.seq_w, self.seq_h, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, None)
+        # RGBA so CUDA can register the texture. RGB cannot be a CUDA image.
+        _check(cudart.cudaGraphicsGLRegisterImage(ctypes.byref(self.img_res),
+                                                   self.tex.value, GL_TEXTURE_2D, 2),
+               "register image")
+        # PBO kept for the old path; present no longer uses it
         self._glb = self._gl_buffer_funcs(gl)
         gen, bind, data = self._glb[0], self._glb[1], self._glb[2]
         gen(1, ctypes.byref(self.pbo))
@@ -320,12 +327,16 @@ class SequencePlayer(QWindow):
         _check(cudart.cudaGraphicsGLRegisterBuffer(ctypes.byref(self.res),
                                                    self.pbo.value, 2), "register pbo")
         _check(cudart.cudaMalloc(ctypes.byref(self.dst), self.row * self.seq_h), "dst malloc")
+        _check(cudart.cudaMalloc(ctypes.byref(self.rgba), self.seq_w * self.seq_h * 4),
+               "rgba malloc")
         _check(cudart.cudaMalloc(ctypes.byref(self.gen_dst), self.row * self.seq_h),
                "gen dst malloc")
         module = ctypes.c_void_p()
         _check(nvcuda.cuModuleLoadData(ctypes.byref(module), PTX), "module")
         _check(nvcuda.cuModuleGetFunction(ctypes.byref(self.kernel), module,
                                           b"blend_layer"), "kernel")
+        _check(nvcuda.cuModuleGetFunction(ctypes.byref(self.expand), module,
+                                          b"expand_rgba"), "expand")
         self.ready = True
 
     def _gl_buffer_funcs(self, gl):
@@ -376,12 +387,16 @@ class SequencePlayer(QWindow):
                     cudart.cudaFree(buf)
             self._play_bufs = []
             self._play_free = []
+            if self.img_res.value:
+                cudart.cudaGraphicsUnregisterResource(self.img_res)
             if self.res.value:
                 cudart.cudaGraphicsUnregisterResource(self.res)
             if self.pbo.value and self._glb is not None:
                 self._glb[3](1, ctypes.byref(self.pbo))
             if self.dst.value:
                 cudart.cudaFree(self.dst)
+            if self.rgba.value:
+                cudart.cudaFree(self.rgba)
             if self.gen_dst.value:
                 cudart.cudaFree(self.gen_dst)
             for b in self.gen_bufs:
@@ -587,30 +602,43 @@ class SequencePlayer(QWindow):
                 except ValueError:
                     pass
 
+    def _expand(self, src):
+        # RGB device buffer to the RGBA present buffer. Alpha is 255.
+        nvcuda = _libs()[1]
+        sp = ctypes.c_uint64(int(src.value))
+        dp = ctypes.c_uint64(int(self.rgba.value))
+        count = ctypes.c_uint32(self.seq_w * self.seq_h)
+        ptrs = [sp, dp, count]
+        args = (ctypes.c_void_p * 3)(
+            *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
+        grid = (self.seq_w * self.seq_h + 255) // 256
+        _check(nvcuda.cuLaunchKernel(self.expand, grid, 1, 1, 256, 1, 1, 0,
+                                     self.stream, args, None), "expand")
+        self._sync()
+
+    def _copy_to_texture(self):
+        # One copy: RGBA device buffer into the registered texture
+        cudart = _libs()[0]
+        res_arr = (ctypes.c_void_p * 1)(self.img_res)
+        _check(cudart.cudaGraphicsMapResources(1, res_arr, None), "map image")
+        try:
+            arr = ctypes.c_void_p()
+            _check(cudart.cudaGraphicsSubResourceGetMappedArray(
+                ctypes.byref(arr), self.img_res, 0, 0), "mapped array")
+            _check(cudart.cudaMemcpy2DToArray(
+                arr, 0, 0, self.rgba, self.seq_w * 4,
+                self.seq_w * 4, self.seq_h, 3), "to texture")
+        finally:
+            _check(cudart.cudaGraphicsUnmapResources(1, res_arr, None), "unmap image")
+
     def _show_device(self, ptr, dark):
-        # Device RGB into the PBO, PBO into the texture, then the quad
-        cudart, nvcuda, gl = _libs()
+        # Decode buffer is RGB. Expand, copy into the texture, draw.
+        _cudart, nvcuda, _gl = _libs()
         self.ctx.makeCurrent(self)
         with self._play_lock:
             nvcuda.cuCtxSetCurrent(self.cuda_ctx)
-            res_arr = (ctypes.c_void_p * 1)(self.res)
-            _check(cudart.cudaGraphicsMapResources(1, res_arr, None), "map")
-            try:
-                mapped = ctypes.c_void_p()
-                size = ctypes.c_size_t(0)
-                _check(cudart.cudaGraphicsResourceGetMappedPointer(
-                    ctypes.byref(mapped), ctypes.byref(size), self.res), "pbo pointer")
-                _check(cudart.cudaMemcpy(mapped, ptr, self.row * self.seq_h, 3),
-                       "play to pbo")
-            finally:
-                _check(cudart.cudaGraphicsUnmapResources(1, res_arr, None), "unmap")
-        bind = self._glb[1]
-        bind(GL_PIXEL_UNPACK_BUFFER, self.pbo.value)
-        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        gl.glBindTexture(GL_TEXTURE_2D, self.tex)
-        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.seq_w, self.seq_h,
-                           GL_RGB, GL_UNSIGNED_BYTE, None)
-        bind(GL_PIXEL_UNPACK_BUFFER, 0)
+            self._expand(ptr)
+            self._copy_to_texture()
         self._present(dark, True)
 
     def request_frame(self, force=True):
@@ -699,12 +727,13 @@ class SequencePlayer(QWindow):
             img = img.scaled(self.seq_w, self.seq_h)
         self.ctx.makeCurrent(self)
         gl = _libs()[2]
+        img = img.convertToFormat(QImage.Format_RGBA8888)
         raw = bytes(img.constBits())[: img.sizeInBytes()]
         buf = ctypes.create_string_buffer(raw)
         gl.glBindTexture(GL_TEXTURE_2D, self.tex)
         gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.seq_w, self.seq_h,
-                           GL_RGB, GL_UNSIGNED_BYTE, buf)
+                           GL_RGBA, GL_UNSIGNED_BYTE, buf)
         self._present(dark, True)
 
     def _build_dst(self, frame, dark, target=None, snapshot=None, use_gl=True,
@@ -769,26 +798,8 @@ class SequencePlayer(QWindow):
     def _composite_locked(self, frame, dark):
         self._tm = _new_tm()
         self._build_dst(frame, dark)
-        cudart = _libs()[0]
-        gl = _libs()[2]
-        res_arr = (ctypes.c_void_p * 1)(self.res)
-        _check(cudart.cudaGraphicsMapResources(1, res_arr, None), "map")
-        try:
-            ptr = ctypes.c_void_p()
-            size = ctypes.c_size_t(0)
-            _check(cudart.cudaGraphicsResourceGetMappedPointer(
-                ctypes.byref(ptr), ctypes.byref(size), self.res), "pbo pointer")
-            _check(cudart.cudaMemcpy(ptr, self.dst, self.row * self.seq_h, 3), "to pbo")
-        finally:
-            _check(cudart.cudaGraphicsUnmapResources(1, res_arr, None), "unmap")
-        # PBO (RGB, tightly packed rows) into the texture, on the GPU
-        bind = self._glb[1]
-        bind(GL_PIXEL_UNPACK_BUFFER, self.pbo.value)
-        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        gl.glBindTexture(GL_TEXTURE_2D, self.tex)
-        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.seq_w, self.seq_h,
-                           GL_RGB, GL_UNSIGNED_BYTE, None)
-        bind(GL_PIXEL_UNPACK_BUFFER, 0)
+        self._expand(self.dst)
+        self._copy_to_texture()
 
     def _present(self, dark, has_frame):
         if self.ctx is None:
