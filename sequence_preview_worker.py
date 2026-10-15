@@ -196,14 +196,14 @@ class PreviewWorker(object):
                     ft = ftms[k] if k < len(ftms) else {}
                     seeked = ft.get("seeked", 1)
                     # Timing: one line per frame built
-                    print("WORKER: frame=%d batch=%d seek=%s decode=%s jpeg=%s save=%s "
-                          "commit=%s total=%s continued=%d" % (
-                              f, gpu_n, ms(ft.get("seek", 0.0) if seeked else 0.0),
-                              ms(ft.get("decode", 0.0)), ms(ft.get("jpeg", 0.0)),
-                              ms(t_e - t_s), ms(commit),
-                              ms((t_e - ft["t0"]) if "t0" in ft
-                                 else ft.get("share", 0.0) + (t_e - t_s) + commit),
-                              0 if seeked else 1))
+                    # print("WORKER: frame=%d batch=%d seek=%s decode=%s jpeg=%s save=%s "
+                    #       "commit=%s total=%s continued=%d" % (
+                    #           f, gpu_n, ms(ft.get("seek", 0.0) if seeked else 0.0),
+                    #           ms(ft.get("decode", 0.0)), ms(ft.get("jpeg", 0.0)),
+                    #           ms(t_e - t_s), ms(commit),
+                    #           ms((t_e - ft["t0"]) if "t0" in ft
+                    #              else ft.get("share", 0.0) + (t_e - t_s) + commit),
+                    #           0 if seeked else 1))
                 # The playhead frame must be readable before the rest of the
                 # batch, so the player can show it without waiting
                 if center in chunk and batch.pending:
