@@ -988,7 +988,9 @@ class SequencePlayer(QWindow):
     # ---- preview mix audio (sequence_player_audio.py)
 
     def start_preview_audio(self, frame):
-        # Build or reuse the mix WAV, seek to frame, play. Never raises.
+        # Build or reuse the mix WAV, seek to frame, play via QAudioSink.
+        # Never raises. Re-bind CUDA on this thread after audio start so the
+        # next play_fill/present still sees the shared context.
         try:
             from sequence_preview_audio import ensure_preview_audio_wav
             from sequence_player_audio import PreviewAudioPlayer
@@ -1003,7 +1005,12 @@ class SequencePlayer(QWindow):
                 self._preview_audio = PreviewAudioPlayer()
             if not self._preview_audio.prepare(wav, fps):
                 return
-            self._preview_audio.play_at_frame(int(frame))
+            self._preview_audio.start(int(frame))
+            try:
+                from cuda_context import ensure_current
+                ensure_current()
+            except Exception:
+                pass
         except Exception as e:
             # print("start_preview_audio failed: %s" % e)
             pass
@@ -1018,15 +1025,18 @@ class SequencePlayer(QWindow):
     def seek_preview_audio(self, frame):
         try:
             if self._preview_audio is not None:
-                self._preview_audio.seek_frame(int(frame))
+                self._preview_audio.seek(int(frame))
         except Exception:
             pass
 
     def preview_audio_position_ms(self):
-        # QMediaPlayer position in ms, or None when audio is unavailable.
+        # QAudioSink clock: start_offset_ms + processedUSecs()/1000.
         try:
             if self._preview_audio is None:
                 return None
+            if hasattr(self._preview_audio, "has_audio"):
+                if not self._preview_audio.has_audio():
+                    return None
             return self._preview_audio.position_ms()
         except Exception:
             return None
