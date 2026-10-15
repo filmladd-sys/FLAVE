@@ -68,13 +68,16 @@ class ClipDelegate(QStyledItemDelegate):
         painter.save()
         painter.setClipRect(rect)
         name_item = tl.table.item(index.row(), 0)
+        track_id = name_item.data(Qt.UserRole) if name_item is not None else None
+        track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
         bg = name_item.data(Qt.UserRole + 3) if name_item is not None else ""
+        # BUILD 52 stored #403050 on keyframe tracks; treat like caption/video default (none)
+        if bg and track_type == "keyframe" and bg.lower() == "#403050":
+            bg = ""
         if bg:
             color = QColor(bg)
             if color.isValid():
                 painter.fillRect(rect, color)
-        track_id = name_item.data(Qt.UserRole) if name_item is not None else None
-        track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
         ppf = tl.pixels_per_frame
         for clip in tl.clips_by_track.get(track_id, []):
             (clip_id, footage_id, start_frame, length_frames, filename,
@@ -565,7 +568,12 @@ class SequenceTimeline(QMainWindow):
             return
         if row is None:
             return
-        dialog = TrackDisplayDialog(self, row[1], row[0])
+        dlg_bg = row[1] or ""
+        if dlg_bg.lower() == "#403050":
+            ttype = self._track_type(track_id)
+            if ttype == "keyframe":
+                dlg_bg = ""
+        dialog = TrackDisplayDialog(self, dlg_bg, row[0])
         if dialog.exec() != QDialog.Accepted:
             return
         self._save_track_display(track_id, dialog.height_px(), dialog.color_value())

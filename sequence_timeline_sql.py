@@ -412,7 +412,11 @@ def refresh(self):
             name_item.setData(Qt.UserRole, track_id)
             name_item.setData(Qt.UserRole + 1, int(enabled))
             name_item.setData(Qt.UserRole + 2, int(solo))
-            name_item.setData(Qt.UserRole + 3, bg_color or "")
+            display_bg = bg_color or ""
+            if ((track_type or "").lower() == "keyframe"
+                    and display_bg.lower() == "#403050"):
+                display_bg = ""
+            name_item.setData(Qt.UserRole + 3, display_bg)
             name_item.setData(Qt.UserRole + 4, track_type or "")
             name_item.setFlags(read_only | Qt.ItemIsEditable)
             type_text = ((track_type or "") + (" [S]" if solo else "")
