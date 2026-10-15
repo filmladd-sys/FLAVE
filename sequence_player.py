@@ -283,6 +283,20 @@ class SequencePlayer(QWindow):
             self._on_close()
         return super().event(event)
 
+    def keyPressEvent(self, event):
+        # F11 toggles fullscreen. Escape leaves it. Title bar goes away.
+        if event.key() == Qt.Key_F11:
+            if self.visibility() == QWindow.FullScreen:
+                self.showNormal()
+            else:
+                self.showFullScreen()
+            self.requestActivate()
+            return
+        if event.key() == Qt.Key_Escape and self.visibility() == QWindow.FullScreen:
+            self.showNormal()
+            return
+        super().keyPressEvent(event)
+
     def _on_close(self):
         if self.closed:
             return
