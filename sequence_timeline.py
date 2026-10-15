@@ -1393,13 +1393,14 @@ class SequenceTimeline(QMainWindow):
             self._update_status()
             self._save_view_state()
 
-    def set_current_frame(self, frame):
+    def set_current_frame(self, frame, silent=False):
         frame = max(0, min(self.total_frames() - 1, int(frame)))
         if frame != self.current_frame:
             self.current_frame = frame
             self.ruler.viewport().update()
             self.playhead_overlay.update()
-        self._update_status()
+        if not silent:
+            self._update_status()
 
     def refresh(self):
         # Table and clips reload (sequence_timeline_sql.py), then the player
@@ -1532,39 +1533,51 @@ class SequenceTimeline(QMainWindow):
             pass
         self._play_start_frame = int(self._play_from)
         self._play_start_time = time.perf_counter()
+        self._play_cursor = int(self._play_from)
         self._play_shown_count = 0
         self._play_last_shown = None
         self._playing = True
         self._play_timer.start()
-        player = getattr(self, "_player", None)
-        if player is not None and not player.closed:
-            player.start_read_ahead(self._play_start_frame)
         self._play_tick()
 
+    def _play_batch_n(self):
+        try:
+            n = int(_get_global_setting("previewGpuBatchFrames", "8") or 8)
+        except Exception:
+            n = 8
+        return max(1, min(30, n))
+
     def _play_tick(self):
-        # Frame is start + elapsed * fps. A late wake skips ahead, so speed
-        # stays true. Picture comes from the preview file.
+        # One loop: grab N, decode N, expand N, show N, then move the clock.
+        # The playhead moves silent, so no scrub or preview events fire.
         import time
         if not self._playing:
             return
+        player = getattr(self, "_player", None)
+        if player is None or player.closed:
+            self._stop_play()
+            return
         elapsed = time.perf_counter() - self._play_start_time
-        frame = self._play_start_frame + int(elapsed * self.fps)
+        clock = self._play_start_frame + int(elapsed * self.fps)
+        start = self._play_cursor
+        if clock - start > self._play_batch_n():
+            start = clock
         last = self.total_frames() - 1
-        done = frame >= last
-        if done:
-            frame = last
+        if start > last:
+            self._stop_play()
+            return
+        shown = player.play_batch(start, self._play_batch_n())
+        if shown < start:
+            shown = start
+        self._play_cursor = shown + 1
+        self.set_current_frame(min(shown, last), silent=True)
         visible = self.visible_frames()
-        if not (self.view_start_frame <= frame < self.view_start_frame + visible):
-            self.view_start_frame = max(0, frame - visible // 4)
+        if not (self.view_start_frame <= shown < self.view_start_frame + visible):
+            self.view_start_frame = max(0, shown - visible // 4)
             self._clamp_view()
             self.table.viewport().update()
-        self.set_current_frame(frame)
-        player = getattr(self, "_player", None)
-        shown = player.shown_frame if player is not None and not player.closed else None
-        if shown != self._play_last_shown:
-            self._play_shown_count += 1
-            self._play_last_shown = shown
-        if done:
+        self._play_shown_count += max(0, shown - start + 1)
+        if shown >= last:
             self._stop_play()
 
     def _stop_play(self):

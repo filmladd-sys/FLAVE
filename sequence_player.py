@@ -224,8 +224,7 @@ class SequencePlayer(QWindow):
         self._waiting = None             # frame we asked the worker for
         self._retry_armed = False
         self._reader = PreviewReader(self)
-        self._last_batch = (0, 0, 0.0, 0.0)  # n, decoded, sql ms, decode ms
-        self._behind_at = 0.0                # last once-a-second behind check
+        self._play_conn = None
         self._nvdec = None               # _NvJpegDecoder, playback only
         self._play_bufs = []             # device RGB buffers for decoded play frames
         self._play_free = []             # indexes into _play_bufs not in the ring
@@ -529,6 +528,7 @@ class SequencePlayer(QWindow):
     def stop_read_ahead(self):
         self._reader.stop_reader()
         self._release_play_bufs()
+        self.close_play_conn()
 
     def _ensure_decoder(self):
         if self._nvdec is not None:
@@ -591,7 +591,57 @@ class SequencePlayer(QWindow):
                 return []
         return [(frame, buf) for (frame, _jpeg), buf in zip(kept, bufs)]
 
-    def reclaim_play(self, before):
+    def play_batch(self, start, n):
+        # One play step. Grab N JPEGs, decode N, expand N, show N.
+        # Returns the last frame shown, or start - 1 if nothing was ready.
+        from sequence_preview import preview_db_path
+        path = preview_db_path(self.timeline._project_db(), self.sequence_id)
+        if not os.path.isfile(path):
+            return start - 1
+        if self._play_conn is None:
+            self._play_conn = sqlite3.connect(path)
+            self._play_conn.execute("PRAGMA query_only = ON")
+        t0 = time.perf_counter()
+        rows = self._play_conn.execute(
+            "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
+            "AND dirty = 0 AND jpeg IS NOT NULL ORDER BY frame",
+            (int(start), int(start) + int(n) - 1)).fetchall()
+        t_sql = (time.perf_counter() - t0) * 1000.0
+        items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
+        t1 = time.perf_counter()
+        decoded = self.decode_play_batch(items)
+        t_dec = (time.perf_counter() - t1) * 1000.0
+        dark = _dark_mode()
+        last = int(start) - 1
+        exp = copy = present = 0.0
+        for frame, buf in decoded:
+            a = time.perf_counter()
+            self._expand(buf)
+            b = time.perf_counter()
+            self._copy_to_texture()
+            c = time.perf_counter()
+            self._present(dark, True)
+            d = time.perf_counter()
+            exp += (b - a) * 1000.0
+            copy += (c - b) * 1000.0
+            present += (d - c) * 1000.0
+            last = frame
+            self.shown_frame = frame
+            with self._play_lock:
+                try:
+                    self._play_free.append(self._play_bufs.index(buf))
+                except ValueError:
+                    pass
+        total = (time.perf_counter() - t0) * 1000.0
+        print(f"PLAY: n={len(items)} decoded={len(decoded)} sql={t_sql:.1f} "
+              f"decode={t_dec:.1f} expand={exp:.1f} copy={copy:.1f} "
+              f"present={present:.1f} total={total:.1f} last={last}")
+        return last
+
+    def close_play_conn(self):
+        if self._play_conn is not None:
+            self._play_conn.close()
+            self._play_conn = None
         # Return device buffers for frames the playhead has passed
         with self._reader.lock:
             old = [f for f in self._reader.ring if f < before]
@@ -671,7 +721,6 @@ class SequencePlayer(QWindow):
         if self._reader.running():
             self._reader.note(frame)
             item = self._reader.get(frame)
-            self.reclaim_play(frame - 2)
         if item is not None and item[0] == "gpu":
             self._clear_wait()
             try:
