@@ -184,5 +184,12 @@ class NewProjectWindow(QMainWindow):
         conn.commit()
         conn.close()
 
+        # Sibling mono PCM cache next to the project file
+        try:
+            from peaks import ensure_audiotmp_db
+            ensure_audiotmp_db(db_path)
+        except Exception:
+            pass
+
     def closeEvent(self, event):
         event.accept()

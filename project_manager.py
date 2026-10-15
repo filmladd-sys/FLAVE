@@ -97,6 +97,17 @@ def _get_global_setting(key, default=None):
     return row[0] if row else default
 
 
+def _ensure_audiotmp_for(project_db):
+    # Create sibling .audiotmp.db and AudioTmp table if missing
+    if not project_db:
+        return
+    try:
+        from peaks import ensure_audiotmp_db
+        ensure_audiotmp_db(project_db)
+    except Exception:
+        pass
+
+
 class ProjectManager(QMainWindow):
     TRACKED_WINDOWS = [
         ("footage", "footage_window"),
@@ -198,6 +209,7 @@ class ProjectManager(QMainWindow):
             self.current_project = path
             self.status_label.setText(f"Project: {path}")
             self.status_bar.showMessage("Project loaded")
+            _ensure_audiotmp_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -216,6 +228,7 @@ class ProjectManager(QMainWindow):
         if folder:
             _set_global_setting("last_project_folder", folder)
         _set_global_setting("current_project", db_path)
+        _ensure_audiotmp_for(db_path)
         self._update_windows_menu()
 
     def _open_project(self):
@@ -231,6 +244,7 @@ class ProjectManager(QMainWindow):
             if folder:
                 _set_global_setting("last_project_folder", folder)
             _set_global_setting("current_project", path)
+            _ensure_audiotmp_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

@@ -2,15 +2,14 @@
 # Stored audio waveform peaks for footage. ASCII only.
 # data is packed signed 16-bit little-endian (min, max) pairs, one pair per
 # bucket, mono sum, PEAKS_PER_SECOND buckets per second.
-# Also writes a mono 48 kHz 16-bit WAV sidecar (original path + ".wav")
-# in the same FFmpeg pass, for later mix.
+# Also stores mono 48 kHz 16-bit PCM in a sibling .audiotmp.db (AudioTmp
+# table) in the same FFmpeg pass, for later mix. No .wav sidecars.
 
 import array
 import os
 import sqlite3
 import subprocess
 import sys
-import wave
 
 PEAKS_PER_SECOND = 100
 PEAKS_SAMPLE_RATE = 48000
@@ -28,10 +27,97 @@ PEAKS_CREATE_SQL = """
     )
 """
 
+AUDIO_TMP_CREATE_SQL = """
+    CREATE TABLE IF NOT EXISTS AudioTmp (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        originalfilename TEXT NOT NULL,
+        audioblob BLOB NOT NULL
+    )
+"""
+
 
 def ensure_peaks_table(conn):
     conn.execute(PEAKS_CREATE_SQL)
     conn.commit()
+
+
+def audiotmp_db_path(project_db):
+    # LaddTest.db -> LaddTest.audiotmp.db in the same folder
+    folder = os.path.dirname(os.path.abspath(project_db))
+    stem = os.path.splitext(os.path.basename(project_db))[0]
+    return os.path.join(folder, stem + ".audiotmp.db")
+
+
+def ensure_audiotmp_db(project_db):
+    # Create the sibling .audiotmp.db and AudioTmp table if missing.
+    # Returns the path, or None if project_db is empty.
+    if not project_db:
+        return None
+    path = audiotmp_db_path(project_db)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(AUDIO_TMP_CREATE_SQL)
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def store_audiotmp(project_db, original_filename, pcm_bytes):
+    # One row per original basename; replace any prior row for that name.
+    # Never raises; returns True if stored.
+    try:
+        if not project_db or not original_filename or not pcm_bytes:
+            return False
+        path = ensure_audiotmp_db(project_db)
+        if path is None:
+            return False
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                "DELETE FROM AudioTmp WHERE originalfilename = ?",
+                (original_filename,)
+            )
+            conn.execute(
+                "INSERT INTO AudioTmp (originalfilename, audioblob) VALUES (?, ?)",
+                (original_filename, sqlite3.Binary(pcm_bytes))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def load_audiotmp(project_db, original_filename):
+    # Raw mono 48 kHz s16le PCM bytes for basename, or None
+    try:
+        if not project_db or not original_filename:
+            return None
+        path = audiotmp_db_path(project_db)
+        if not os.path.isfile(path):
+            return None
+        conn = sqlite3.connect(path)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='AudioTmp'"
+            )
+            if cur.fetchone() is None:
+                return None
+            cur.execute(
+                "SELECT audioblob FROM AudioTmp WHERE originalfilename = ?",
+                (original_filename,)
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not row or not row[0]:
+        return None
+    return bytes(row[0])
 
 
 def wants_peaks(path):
@@ -66,9 +152,8 @@ def _bucket_peaks(samples, out):
 
 
 def compute_peaks(path):
-    # Return (data bytes, duration_seconds), or None if ffmpeg fails or the
-    # file has no audio stream. Also writes mono 48 kHz WAV sidecar.
-    wav_path = path + ".wav"
+    # Return (peaks bytes, duration_seconds, pcm_bytes), or None if ffmpeg
+    # fails or the file has no audio stream. PCM is mono 48 kHz s16le.
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1",
            "-ar", str(PEAKS_SAMPLE_RATE), "-f", "s16le", "-"]
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # no console window
@@ -78,15 +163,11 @@ def compute_peaks(path):
     except Exception:
         return None
     out = array.array("h")
+    pcm = bytearray()
     total = 0
     leftover = b""
     chunk_bytes = SAMPLES_PER_BUCKET * 2 * 1000   # 1000 buckets per read
-    wav = None
     try:
-        wav = wave.open(wav_path, "wb")
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(PEAKS_SAMPLE_RATE)
         while True:
             buf = proc.stdout.read(chunk_bytes)
             if not buf:
@@ -95,8 +176,8 @@ def compute_peaks(path):
             usable = (len(buf) // (SAMPLES_PER_BUCKET * 2)) * SAMPLES_PER_BUCKET * 2
             leftover = buf[usable:]
             if usable:
-                # Write original little-endian bytes to WAV
-                wav.writeframes(buf[:usable])
+                # Keep original little-endian PCM for the audiotmp blob
+                pcm.extend(buf[:usable])
                 s = array.array("h")
                 s.frombytes(buf[:usable])
                 if sys.byteorder != "little":
@@ -105,7 +186,7 @@ def compute_peaks(path):
                 _bucket_peaks(s, out)
         if len(leftover) >= 2:
             raw = leftover[:len(leftover) // 2 * 2]
-            wav.writeframes(raw)
+            pcm.extend(raw)
             s = array.array("h")
             s.frombytes(raw)
             if sys.byteorder != "little":
@@ -118,45 +199,24 @@ def compute_peaks(path):
             proc.kill()
         except Exception:
             pass
-        if wav is not None:
-            try:
-                wav.close()
-            except Exception:
-                pass
-        try:
-            if os.path.isfile(wav_path):
-                os.remove(wav_path)
-        except Exception:
-            pass
         return None
-    finally:
-        if wav is not None:
-            try:
-                wav.close()
-            except Exception:
-                pass
     if proc.returncode != 0 or total == 0:
-        try:
-            if os.path.isfile(wav_path):
-                os.remove(wav_path)
-        except Exception:
-            pass
         return None
     if sys.byteorder != "little":
         out.byteswap()
-    return out.tobytes(), total / float(PEAKS_SAMPLE_RATE)
+    return out.tobytes(), total / float(PEAKS_SAMPLE_RATE), bytes(pcm)
 
 
 def store_peaks_for_footage(project_db, footage_id, path):
     # Compute and INSERT OR REPLACE peaks. Never raises; returns True if stored.
-    # WAV sidecar is written as a side effect of compute_peaks.
+    # Mono PCM is stored in the sibling .audiotmp.db as a side effect.
     try:
         if not wants_peaks(path):
             return False
         result = compute_peaks(path)
         if result is None:
             return False
-        data, duration = result
+        data, duration, pcm = result
         conn = sqlite3.connect(project_db)
         try:
             ensure_peaks_table(conn)
@@ -168,6 +228,7 @@ def store_peaks_for_footage(project_db, footage_id, path):
             conn.commit()
         finally:
             conn.close()
+        store_audiotmp(project_db, os.path.basename(path), pcm)
         return True
     except Exception:
         return False

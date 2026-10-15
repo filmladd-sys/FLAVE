@@ -28,8 +28,16 @@ def import_footage(project_db, media_path):
     conn.commit()
     conn.close()
 
+    # Ensure sibling audio cache DB exists before peaks/PCM store
+    try:
+        from peaks import ensure_audiotmp_db
+        ensure_audiotmp_db(project_db)
+    except Exception:
+        pass
+
     # Waveform peaks for audio and video files; any failure (no ffmpeg, no
-    # audio stream) just skips peaks and never fails the import
+    # audio stream) just skips peaks and never fails the import.
+    # store_peaks_for_footage also writes mono PCM into .audiotmp.db.
     try:
         from peaks import store_peaks_for_footage
         store_peaks_for_footage(project_db, new_id, media_path)
