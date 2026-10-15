@@ -323,7 +323,6 @@ class SequencePlayer(QWindow):
 
     def _decoder(self, path):
         dec = self.decoders.get(path)
-        self._tm["dec"] = "reused" if dec is not None else "created"
         if dec is None:
             import PyNvVideoCodec as nvc
             dec = nvc.SimpleDecoder(
@@ -339,9 +338,7 @@ class SequencePlayer(QWindow):
     def _image(self, path):
         # Still uploaded once to device memory as RGBA8888
         if path in self.images:
-            self._tm["dec"] = "image cached"
             return self.images[path]
-        self._tm["dec"] = "image uploaded"
         cudart = _libs()[0]
         item = None
         img = QImage(path)
@@ -477,21 +474,13 @@ class SequencePlayer(QWindow):
         self._target = target
         if target is self.dst:
             self._dst_frame = None
-        tm = self._tm
-        t0 = time.perf_counter()
         _check(cudart.cudaMemsetAsync(target, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
-        tm["clear"] += time.perf_counter() - t0
         for kind, path, src_frame in self._layers(frame, snapshot):
             if kind == "image":
-                t0 = time.perf_counter()
                 item = self._image(path)
-                tm["copy"] += time.perf_counter() - t0
                 if item is not None:
-                    tm["size"] = "%dx%d" % (item[1], item[2])
-                    t0 = time.perf_counter()
                     self._blend(item[0].value, item[1], item[2], item[3], 4)
-                    tm["blend"] += time.perf_counter() - t0
                 continue
             if not os.path.isfile(path):
                 continue
@@ -500,29 +489,19 @@ class SequencePlayer(QWindow):
                 f = prefetched[(path, src_frame)]
                 shape = [int(v) for v in f.shape]
                 sh, sw = shape[0], shape[1]
-                tm["size"] = "%dx%d" % (sw, sh)
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
-                t0 = time.perf_counter()
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync)
-                tm["blend"] += time.perf_counter() - t0
                 continue
-            t0 = time.perf_counter()
             dec = self._decoder(path)
-            tm["open"] += time.perf_counter() - t0
             # Seek only when the asked frame is not the next one this decoder
             # yields; a run in order continues decoding (HEVC GOP 15)
-            t0 = time.perf_counter()
             if self.dec_next.get(path) != src_frame:
                 dec.seek_to_index(src_frame)
-                tm["seeked"] = 1
-            tm["seek"] += time.perf_counter() - t0
-            t0 = time.perf_counter()
             try:
                 batch = dec.get_batch_frames(1)
             except Exception:
                 self.dec_next.pop(path, None)
                 raise
-            tm["decode"] += time.perf_counter() - t0
             if not batch:
                 self.dec_next.pop(path, None)
                 continue
@@ -530,15 +509,10 @@ class SequencePlayer(QWindow):
             f = batch[0]
             shape = [int(v) for v in f.shape]
             sh, sw = shape[0], shape[1]
-            tm["size"] = "%dx%d" % (sw, sh)
             stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
-            # copy stays 0 for video: the kernel reads the decoder frame directly
-            t0 = time.perf_counter()
+            # The kernel reads the decoder frame directly
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3)
-            tm["blend"] += time.perf_counter() - t0
-        t0 = time.perf_counter()
         self._sync()
-        tm["sync"] += time.perf_counter() - t0
         self._target = None
         if target is self.dst:
             self._dst_frame = frame
@@ -551,26 +525,18 @@ class SequencePlayer(QWindow):
         self._tm = _new_tm()
         self._build_dst(frame, dark)
         cudart = _libs()[0]
-        tm = self._tm
         gl = _libs()[2]
         res_arr = (ctypes.c_void_p * 1)(self.res)
-        t0 = time.perf_counter()
         _check(cudart.cudaGraphicsMapResources(1, res_arr, None), "map")
-        tm["map"] += time.perf_counter() - t0
         try:
-            t0 = time.perf_counter()
             ptr = ctypes.c_void_p()
             size = ctypes.c_size_t(0)
             _check(cudart.cudaGraphicsResourceGetMappedPointer(
                 ctypes.byref(ptr), ctypes.byref(size), self.res), "pbo pointer")
             _check(cudart.cudaMemcpy(ptr, self.dst, self.row * self.seq_h, 3), "to pbo")
-            tm["tex"] += time.perf_counter() - t0
         finally:
-            t0 = time.perf_counter()
             _check(cudart.cudaGraphicsUnmapResources(1, res_arr, None), "unmap")
-            tm["unmap"] += time.perf_counter() - t0
         # PBO (RGB, tightly packed rows) into the texture, on the GPU
-        t0 = time.perf_counter()
         bind = self._glb[1]
         bind(GL_PIXEL_UNPACK_BUFFER, self.pbo.value)
         gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
@@ -578,13 +544,11 @@ class SequencePlayer(QWindow):
         gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.seq_w, self.seq_h,
                            GL_RGB, GL_UNSIGNED_BYTE, None)
         bind(GL_PIXEL_UNPACK_BUFFER, 0)
-        tm["tex"] += time.perf_counter() - t0
 
     def _present(self, dark, has_frame):
         if self.ctx is None:
             return
         _cudart, _nvcuda, gl = _libs()
-        t0 = time.perf_counter()
         self.ctx.makeCurrent(self)
         ratio = self.devicePixelRatio()
         win_w = max(1, int(self.width() * ratio))
@@ -611,12 +575,7 @@ class SequencePlayer(QWindow):
             gl.glTexCoord2f(0, 0)
             gl.glVertex2f(-1, 1)
             gl.glEnd()
-        tm = getattr(self, "_tm", None)
-        t1 = time.perf_counter()
         self.ctx.swapBuffers(self)
-        if tm is not None:
-            tm["draw"] += t1 - t0
-            tm["swap"] += time.perf_counter() - t1
 
 
 

@@ -107,7 +107,6 @@ class PreviewWorker(object):
                       center, total, snapshot, run, gen):
         # run = frames per second (sequence fps, or 30 if missing)
         clean = clean_set(project, sequence_id)
-        ms = lambda v: "%.1f" % (v * 1000.0)
         burst_left = 0
         batch_frames = run
         # Frames per card pass, read at the start of a pass
@@ -132,9 +131,8 @@ class PreviewWorker(object):
                         # Yielding: commit first so no write is left open
                         if batch.pending:
                             n = len(batch.pending)
-                            dt = batch.commit()
+                            batch.commit()
                             self.saved += n
-                            # print("WORKER: yield commit frames=%d commit=%s" % (n, ms(dt)))
                         # Wait for previewIdleMs of no user activity
                         while self._gui_busy(sp):
                             if gen != self._gen:
@@ -162,48 +160,15 @@ class PreviewWorker(object):
                     jpegs = FrameGenerateBatch(project, sequence_id, chunk, snapshot)
                 if not jpegs:
                     return
-                tm = sp._last_worker_tm[0] or {}
-                if len(chunk) == 1:
-                    seeked = tm.get("seeked", 1)
-                    ftms = [{"t0": tm.get("t0", time.perf_counter()),
-                             "seek": tm.get("seek", 0.0) if seeked else 0.0,
-                             "decode": tm.get("decode", 0.0),
-                             "jpeg": tm.get("jpeg", 0.0), "seeked": seeked}]
-                else:
-                    ftms = tm.get("frames") or []
-                if len(chunk) == 1:
-                    p_dec = tm.get("decode", 0.0)
-                    p_comp = tm.get("clear", 0.0) + tm.get("blend", 0.0)
-                    p_jpeg = tm.get("jpeg", 0.0)
-                else:
-                    p_dec = tm.get("pass_decode", 0.0)
-                    p_comp = tm.get("pass_composite", 0.0)
-                    p_jpeg = tm.get("pass_jpeg", 0.0)
-                print("WORKER: pass frames=%d gpu_batch=%d decode=%s composite=%s jpeg=%s"
-                      % (len(chunk), gpu_n, ms(p_dec), ms(p_comp), ms(p_jpeg)))
-                for k, (f, jpeg) in enumerate(zip(chunk, jpegs)):
+                for f, jpeg in zip(chunk, jpegs):
                     if jpeg is None:
                         return
-                    t_s = time.perf_counter()
                     batch.add(f, jpeg)
-                    t_e = time.perf_counter()
                     burst_left -= 1
-                    commit = 0.0
                     if len(batch.pending) >= batch_frames:
                         n = len(batch.pending)
-                        commit = batch.commit()
+                        batch.commit()
                         self.saved += n
-                    ft = ftms[k] if k < len(ftms) else {}
-                    seeked = ft.get("seeked", 1)
-                    # Timing: one line per frame built
-                    # print("WORKER: frame=%d batch=%d seek=%s decode=%s jpeg=%s save=%s "
-                    #       "commit=%s total=%s continued=%d" % (
-                    #           f, gpu_n, ms(ft.get("seek", 0.0) if seeked else 0.0),
-                    #           ms(ft.get("decode", 0.0)), ms(ft.get("jpeg", 0.0)),
-                    #           ms(t_e - t_s), ms(commit),
-                    #           ms((t_e - ft["t0"]) if "t0" in ft
-                    #              else ft.get("share", 0.0) + (t_e - t_s) + commit),
-                    #           0 if seeked else 1))
                 # The playhead frame must be readable before the rest of the
                 # batch, so the player can show it without waiting
                 if center in chunk and batch.pending:
