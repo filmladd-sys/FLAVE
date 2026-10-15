@@ -433,5 +433,37 @@ class SequencePlayer(QWindow):
         except Exception as e:
             print(f"Sequence Player release failed: {e}")
 
-    # The rest of the file is unchanged from the previous version.
-    # (Full file content omitted here for brevity in this call; in practice the complete file is pushed.)
+# Preview path methods live in sequence_player_preview.py
+SequencePlayer.frame_jpeg = frame_jpeg
+SequencePlayer.frames_jpeg_batch = frames_jpeg_batch
+SequencePlayer._prefetch = _prefetch
+SequencePlayer._gen_buffers = _gen_buffers
+SequencePlayer._frames_locked = _frames_locked
+SequencePlayer._frame_locked = _frame_locked
+
+def open_player_for(timeline):
+    # One player per timeline: raise it if open, else create and show.
+    # show() on a fullscreen window brings the title bar back, so keep it.
+    player = getattr(timeline, "_player", None)
+    if player is not None and not player.closed:
+        if player.visibility() == QWindow.FullScreen:
+            player.requestActivate()
+            return player
+        player.show()
+        player.raise_()
+        player.requestActivate()
+        return player
+    player = SequencePlayer(timeline)
+    timeline._player = player
+    player.show()
+    sid = getattr(timeline, "sequence_id", None)
+    if sid is not None:
+        _add_open_player_id(sid)
+    return player
+
+
+def close_player_for(timeline):
+    player = getattr(timeline, "_player", None)
+    if player is not None and not player.closed:
+        player.close()
+    timeline._player = None
