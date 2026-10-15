@@ -96,7 +96,10 @@ class PreviewWorker(object):
             self.saved += n
 
     def _gui_busy(self, sp):
-        # The GUI wants the lock or was active within the idle time
+        # The GUI wants the lock or was active within the idle time.
+        # A player waiting on a missing preview frame is not "busy": fill it.
+        if getattr(sp, "_preview_wait", [0])[0] > 0:
+            return False
         return (sp._gui_wants[0] > 0
                 or time.perf_counter() - sp._gui_last[0] < sp._GUI_QUIET[0])
 
@@ -201,6 +204,12 @@ class PreviewWorker(object):
                               ms((t_e - ft["t0"]) if "t0" in ft
                                  else ft.get("share", 0.0) + (t_e - t_s) + commit),
                               0 if seeked else 1))
+                # The playhead frame must be readable before the rest of the
+                # batch, so the player can show it without waiting
+                if center in chunk and batch.pending:
+                    n = len(batch.pending)
+                    batch.commit()
+                    self.saved += n
                 i = j
         finally:
             sp._worker_burst[0] = False

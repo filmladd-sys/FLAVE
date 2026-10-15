@@ -1,8 +1,8 @@
 # sequence_player.py
 # Sequence Player for Ladd Video Editor: a still preview of the frame under
-# the timeline's scrub. Plain QWindow + QOpenGLContext (no QOpenGLWidget),
-# NVDEC decode, CUDA scale and composite, one OpenGL present per request.
-# No playback loop, no QTimer, no controls. ASCII only.
+# the timeline's scrub. Plain QWindow + QOpenGLContext (no QOpenGLWidget).
+# The picture is the preview JPEG for that frame. A miss asks the preview
+# worker to build it. The player does not decode. ASCII only.
 #
 # GPU path follows VidTest_v02.py: cudaGLSetGLDevice on the GL context,
 # PyNvVideoCodec SimpleDecoder in device memory (RGB), a PTX kernel that
@@ -17,7 +17,7 @@ import os
 import time
 import sqlite3
 
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QImage, QWindow, QOpenGLContext
 
 from sequence_timeline_sql import (
@@ -41,6 +41,11 @@ from sequence_player_preview import (
     _frames_locked, _frame_locked,
     FrameGenerate, FrameGenerateBatch, preview_jpeg_quality,
 )
+
+# The player is waiting on a preview frame. The worker skips its idle yield
+# while this is set, so a miss is filled instead of deferred.
+_preview_wait = [0]
+
 
 def timeline_snapshot(tl):
     # GUI thread only: copy of the track rows and clips the composite reads,
@@ -106,6 +111,8 @@ class SequencePlayer(QWindow):
             w = min(self.seq_w, 960)
             self.resize(w, max(1, int(round(w * self.seq_h / float(self.seq_w)))))
         self._restoring = False
+        self._waiting = None             # frame we asked the worker for
+        self._retry_armed = False
 
     # ---- geometry, same scheme as the other windows
 
@@ -163,6 +170,7 @@ class SequencePlayer(QWindow):
         if self.closed:
             return
         self.closed = True
+        self._clear_wait()
         self._save_geometry()
         self._release_gpu()
         if getattr(self.timeline, "_player", None) is self:
@@ -377,47 +385,85 @@ class SequencePlayer(QWindow):
         _check(cudart.cudaEventSynchronize(ev), "sync")
         cudart.cudaEventDestroy(ev)
 
-    # ---- one frame: seek, decode, scale and composite, present once
+    # ---- one frame: show the preview JPEG, or ask the worker for it
 
     def request_frame(self, force=True):
-        # force False (scrub): skip when the frame is the one already shown
+        # Display comes only from {sequence_id}_preview.db. A miss signals
+        # the preview worker and holds the last picture until that JPEG lands.
         if self.closed or not self.isExposed():
             return
-        frame = int(self.timeline.current_frame)
-        if not force and frame == self.shown_frame:
-            return
-        # Timing debug: one PLAYER line per request
-        t_req = time.perf_counter()
-        t_hook = getattr(self, "_t_hook", None)
-        self._t_hook = None
-        self._tm = {"dec": "none", "size": "none", "open": 0.0, "len": 0.0,
-                    "seek": 0.0, "decode": 0.0, "copy": 0.0, "blend": 0.0,
-                    "clear": 0.0, "sync": 0.0, "map": 0.0, "tex": 0.0,
-                    "unmap": 0.0, "draw": 0.0, "swap": 0.0}
-        dark = _dark_mode()
         if not self.ready:
-            self._present(dark, False)
             return
+        frame = int(self.timeline.current_frame)
+        if not force and frame == self.shown_frame and self._waiting is None:
+            return
+        dark = _dark_mode()
         try:
-            self._composite(frame, dark)
-            self._present(dark, True)
-            self.shown_frame = frame
+            from sequence_preview import FrameRetrieve
+            jpeg = FrameRetrieve(self.timeline._project_db(),
+                                 self.sequence_id, frame)
         except Exception as e:
-            print(f"Sequence Player frame failed: {e}")
-            self._present(dark, False)
-        t_end = time.perf_counter()
-        tm = self._tm
-        ms = lambda v: "%.1f" % (v * 1000.0)
-        hook = ms(t_req - t_hook) if t_hook is not None else "0"
-        present = tm["draw"] + tm["swap"]
-        # print("PLAYER: frame=%d hook=%s dec=%s size=%s open=%s len=%s seek=%s "
-        #       "decode=%s copy=%s clear=%s blend=%s sync=%s map=%s tex=%s unmap=%s "
-        #       "draw=%s swap=%s present=%s total=%s" % (
-        #           frame, hook, tm["dec"], tm["size"], ms(tm["open"]), ms(tm["len"]),
-        #           ms(tm["seek"]), ms(tm["decode"]), ms(tm["copy"]), ms(tm["clear"]),
-        #           ms(tm["blend"]), ms(tm["sync"]), ms(tm["map"]), ms(tm["tex"]),
-        #           ms(tm["unmap"]), ms(tm["draw"]), ms(tm["swap"]), ms(present),
-        #           ms(t_end - (t_hook if t_hook is not None else t_req))))
+            print(f"Sequence Player preview read failed: {e}")
+            jpeg = None
+        if jpeg is not None:
+            self._clear_wait()
+            try:
+                self._show_jpeg(jpeg, dark)
+                self.shown_frame = frame
+            except Exception as e:
+                print(f"Sequence Player preview show failed: {e}")
+                self._present(dark, self.shown_frame is not None)
+            return
+        # Miss: ask the worker once for this frame, then retry until it lands
+        if self._waiting != frame:
+            self._set_wait(frame)
+            try:
+                self.timeline._retarget_preview(force=True)
+            except Exception as e:
+                print(f"Sequence Player preview ask failed: {e}")
+        self._present(dark, self.shown_frame is not None)
+        self._arm_retry()
+
+    def _set_wait(self, frame):
+        if self._waiting is None:
+            _preview_wait[0] += 1
+        self._waiting = frame
+
+    def _clear_wait(self):
+        if self._waiting is not None:
+            _preview_wait[0] = max(0, _preview_wait[0] - 1)
+        self._waiting = None
+
+    def _arm_retry(self):
+        # One short retry while a frame is missing. Not a playback clock.
+        if self._retry_armed or self.closed:
+            return
+        self._retry_armed = True
+        QTimer.singleShot(40, self._retry_preview)
+
+    def _retry_preview(self):
+        self._retry_armed = False
+        if self.closed or self._waiting is None:
+            return
+        self.request_frame(force=True)
+
+    def _show_jpeg(self, jpeg, dark):
+        # Decode the preview JPEG and upload it to the display texture
+        img = QImage()
+        if not img.loadFromData(jpeg, "JPG") or img.isNull():
+            raise RuntimeError("preview JPEG decode failed")
+        img = img.convertToFormat(QImage.Format_RGB888)
+        if img.width() != self.seq_w or img.height() != self.seq_h:
+            img = img.scaled(self.seq_w, self.seq_h)
+        self.ctx.makeCurrent(self)
+        gl = _libs()[2]
+        raw = bytes(img.constBits())[: img.sizeInBytes()]
+        buf = ctypes.create_string_buffer(raw)
+        gl.glBindTexture(GL_TEXTURE_2D, self.tex)
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.seq_w, self.seq_h,
+                           GL_RGB, GL_UNSIGNED_BYTE, buf)
+        self._present(dark, True)
 
     def _build_dst(self, frame, dark, target=None, snapshot=None, use_gl=True,
                    prefetched=None, sync=True):
