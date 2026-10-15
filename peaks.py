@@ -4,6 +4,8 @@
 # bucket, mono sum, PEAKS_PER_SECOND buckets per second.
 # Also stores mono 48 kHz 16-bit PCM in a sibling .audiotmp.db (AudioTmp
 # table) in the same FFmpeg pass, for later mix. No .wav sidecars.
+# On project load, if the .audiotmp.db is missing, it is created and filled
+# from existing footage (same mono 48 kHz s16le pass).
 
 import array
 import os
@@ -151,9 +153,9 @@ def _bucket_peaks(samples, out):
         out.append(max(chunk))
 
 
-def compute_peaks(path):
-    # Return (peaks bytes, duration_seconds, pcm_bytes), or None if ffmpeg
-    # fails or the file has no audio stream. PCM is mono 48 kHz s16le.
+def extract_mono_pcm(path):
+    # Shared import/backfill FFmpeg pass: mono 48 kHz s16le PCM bytes, or None
+    # if ffmpeg fails or the file has no audio stream. Never raises.
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1",
            "-ar", str(PEAKS_SAMPLE_RATE), "-f", "s16le", "-"]
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # no console window
@@ -162,37 +164,13 @@ def compute_peaks(path):
                                 creationflags=flags)
     except Exception:
         return None
-    out = array.array("h")
     pcm = bytearray()
-    total = 0
-    leftover = b""
-    chunk_bytes = SAMPLES_PER_BUCKET * 2 * 1000   # 1000 buckets per read
     try:
         while True:
-            buf = proc.stdout.read(chunk_bytes)
+            buf = proc.stdout.read(SAMPLES_PER_BUCKET * 2 * 1000)
             if not buf:
                 break
-            buf = leftover + buf
-            usable = (len(buf) // (SAMPLES_PER_BUCKET * 2)) * SAMPLES_PER_BUCKET * 2
-            leftover = buf[usable:]
-            if usable:
-                # Keep original little-endian PCM for the audiotmp blob
-                pcm.extend(buf[:usable])
-                s = array.array("h")
-                s.frombytes(buf[:usable])
-                if sys.byteorder != "little":
-                    s.byteswap()
-                total += len(s)
-                _bucket_peaks(s, out)
-        if len(leftover) >= 2:
-            raw = leftover[:len(leftover) // 2 * 2]
-            pcm.extend(raw)
-            s = array.array("h")
-            s.frombytes(raw)
-            if sys.byteorder != "little":
-                s.byteswap()
-            total += len(s)
-            _bucket_peaks(s, out)
+            pcm.extend(buf)
         proc.wait()
     except Exception:
         try:
@@ -200,11 +178,34 @@ def compute_peaks(path):
         except Exception:
             pass
         return None
-    if proc.returncode != 0 or total == 0:
+    if proc.returncode != 0:
         return None
+    # Drop a trailing odd byte so the blob is whole samples
+    if len(pcm) < 2:
+        return None
+    if len(pcm) % 2:
+        del pcm[-1:]
+    return bytes(pcm)
+
+
+def compute_peaks(path):
+    # Return (peaks bytes, duration_seconds, pcm_bytes), or None if ffmpeg
+    # fails or the file has no audio stream. PCM is mono 48 kHz s16le.
+    pcm = extract_mono_pcm(path)
+    if not pcm:
+        return None
+    s = array.array("h")
+    s.frombytes(pcm)
+    if sys.byteorder != "little":
+        s.byteswap()
+    total = len(s)
+    if total == 0:
+        return None
+    out = array.array("h")
+    _bucket_peaks(s, out)
     if sys.byteorder != "little":
         out.byteswap()
-    return out.tobytes(), total / float(PEAKS_SAMPLE_RATE), bytes(pcm)
+    return out.tobytes(), total / float(PEAKS_SAMPLE_RATE), pcm
 
 
 def store_peaks_for_footage(project_db, footage_id, path):
@@ -232,6 +233,58 @@ def store_peaks_for_footage(project_db, footage_id, path):
         return True
     except Exception:
         return False
+
+
+def backfill_audiotmp(project_db):
+    # Scan project footage and store mono PCM for each audio-capable file.
+    # Skips missing paths and files with no audio. Never raises.
+    try:
+        if not project_db or not os.path.isfile(project_db):
+            return
+        conn = sqlite3.connect(project_db)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='footage'"
+            )
+            if cur.fetchone() is None:
+                return
+            cur.execute("SELECT original_path FROM footage")
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        for (original_path,) in rows:
+            try:
+                if not original_path or not os.path.isfile(original_path):
+                    continue
+                if not wants_peaks(original_path):
+                    continue
+                pcm = extract_mono_pcm(original_path)
+                if not pcm:
+                    continue
+                store_audiotmp(project_db, os.path.basename(original_path), pcm)
+            except Exception:
+                # print("audiotmp backfill skip: %s" % original_path)
+                continue
+    except Exception:
+        return
+
+
+def ensure_audiotmp_for_project(project_db):
+    # Project load/open: if .audiotmp.db is missing, create it and backfill
+    # from existing footage. If it already exists, only ensure the table.
+    # Synchronous. Never raises. Returns the audiotmp path or None.
+    try:
+        if not project_db:
+            return None
+        path = audiotmp_db_path(project_db)
+        missing = not os.path.isfile(path)
+        ensure_audiotmp_db(project_db)
+        if missing:
+            backfill_audiotmp(project_db)
+        return path
+    except Exception:
+        return None
 
 
 def load_peaks(project_db, footage_id):

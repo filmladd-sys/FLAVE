@@ -98,12 +98,12 @@ def _get_global_setting(key, default=None):
 
 
 def _ensure_audiotmp_for(project_db):
-    # Create sibling .audiotmp.db and AudioTmp table if missing
+    # Create sibling .audiotmp.db if missing and backfill from footage
     if not project_db:
         return
     try:
-        from peaks import ensure_audiotmp_db
-        ensure_audiotmp_db(project_db)
+        from peaks import ensure_audiotmp_for_project
+        ensure_audiotmp_for_project(project_db)
     except Exception:
         pass
 
