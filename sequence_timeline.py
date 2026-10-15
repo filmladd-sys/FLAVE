@@ -1580,6 +1580,7 @@ class SequenceTimeline(QMainWindow):
             self._clamp_view()
             self.table.viewport().update()
         self._play_shown_count += 1
+        self._play_status()
         self._play_cursor += 1
         if self._play_cursor > last:
             self._stop_play()
@@ -1609,6 +1610,29 @@ class SequenceTimeline(QMainWindow):
             QMessageBox.warning(self, "Player", f"Could not open the player: {e}")
 
     def _play_rate_text(self):
+        # Clock rate is frames the playhead advanced per wall second.
+        # Shown rate is distinct preview pictures actually presented.
+        if not self._playing:
+            return ""
+        import time
+        elapsed = time.perf_counter() - self._play_start_time
+        if elapsed < 0.2:
+            return "  Playing"
+        clock = (self.current_frame - self._play_start_frame) / elapsed
+        shown = self._play_shown_count / elapsed
+        return f"  Playing clock {clock:.2f}  shown {shown:.2f}"
+
+    def _play_status(self):
+        # Status text only. No scrub, no preview retarget.
+        seconds = self.current_frame / self.fps
+        m = int(seconds // 60)
+        s = seconds - m * 60
+        self.status_bar.showMessage(
+            f"Frame {self.current_frame}  Time {m:02d}:{s:05.2f}  "
+            f"View from {self.view_start_frame}  "
+            f"FPS {self.fps:g}  Zoom {self.pixels_per_frame:.3g}px/frame"
+            f"{self._play_rate_text()}"
+        )
         # Clock rate is frames the playhead advanced per wall second.
         # Shown rate is distinct preview pictures actually presented.
         if not self._playing:
