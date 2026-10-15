@@ -14,7 +14,7 @@
 
 import ctypes
 import os
-import time
+# import time
 import sqlite3
 import threading
 
@@ -122,7 +122,7 @@ class PreviewReader(object):
                 self.wake.wait(0.05)
                 self.wake.clear()
                 continue
-            t0 = time.perf_counter()
+            # t0 = time.perf_counter()
             try:
                 rows = self.conn.execute(
                     "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
@@ -132,16 +132,16 @@ class PreviewReader(object):
                 self.wake.wait(0.05)
                 self.wake.clear()
                 continue
-            t_sql = (time.perf_counter() - t0) * 1000.0
+            # t_sql = (time.perf_counter() - t0) * 1000.0
             items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
             decoded = []
-            t1 = time.perf_counter()
+            # t1 = time.perf_counter()
             try:
                 decoded = self.player.decode_play_batch(items)
             except Exception as e:
                 print(f"Play decode batch failed: {e}")
-            t_dec = (time.perf_counter() - t1) * 1000.0
-            self.player._last_batch = (len(items), len(decoded), t_sql, t_dec)
+            # t_dec = (time.perf_counter() - t1) * 1000.0
+            # self.player._last_batch = (len(items), len(decoded), t_sql, t_dec)
             got = {frame for frame, _buf in decoded}
             with self.lock:
                 for frame, buf in decoded:
@@ -615,19 +615,19 @@ class SequencePlayer(QWindow):
         if self._play_conn is None:
             self._play_conn = sqlite3.connect(path)
             self._play_conn.execute("PRAGMA query_only = ON")
-        t0 = time.perf_counter()
+        # t0 = time.perf_counter()
         rows = self._play_conn.execute(
             "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
             "AND dirty = 0 AND jpeg IS NOT NULL ORDER BY frame",
             (int(start), int(start) + int(n) - 1)).fetchall()
-        t_sql = (time.perf_counter() - t0) * 1000.0
+        # t_sql = (time.perf_counter() - t0) * 1000.0
         items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
-        t1 = time.perf_counter()
+        # t1 = time.perf_counter()
         decoded = self.decode_play_batch(items)
-        t_dec = (time.perf_counter() - t1) * 1000.0
+        # t_dec = (time.perf_counter() - t1) * 1000.0
         self._play_queue.extend(decoded)
-        print(f"PLAY: fill n={len(items)} decoded={len(decoded)} "
-              f"sql={t_sql:.1f} decode={t_dec:.1f}")
+        # print(f"PLAY: fill n={len(items)} decoded={len(decoded)} "
+        #       f"sql={t_sql:.1f} decode={t_dec:.1f}")
         return len(decoded)
 
     def play_has(self, frame):
@@ -706,19 +706,19 @@ class SequencePlayer(QWindow):
         # Decode buffer is RGB. Expand, copy into the texture, draw.
         _cudart, nvcuda, _gl = _libs()
         self.ctx.makeCurrent(self)
-        t0 = time.perf_counter()
+        # t0 = time.perf_counter()
         with self._play_lock:
             nvcuda.cuCtxSetCurrent(self.cuda_ctx)
-            t1 = time.perf_counter()
+            # t1 = time.perf_counter()
             self._expand(ptr)
-            t2 = time.perf_counter()
+            # t2 = time.perf_counter()
             self._copy_to_texture()
-            t3 = time.perf_counter()
+            # t3 = time.perf_counter()
         self._present(dark, True)
-        t4 = time.perf_counter()
-        print(f"PLAY: show ctx={(t1-t0)*1000:.1f} expand={(t2-t1)*1000:.1f} "
-              f"copy={(t3-t2)*1000:.1f} present={(t4-t3)*1000:.1f} "
-              f"total={(t4-t0)*1000:.1f}")
+        # t4 = time.perf_counter()
+        # print(f"PLAY: show ctx={(t1-t0)*1000:.1f} expand={(t2-t1)*1000:.1f} "
+        #       f"copy={(t3-t2)*1000:.1f} present={(t4-t3)*1000:.1f} "
+        #       f"total={(t4-t0)*1000:.1f}")
 
     def request_frame(self, force=True):
         # Display comes only from {sequence_id}_preview.db. A miss signals
@@ -743,12 +743,12 @@ class SequencePlayer(QWindow):
             except Exception as e:
                 print(f"Sequence Player device show failed: {e}")
                 self._present(dark, self.shown_frame is not None)
-            self._check_behind(frame)
+            # self._check_behind(frame)
             return
         if self._reader.running():
             # Play: the reader owns the JPEGs. A miss holds the last picture.
             # The database is not touched here.
-            self._check_behind(frame)
+            # self._check_behind(frame)
             return
         jpeg = item[1] if item is not None else None
         if jpeg is None:
@@ -780,15 +780,17 @@ class SequencePlayer(QWindow):
 
     def _check_behind(self, frame):
         # Once a second: how far the picture is behind the clock
-        now = time.perf_counter()
-        if now - self._behind_at < 1.0:
-            return
-        self._behind_at = now
-        shown = self.shown_frame
-        behind = (frame - shown) if shown is not None else frame
-        n, decoded, sql, dec = self._last_batch
-        print(f"PLAY: behind clock={frame} shown={shown} behind={behind} "
-              f"batch n={n} decoded={decoded} sql={sql:.1f} decode={dec:.1f}")
+        # (console timing disabled)
+        return
+        # now = time.perf_counter()
+        # if now - self._behind_at < 1.0:
+        #     return
+        # self._behind_at = now
+        # shown = self.shown_frame
+        # behind = (frame - shown) if shown is not None else frame
+        # n, decoded, sql, dec = self._last_batch
+        # print(f"PLAY: behind clock={frame} shown={shown} behind={behind} "
+        #       f"batch n={n} decoded={decoded} sql={sql:.1f} decode={dec:.1f}")
 
     def _set_wait(self, frame):
         if self._waiting is None:
