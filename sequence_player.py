@@ -569,6 +569,7 @@ class SequencePlayer(QWindow):
         self.res = ctypes.c_void_p()     # CUDA registration of the PBO
         self.nvj = None                  # _NvJpegEncoder, created on first encode
         self.gen_bufs = []               # GPU pass composite buffers (worker)
+        self._frame_tms = []             # per-frame timing for the last batch
         self._glb = None                 # GL 1.5 buffer functions (wglGetProcAddress)
         self.decoders = {}               # path -> SimpleDecoder
         self.dec_next = {}               # path -> next index the decoder yields
@@ -1100,8 +1101,9 @@ class SequencePlayer(QWindow):
             items = self._frames_locked(frames, snapshot, quality)
             wtm = dict(self._tm)
             wtm["t0"] = t_lock
-            # Per-frame timing for the worker prints; first frame starts at lock
-            wtm["frames"] = list(self._frame_tms)
+            # Per-frame timing for the worker prints; empty if the player
+            # was not ready and the locked path returned early
+            wtm["frames"] = list(getattr(self, "_frame_tms", []))
             _last_worker_tm[0] = wtm
         finally:
             _GEN_LOCK.release()
