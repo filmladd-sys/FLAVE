@@ -2,12 +2,15 @@
 # Stored audio waveform peaks for footage. ASCII only.
 # data is packed signed 16-bit little-endian (min, max) pairs, one pair per
 # bucket, mono sum, PEAKS_PER_SECOND buckets per second.
+# Also writes a mono 48 kHz 16-bit WAV sidecar (original path + ".wav")
+# in the same FFmpeg pass, for later mix.
 
 import array
 import os
 import sqlite3
 import subprocess
 import sys
+import wave
 
 PEAKS_PER_SECOND = 100
 PEAKS_SAMPLE_RATE = 48000
@@ -64,7 +67,8 @@ def _bucket_peaks(samples, out):
 
 def compute_peaks(path):
     # Return (data bytes, duration_seconds), or None if ffmpeg fails or the
-    # file has no audio stream
+    # file has no audio stream. Also writes mono 48 kHz WAV sidecar.
+    wav_path = path + ".wav"
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1",
            "-ar", str(PEAKS_SAMPLE_RATE), "-f", "s16le", "-"]
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # no console window
@@ -77,7 +81,12 @@ def compute_peaks(path):
     total = 0
     leftover = b""
     chunk_bytes = SAMPLES_PER_BUCKET * 2 * 1000   # 1000 buckets per read
+    wav = None
     try:
+        wav = wave.open(wav_path, "wb")
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(PEAKS_SAMPLE_RATE)
         while True:
             buf = proc.stdout.read(chunk_bytes)
             if not buf:
@@ -86,6 +95,8 @@ def compute_peaks(path):
             usable = (len(buf) // (SAMPLES_PER_BUCKET * 2)) * SAMPLES_PER_BUCKET * 2
             leftover = buf[usable:]
             if usable:
+                # Write original little-endian bytes to WAV
+                wav.writeframes(buf[:usable])
                 s = array.array("h")
                 s.frombytes(buf[:usable])
                 if sys.byteorder != "little":
@@ -93,8 +104,10 @@ def compute_peaks(path):
                 total += len(s)
                 _bucket_peaks(s, out)
         if len(leftover) >= 2:
+            raw = leftover[:len(leftover) // 2 * 2]
+            wav.writeframes(raw)
             s = array.array("h")
-            s.frombytes(leftover[:len(leftover) // 2 * 2])
+            s.frombytes(raw)
             if sys.byteorder != "little":
                 s.byteswap()
             total += len(s)
@@ -105,8 +118,29 @@ def compute_peaks(path):
             proc.kill()
         except Exception:
             pass
+        if wav is not None:
+            try:
+                wav.close()
+            except Exception:
+                pass
+        try:
+            if os.path.isfile(wav_path):
+                os.remove(wav_path)
+        except Exception:
+            pass
         return None
+    finally:
+        if wav is not None:
+            try:
+                wav.close()
+            except Exception:
+                pass
     if proc.returncode != 0 or total == 0:
+        try:
+            if os.path.isfile(wav_path):
+                os.remove(wav_path)
+        except Exception:
+            pass
         return None
     if sys.byteorder != "little":
         out.byteswap()
@@ -115,6 +149,7 @@ def compute_peaks(path):
 
 def store_peaks_for_footage(project_db, footage_id, path):
     # Compute and INSERT OR REPLACE peaks. Never raises; returns True if stored.
+    # WAV sidecar is written as a side effect of compute_peaks.
     try:
         if not wants_peaks(path):
             return False
