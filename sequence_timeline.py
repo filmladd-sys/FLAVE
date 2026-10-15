@@ -1400,6 +1400,18 @@ class SequenceTimeline(QMainWindow):
             self.ruler.viewport().update()
             self.playhead_overlay.update()
         if not silent:
+            if self._playing:
+                import time
+                self._play_from = frame
+                self._play_start_frame = frame
+                self._play_start_time = time.perf_counter()
+                self._play_cursor = frame
+                player = getattr(self, "_player", None)
+                if player is not None and not getattr(player, "closed", False):
+                    try:
+                        player.seek_preview_audio(frame)
+                    except Exception:
+                        pass
             self._update_status()
 
     def refresh(self):
@@ -1537,6 +1549,13 @@ class SequenceTimeline(QMainWindow):
         self._play_shown_count = 0
         self._play_last_shown = None
         self._playing = True
+        player = getattr(self, "_player", None)
+        if player is not None and not getattr(player, "closed", False):
+            try:
+                player.start_preview_audio(self._play_from)
+            except Exception as e:
+                # print("preview audio start failed: %s" % e)
+                pass
         self._play_timer.setInterval(10)
         self._play_timer.start()
         self._play_tick()
@@ -1573,6 +1592,10 @@ class SequenceTimeline(QMainWindow):
         if not player.play_show(self._play_cursor):
             return
         self.set_current_frame(self._play_cursor, silent=True)
+        try:
+            player.resync_preview_audio(self._play_cursor)
+        except Exception:
+            pass
         visible = self.visible_frames()
         if not (self.view_start_frame <= self._play_cursor <
                 self.view_start_frame + visible):
@@ -1600,6 +1623,10 @@ class SequenceTimeline(QMainWindow):
         player = getattr(self, "_player", None)
         if player is not None and not player.closed:
             player.stop_read_ahead()
+            try:
+                player.stop_preview_audio()
+            except Exception:
+                pass
 
     def open_player(self):
         # Player menu: open this timeline's Sequence Player, or raise it

@@ -230,6 +230,7 @@ class SequencePlayer(QWindow):
         self._play_bufs = []             # device RGB buffers for decoded play frames
         self._play_free = []             # indexes into _play_bufs not in the ring
         self._play_lock = threading.Lock()
+        self._preview_audio = None          # PreviewAudioPlayer for mix WAV
 
     # ---- geometry, same scheme as the other windows
 
@@ -303,6 +304,7 @@ class SequencePlayer(QWindow):
         self.closed = True
         self._clear_wait()
         self._reader.stop_reader()
+        self.stop_preview_audio()
         self._save_geometry()
         self._release_gpu()
         if getattr(self.timeline, "_player", None) is self:
@@ -936,6 +938,52 @@ class SequencePlayer(QWindow):
             gl.glEnd()
         self.ctx.swapBuffers(self)
 
+
+
+
+    # ---- preview mix audio (sequence_player_audio.py)
+
+    def start_preview_audio(self, frame):
+        # Build or reuse the mix WAV, seek to frame, play. Never raises.
+        try:
+            from sequence_preview_audio import ensure_preview_audio_wav
+            from sequence_player_audio import PreviewAudioPlayer
+            project_db = self.timeline._project_db()
+            fps = float(getattr(self.timeline, "fps", 30) or 30)
+            total = int(self.timeline.total_frames())
+            wav = ensure_preview_audio_wav(
+                project_db, self.sequence_id, fps, total)
+            if not wav:
+                return
+            if self._preview_audio is None:
+                self._preview_audio = PreviewAudioPlayer()
+            if not self._preview_audio.prepare(wav, fps):
+                return
+            self._preview_audio.play_at_frame(int(frame))
+        except Exception as e:
+            # print("start_preview_audio failed: %s" % e)
+            pass
+
+    def stop_preview_audio(self):
+        try:
+            if self._preview_audio is not None:
+                self._preview_audio.stop()
+        except Exception:
+            pass
+
+    def seek_preview_audio(self, frame):
+        try:
+            if self._preview_audio is not None:
+                self._preview_audio.seek_frame(int(frame))
+        except Exception:
+            pass
+
+    def resync_preview_audio(self, frame):
+        try:
+            if self._preview_audio is not None:
+                self._preview_audio.resync_if_drift(int(frame))
+        except Exception:
+            pass
 
 
 # Preview path methods live in sequence_player_preview.py
