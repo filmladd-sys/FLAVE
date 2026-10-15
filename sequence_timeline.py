@@ -392,6 +392,8 @@ class SequenceTimeline(QMainWindow):
         self._play_from = 0
         self._play_start_frame = 0
         self._play_start_time = 0.0
+        self._play_shown_count = 0
+        self._play_last_shown = None
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(20)
         self._play_timer.timeout.connect(self._play_tick)
@@ -1531,6 +1533,8 @@ class SequenceTimeline(QMainWindow):
             pass
         self._play_start_frame = int(self._play_from)
         self._play_start_time = time.perf_counter()
+        self._play_shown_count = 0
+        self._play_last_shown = None
         self._playing = True
         self._play_timer.start()
         self._play_tick()
@@ -1553,6 +1557,11 @@ class SequenceTimeline(QMainWindow):
             self._clamp_view()
             self.table.viewport().update()
         self.set_current_frame(frame)
+        player = getattr(self, "_player", None)
+        shown = player.shown_frame if player is not None and not player.closed else None
+        if shown != self._play_last_shown:
+            self._play_shown_count += 1
+            self._play_last_shown = shown
         if done:
             self._stop_play()
 
@@ -1574,6 +1583,19 @@ class SequenceTimeline(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Player", f"Could not open the player: {e}")
 
+    def _play_rate_text(self):
+        # Clock rate is frames the playhead advanced per wall second.
+        # Shown rate is distinct preview pictures actually presented.
+        if not self._playing:
+            return ""
+        import time
+        elapsed = time.perf_counter() - self._play_start_time
+        if elapsed < 0.2:
+            return "  Playing"
+        clock = (self.current_frame - self._play_start_frame) / elapsed
+        shown = self._play_shown_count / elapsed
+        return f"  Playing clock {clock:.2f}  shown {shown:.2f}"
+
     def _update_player(self):
         # Show the frame under the scrub in the open player, if any
         player = getattr(self, "_player", None)
@@ -1588,6 +1610,7 @@ class SequenceTimeline(QMainWindow):
             f"Frame {self.current_frame}  Time {m:02d}:{s:05.2f}  "
             f"View from {self.view_start_frame}  "
             f"FPS {self.fps:g}  Zoom {self.pixels_per_frame:.3g}px/frame"
+            f"{self._play_rate_text()}"
         )
         # Scrub moved: the player seeks (skipped if the frame is unchanged)
         player = getattr(self, "_player", None)
