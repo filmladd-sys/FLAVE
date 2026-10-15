@@ -386,6 +386,15 @@ class SequenceTimeline(QMainWindow):
         self._preview_timer.setInterval(500)
         self._preview_timer.timeout.connect(self._preview_tick)
         self._preview_timer.start()
+        # Play: fill the remainder, then an elapsed-time clock off the preview
+        self._play_filling = False
+        self._playing = False
+        self._play_from = 0
+        self._play_start_frame = 0
+        self._play_start_time = 0.0
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(20)
+        self._play_timer.timeout.connect(self._play_tick)
         # Clips drawn by a delegate; footage dropped from Footage Manager
         self.clips_by_track = {}
         self._icon_cache = {}
@@ -1457,8 +1466,105 @@ class SequenceTimeline(QMainWindow):
             self.go_prev_edit()
         elif name == "Jump to next edit":
             self.go_next_edit()
+        elif name == "Play":
+            self._begin_play()
+        elif name == "Pause":
+            self._stop_play()
         else:
             print(name)
+
+    def _begin_play(self):
+        # Fill every missing preview frame from the tick to the end, then
+        # run the clock. The player only reads the preview file.
+        total = self.total_frames()
+        if total <= 0 or self.sequence_id is None:
+            return
+        self._stop_play()
+        try:
+            from sequence_player import open_player_for
+            open_player_for(self)
+        except Exception as e:
+            print(f"Play could not open the player: {e}")
+        self._play_from = int(self.current_frame)
+        if self._play_ready():
+            self._start_clock()
+            return
+        self._play_filling = True
+        try:
+            from sequence_preview_worker import set_play_priority
+            set_play_priority(True)
+        except Exception as e:
+            print(f"Play priority failed: {e}")
+        self._retarget_preview(force=True)
+        self._play_fill_status()
+
+    def _play_ready(self):
+        # True when every frame from the tick to the end is a clean preview
+        try:
+            from sequence_preview import clean_set
+            clean = clean_set(self._project_db(), self.sequence_id)
+        except Exception:
+            return False
+        total = self.total_frames()
+        for frame in range(int(self._play_from), total):
+            if frame not in clean:
+                return False
+        return True
+
+    def _play_fill_status(self):
+        try:
+            from sequence_preview import clean_set
+            clean = clean_set(self._project_db(), self.sequence_id)
+            left = sum(1 for f in range(int(self._play_from), self.total_frames())
+                       if f not in clean)
+        except Exception:
+            left = 0
+        self.status_bar.showMessage(f"Filling preview: {left} frames left")
+
+    def _start_clock(self):
+        import time
+        self._play_filling = False
+        try:
+            from sequence_preview_worker import set_play_priority
+            set_play_priority(False)
+        except Exception:
+            pass
+        self._play_start_frame = int(self._play_from)
+        self._play_start_time = time.perf_counter()
+        self._playing = True
+        self._play_timer.start()
+        self._play_tick()
+
+    def _play_tick(self):
+        # Frame is start + elapsed * fps. A late wake skips ahead, so speed
+        # stays true. Picture comes from the preview file.
+        import time
+        if not self._playing:
+            return
+        elapsed = time.perf_counter() - self._play_start_time
+        frame = self._play_start_frame + int(elapsed * self.fps)
+        last = self.total_frames() - 1
+        done = frame >= last
+        if done:
+            frame = last
+        visible = self.visible_frames()
+        if not (self.view_start_frame <= frame < self.view_start_frame + visible):
+            self.view_start_frame = max(0, frame - visible // 4)
+            self._clamp_view()
+            self.table.viewport().update()
+        self.set_current_frame(frame)
+        if done:
+            self._stop_play()
+
+    def _stop_play(self):
+        self._playing = False
+        self._play_filling = False
+        self._play_timer.stop()
+        try:
+            from sequence_preview_worker import set_play_priority
+            set_play_priority(False)
+        except Exception:
+            pass
 
     def open_player(self):
         # Player menu: open this timeline's Sequence Player, or raise it
@@ -1492,8 +1598,10 @@ class SequenceTimeline(QMainWindow):
             player.request_frame(force=False)
             # Main-thread generate stalled the UI; the worker fills it instead
             # self._fill_preview_frame()
-        # Playhead moved: the preview worker works outward from here
-        self._retarget_preview()
+        # Playhead moved: the preview worker works outward from here.
+        # Not during playback; that would restart the worker every frame.
+        if not self._playing and not self._play_filling:
+            self._retarget_preview()
 
     def _retarget_preview(self, force=False):
         # Point the single preview worker at this timeline. GUI thread only:
@@ -1535,6 +1643,10 @@ class SequenceTimeline(QMainWindow):
         if _worker.saved != self._preview_seen:
             self._preview_seen = _worker.saved
             self.ruler.viewport().update()
+        if self._play_filling:
+            self._play_fill_status()
+            if self._play_ready():
+                self._start_clock()
 
     def changeEvent(self, event):
         # Active timeline gets the preview worker

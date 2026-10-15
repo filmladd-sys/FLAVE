@@ -98,7 +98,8 @@ class PreviewWorker(object):
     def _gui_busy(self, sp):
         # The GUI wants the lock or was active within the idle time.
         # A player waiting on a missing preview frame is not "busy": fill it.
-        if getattr(sp, "_preview_wait", [0])[0] > 0:
+        # Play filling the remainder is not busy either.
+        if getattr(sp, "_preview_wait", [0])[0] > 0 or _play_priority[0]:
             return False
         return (sp._gui_wants[0] > 0
                 or time.perf_counter() - sp._gui_last[0] < sp._GUI_QUIET[0])
@@ -191,6 +192,13 @@ def _setting_int(key, default, lo, hi):
 
 
 _worker = None
+# Play is waiting for the remainder to be green. Skip the idle yield.
+_play_priority = [0]
+
+
+def set_play_priority(on):
+    # Timeline sets this while Play is filling from the tick to the end
+    _play_priority[0] = 1 if on else 0
 
 
 def get_worker():
