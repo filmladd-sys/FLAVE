@@ -1537,6 +1537,7 @@ class SequenceTimeline(QMainWindow):
         self._play_shown_count = 0
         self._play_last_shown = None
         self._playing = True
+        self._play_timer.setInterval(10)
         self._play_timer.start()
         self._play_tick()
 
@@ -1548,7 +1549,7 @@ class SequenceTimeline(QMainWindow):
         return max(1, min(30, n))
 
     def _play_tick(self):
-        # One loop: grab N, decode N, expand N, show N, then move the clock.
+        # Clock decides the frame. Show it only when its time has arrived.
         # The playhead moves silent, so no scrub or preview events fire.
         import time
         if not self._playing:
@@ -1559,25 +1560,28 @@ class SequenceTimeline(QMainWindow):
             return
         elapsed = time.perf_counter() - self._play_start_time
         clock = self._play_start_frame + int(elapsed * self.fps)
-        start = self._play_cursor
-        if clock - start > self._play_batch_n():
-            start = clock
         last = self.total_frames() - 1
-        if start > last:
-            self._stop_play()
+        if clock > last:
+            clock = last
+        if clock - self._play_cursor > 2:
+            player.play_drop_before(clock)
+            self._play_cursor = clock
+        if self._play_cursor > clock:
             return
-        shown = player.play_batch(start, self._play_batch_n())
-        if shown < start:
-            shown = start
-        self._play_cursor = shown + 1
-        self.set_current_frame(min(shown, last), silent=True)
+        if not player.play_has(self._play_cursor):
+            player.play_fill(self._play_cursor, self._play_batch_n())
+        if not player.play_show(self._play_cursor):
+            return
+        self.set_current_frame(self._play_cursor, silent=True)
         visible = self.visible_frames()
-        if not (self.view_start_frame <= shown < self.view_start_frame + visible):
-            self.view_start_frame = max(0, shown - visible // 4)
+        if not (self.view_start_frame <= self._play_cursor <
+                self.view_start_frame + visible):
+            self.view_start_frame = max(0, self._play_cursor - visible // 4)
             self._clamp_view()
             self.table.viewport().update()
-        self._play_shown_count += max(0, shown - start + 1)
-        if shown >= last:
+        self._play_shown_count += 1
+        self._play_cursor += 1
+        if self._play_cursor > last:
             self._stop_play()
 
     def _stop_play(self):

@@ -225,6 +225,7 @@ class SequencePlayer(QWindow):
         self._retry_armed = False
         self._reader = PreviewReader(self)
         self._play_conn = None
+        self._play_queue = []
         self._nvdec = None               # _NvJpegDecoder, playback only
         self._play_bufs = []             # device RGB buffers for decoded play frames
         self._play_free = []             # indexes into _play_bufs not in the ring
@@ -591,13 +592,12 @@ class SequencePlayer(QWindow):
                 return []
         return [(frame, buf) for (frame, _jpeg), buf in zip(kept, bufs)]
 
-    def play_batch(self, start, n):
-        # One play step. Grab N JPEGs, decode N, expand N, show N.
-        # Returns the last frame shown, or start - 1 if nothing was ready.
+    def play_fill(self, start, n):
+        # Grab N and decode N onto the card. Held until the clock asks.
         from sequence_preview import preview_db_path
         path = preview_db_path(self.timeline._project_db(), self.sequence_id)
         if not os.path.isfile(path):
-            return start - 1
+            return 0
         if self._play_conn is None:
             self._play_conn = sqlite3.connect(path)
             self._play_conn.execute("PRAGMA query_only = ON")
@@ -611,53 +611,53 @@ class SequencePlayer(QWindow):
         t1 = time.perf_counter()
         decoded = self.decode_play_batch(items)
         t_dec = (time.perf_counter() - t1) * 1000.0
-        dark = _dark_mode()
-        last = int(start) - 1
-        exp = copy = present = 0.0
-        for frame, buf in decoded:
-            a = time.perf_counter()
-            self._expand(buf)
-            b = time.perf_counter()
-            self._copy_to_texture()
-            c = time.perf_counter()
-            self._present(dark, True)
-            d = time.perf_counter()
-            exp += (b - a) * 1000.0
-            copy += (c - b) * 1000.0
-            present += (d - c) * 1000.0
-            last = frame
-            self.shown_frame = frame
-            with self._play_lock:
-                try:
-                    self._play_free.append(self._play_bufs.index(buf))
-                except ValueError:
-                    pass
-        total = (time.perf_counter() - t0) * 1000.0
-        print(f"PLAY: n={len(items)} decoded={len(decoded)} sql={t_sql:.1f} "
-              f"decode={t_dec:.1f} expand={exp:.1f} copy={copy:.1f} "
-              f"present={present:.1f} total={total:.1f} last={last}")
-        return last
+        self._play_queue.extend(decoded)
+        print(f"PLAY: fill n={len(items)} decoded={len(decoded)} "
+              f"sql={t_sql:.1f} decode={t_dec:.1f}")
+        return len(decoded)
+
+    def play_has(self, frame):
+        return any(f == frame for f, _buf in self._play_queue)
+
+    def play_show(self, frame):
+        # Expand, copy and present one frame, then free its buffer.
+        for i, (f, buf) in enumerate(self._play_queue):
+            if f == frame:
+                break
+        else:
+            return False
+        _f, buf = self._play_queue.pop(i)
+        self.ctx.makeCurrent(self)
+        self._expand(buf)
+        self._copy_to_texture()
+        self._present(_dark_mode(), True)
+        self.shown_frame = frame
+        with self._play_lock:
+            try:
+                self._play_free.append(self._play_bufs.index(buf))
+            except ValueError:
+                pass
+        return True
+
+    def play_drop_before(self, frame):
+        # Clock jumped. Free decoded frames we will not show.
+        kept = []
+        for f, buf in self._play_queue:
+            if f < frame:
+                with self._play_lock:
+                    try:
+                        self._play_free.append(self._play_bufs.index(buf))
+                    except ValueError:
+                        pass
+            else:
+                kept.append((f, buf))
+        self._play_queue = kept
 
     def close_play_conn(self):
+        self.play_drop_before(1 << 30)
         if self._play_conn is not None:
             self._play_conn.close()
             self._play_conn = None
-        # Return device buffers for frames the playhead has passed
-        with self._reader.lock:
-            old = [f for f in self._reader.ring if f < before]
-            ptrs = []
-            for frame in old:
-                item = self._reader.ring.pop(frame)
-                if item[0] == "gpu":
-                    ptrs.append(item[1])
-        if not ptrs:
-            return
-        with self._play_lock:
-            for ptr in ptrs:
-                try:
-                    self._play_free.append(self._play_bufs.index(ptr))
-                except ValueError:
-                    pass
 
     def _expand(self, src):
         # RGB device buffer to the RGBA present buffer. Alpha is 255.
