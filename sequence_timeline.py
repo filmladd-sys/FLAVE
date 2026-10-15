@@ -1568,7 +1568,8 @@ class SequenceTimeline(QMainWindow):
         return max(1, min(30, n))
 
     def _play_tick(self):
-        # Clock decides the frame. Show it only when its time has arrived.
+        # Audio position is the master clock when the WAV has started; wall
+        # clock is the fallback (no audio, or position still 0 at start).
         # The playhead moves silent, so no scrub or preview events fire.
         import time
         if not self._playing:
@@ -1577,9 +1578,24 @@ class SequenceTimeline(QMainWindow):
         if player is None or player.closed:
             self._stop_play()
             return
-        elapsed = time.perf_counter() - self._play_start_time
-        clock = self._play_start_frame + int(elapsed * self.fps)
+        clock = None
+        try:
+            pos = player.preview_audio_position_ms()
+        except Exception:
+            pos = None
+        # position > 0 means audio has begun (also covers mid-sequence seeks)
+        if pos is not None and int(pos) > 0:
+            try:
+                from sequence_player_audio import sequence_frame_from_position_ms
+                clock = sequence_frame_from_position_ms(pos, self.fps)
+            except Exception:
+                clock = None
+        if clock is None:
+            elapsed = time.perf_counter() - self._play_start_time
+            clock = self._play_start_frame + int(elapsed * self.fps)
         last = self.total_frames() - 1
+        if clock < 0:
+            clock = 0
         if clock > last:
             clock = last
         if clock - self._play_cursor > 2:
@@ -1592,10 +1608,6 @@ class SequenceTimeline(QMainWindow):
         if not player.play_show(self._play_cursor):
             return
         self.set_current_frame(self._play_cursor, silent=True)
-        try:
-            player.resync_preview_audio(self._play_cursor)
-        except Exception:
-            pass
         visible = self.visible_frames()
         if not (self.view_start_frame <= self._play_cursor <
                 self.view_start_frame + visible):

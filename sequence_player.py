@@ -978,12 +978,23 @@ class SequencePlayer(QWindow):
         except Exception:
             pass
 
-    def resync_preview_audio(self, frame):
+    def preview_audio_position_ms(self):
+        # QMediaPlayer position in ms, or None when audio is unavailable.
         try:
-            if self._preview_audio is not None:
-                self._preview_audio.resync_if_drift(int(frame))
+            if self._preview_audio is None:
+                return None
+            return self._preview_audio.position_ms()
         except Exception:
-            pass
+            return None
+
+    def resync_preview_audio(self, frame):
+        # Neutralized: audio drives the play clock (BUILD 45).
+        # try:
+        #     if self._preview_audio is not None:
+        #         self._preview_audio.resync_if_drift(int(frame))
+        # except Exception:
+        #     pass
+        return
 
 
 # Preview path methods live in sequence_player_preview.py
