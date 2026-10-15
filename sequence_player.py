@@ -657,6 +657,28 @@ class SequencePlayer(QWindow):
     def play_has(self, frame):
         return any(f == frame for f, _buf in self._play_queue)
 
+    def play_queue_hi(self):
+        # Highest decoded frame in the play queue, or None if empty.
+        if not self._play_queue:
+            return None
+        return max(f for f, _buf in self._play_queue)
+
+    def play_show_at_most(self, frame):
+        # Present the newest queued frame at or below frame. Returns that
+        # frame index, or None if nothing showable.
+        frame = int(frame)
+        best_i = None
+        best_f = None
+        for i, (f, _buf) in enumerate(self._play_queue):
+            if f <= frame and (best_f is None or f > best_f):
+                best_i = i
+                best_f = f
+        if best_i is None:
+            return None
+        if self.play_show(best_f):
+            return best_f
+        return None
+
     def play_show(self, frame):
         # Expand, copy and present one frame, then free its buffer.
         for i, (f, buf) in enumerate(self._play_queue):

@@ -1619,8 +1619,9 @@ class SequenceTimeline(QMainWindow):
 
     def _play_tick(self):
         # After prime, audio position is the master clock once the first
-        # frame has been shown; wall clock is the fallback. Until the first
-        # play_show, hold on the start frame (batch already filled).
+        # frame has been shown; wall clock is the fallback. Keep filling
+        # batches ahead of the due frame. If the exact cursor miss-stalls,
+        # fill at the due frame and show the newest available <= due.
         import time
         if not self._playing:
             return
@@ -1652,15 +1653,54 @@ class SequenceTimeline(QMainWindow):
             clock = 0
         if clock > last:
             clock = last
-        if self._play_audio_clock and clock - self._play_cursor > 2:
-            player.play_drop_before(clock)
-            self._play_cursor = clock
-        if self._play_cursor > clock:
+        due = int(clock)
+        batch = self._play_batch_n()
+
+        # Fill-ahead: top up the queue toward due + one batch
+        try:
+            hi = player.play_queue_hi()
+        except Exception:
+            hi = None
+        fill_from = int(self._play_cursor) if hi is None else int(hi) + 1
+        need = due + batch
+        if fill_from <= need and fill_from <= last:
+            if hi is None or hi < need:
+                try:
+                    player.play_fill(fill_from, batch)
+                except Exception:
+                    pass
+
+        if self._play_cursor > due:
             return
-        if not player.play_has(self._play_cursor):
-            player.play_fill(self._play_cursor, self._play_batch_n())
-        if not player.play_show(self._play_cursor):
-            return
+
+        shown = None
+        if player.play_has(self._play_cursor):
+            if player.play_show(self._play_cursor):
+                shown = int(self._play_cursor)
+        if shown is None:
+            # Exact cursor missing or show failed. Do not wedge: fill at
+            # due and present the newest decoded frame at or below due.
+            if due >= self._play_cursor:
+                try:
+                    if not player.play_has(due):
+                        player.play_fill(due, batch)
+                except Exception:
+                    pass
+                try:
+                    shown = player.play_show_at_most(due)
+                except Exception:
+                    shown = None
+            if shown is None:
+                # Skip a hole so the next tick can refill ahead of audio
+                if self._play_audio_clock and due - self._play_cursor > 2:
+                    try:
+                        player.play_drop_before(due)
+                    except Exception:
+                        pass
+                    self._play_cursor = due
+                return
+
+        self._play_cursor = int(shown)
         self._play_audio_clock = True
         self.set_current_frame(self._play_cursor, silent=True)
         visible = self.visible_frames()
@@ -1672,6 +1712,12 @@ class SequenceTimeline(QMainWindow):
         self._play_shown_count += 1
         self._play_status()
         self._play_cursor += 1
+        # Prebuffer the next batch while the just-shown frame is on screen
+        try:
+            if self._play_cursor <= last and not player.play_has(self._play_cursor):
+                player.play_fill(self._play_cursor, batch)
+        except Exception:
+            pass
         if self._play_cursor > last:
             self._stop_play()
 
