@@ -28,7 +28,7 @@ from sequence_timeline_sql import (
 from sequence_player_gpu import (
     _GEN_LOCK, _gui_wants, _gui_last, _GUI_QUIET, _worker_burst,
     gui_touch, _GuiGen, _worker_acquire, _new_tm, _last_worker_tm,
-    _check, _libs, _nvjpeg_lib, _NvJpegEncoder, PTX, _dark_mode,
+    _check, _libs, _nvjpeg_lib, _NvJpegEncoder, _NvJpegDecoder, PTX, _dark_mode,
     _player_format,
     GL_TEXTURE_2D, GL_RGBA, GL_RGBA8, GL_RGB, GL_RGB8,
     GL_PIXEL_UNPACK_BUFFER, GL_STREAM_DRAW, GL_UNPACK_ALIGNMENT,
@@ -84,8 +84,7 @@ class PreviewReader(object):
 
     def get(self, frame):
         with self.lock:
-            blob = self.ring.get(int(frame))
-        return blob
+            return self.ring.get(int(frame))
 
     def running(self):
         return self.thread is not None and self.thread.is_alive()
@@ -132,12 +131,22 @@ class PreviewReader(object):
                 self.wake.wait(0.05)
                 self.wake.clear()
                 continue
+            items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
+            decoded = []
+            try:
+                decoded = self.player.decode_play_batch(items)
+            except Exception as e:
+                print(f"Play decode batch failed: {e}")
+            got = {frame for frame, _buf in decoded}
             with self.lock:
-                for frame, blob in rows:
-                    if blob is not None:
-                        self.ring[int(frame)] = bytes(blob)
-                for frame in [f for f in self.ring if f < self.playhead - 2]:
-                    del self.ring[frame]
+                for frame, buf in decoded:
+                    self.ring[frame] = ("gpu", buf)
+                for frame, blob in items:
+                    if frame not in got and frame not in self.ring:
+                        self.ring[frame] = ("cpu", blob)
+                for frame, item in list(self.ring.items()):
+                    if frame < self.playhead - 2 and item[0] != "gpu":
+                        self.ring.pop(frame, None)
 
 
 def timeline_snapshot(tl):
@@ -207,6 +216,10 @@ class SequencePlayer(QWindow):
         self._waiting = None             # frame we asked the worker for
         self._retry_armed = False
         self._reader = PreviewReader(self)
+        self._nvdec = None               # _NvJpegDecoder, playback only
+        self._play_bufs = []             # device RGB buffers for decoded play frames
+        self._play_free = []             # indexes into _play_bufs not in the ring
+        self._play_lock = threading.Lock()
 
     # ---- geometry, same scheme as the other windows
 
@@ -355,6 +368,14 @@ class SequencePlayer(QWindow):
             if self.nvj is not None:
                 self.nvj.destroy()
                 self.nvj = None
+            if self._nvdec is not None:
+                self._nvdec.destroy()
+                self._nvdec = None
+            for buf in self._play_bufs:
+                if buf.value:
+                    cudart.cudaFree(buf)
+            self._play_bufs = []
+            self._play_free = []
             if self.res.value:
                 cudart.cudaGraphicsUnregisterResource(self.res)
             if self.pbo.value and self._glb is not None:
@@ -485,6 +506,112 @@ class SequencePlayer(QWindow):
 
     def stop_read_ahead(self):
         self._reader.stop_reader()
+        self._release_play_bufs()
+
+    def _ensure_decoder(self):
+        if self._nvdec is not None:
+            return self._nvdec
+        lib = _nvjpeg_lib()
+        if lib is None or not self.ready:
+            return None
+        _libs()[1].cuCtxSetCurrent(self.cuda_ctx)
+        self._nvdec = _NvJpegDecoder(lib, self.stream)
+        return self._nvdec
+
+    def _play_cap(self):
+        try:
+            seconds = float(_get_global_setting("previewBatchSeconds", "1") or 1)
+        except ValueError:
+            seconds = 1.0
+        fps = float(getattr(self.timeline, "fps", 30) or 30)
+        return max(2, int(round(seconds * fps)) * 2)
+
+    def _take_play_buf(self):
+        cudart = _libs()[0]
+        if self._play_free:
+            return self._play_bufs[self._play_free.pop()]
+        if len(self._play_bufs) >= self._play_cap():
+            return None
+        buf = ctypes.c_void_p()
+        _check(cudart.cudaMalloc(ctypes.byref(buf), self.row * self.seq_h), "play buf")
+        self._play_bufs.append(buf)
+        return buf
+
+    def _release_play_bufs(self):
+        # Buffers stay allocated for the next play. The ring no longer holds them.
+        self._play_free = list(range(len(self._play_bufs)))
+
+    def decode_play_batch(self, items):
+        # Reader thread. items is [(frame, jpeg bytes)]. Returns [(frame, dev)].
+        # Falls back to nothing if nvJPEG is missing; the reader keeps the bytes.
+        dec = self._ensure_decoder()
+        if dec is None or not items:
+            return []
+        nvcuda = _libs()[1]
+        with self._play_lock:
+            nvcuda.cuCtxSetCurrent(self.cuda_ctx)
+            bufs = []
+            kept = []
+            for frame, jpeg in items:
+                buf = self._take_play_buf()
+                if buf is None:
+                    break
+                bufs.append(buf)
+                kept.append((frame, jpeg))
+            if not kept:
+                return []
+            try:
+                dec.decode_many([jpeg for _f, jpeg in kept], bufs, self.row)
+            except Exception as e:
+                print(f"nvJPEG decode failed: {e}")
+                for buf in bufs:
+                    self._play_free.append(self._play_bufs.index(buf))
+                return []
+        return [(frame, buf) for (frame, _jpeg), buf in zip(kept, bufs)]
+
+    def reclaim_play(self, before):
+        # Return device buffers for frames the playhead has passed
+        with self._reader.lock:
+            old = [f for f in self._reader.ring if f < before]
+            ptrs = []
+            for frame in old:
+                item = self._reader.ring.pop(frame)
+                if item[0] == "gpu":
+                    ptrs.append(item[1])
+        if not ptrs:
+            return
+        with self._play_lock:
+            for ptr in ptrs:
+                try:
+                    self._play_free.append(self._play_bufs.index(ptr))
+                except ValueError:
+                    pass
+
+    def _show_device(self, ptr, dark):
+        # Device RGB into the PBO, PBO into the texture, then the quad
+        cudart, nvcuda, gl = _libs()
+        self.ctx.makeCurrent(self)
+        with self._play_lock:
+            nvcuda.cuCtxSetCurrent(self.cuda_ctx)
+            res_arr = (ctypes.c_void_p * 1)(self.res)
+            _check(cudart.cudaGraphicsMapResources(1, res_arr, None), "map")
+            try:
+                mapped = ctypes.c_void_p()
+                size = ctypes.c_size_t(0)
+                _check(cudart.cudaGraphicsResourceGetMappedPointer(
+                    ctypes.byref(mapped), ctypes.byref(size), self.res), "pbo pointer")
+                _check(cudart.cudaMemcpy(mapped, ptr, self.row * self.seq_h, 3),
+                       "play to pbo")
+            finally:
+                _check(cudart.cudaGraphicsUnmapResources(1, res_arr, None), "unmap")
+        bind = self._glb[1]
+        bind(GL_PIXEL_UNPACK_BUFFER, self.pbo.value)
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        gl.glBindTexture(GL_TEXTURE_2D, self.tex)
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.seq_w, self.seq_h,
+                           GL_RGB, GL_UNSIGNED_BYTE, None)
+        bind(GL_PIXEL_UNPACK_BUFFER, 0)
+        self._present(dark, True)
 
     def request_frame(self, force=True):
         # Display comes only from {sequence_id}_preview.db. A miss signals
@@ -497,10 +624,21 @@ class SequencePlayer(QWindow):
         if not force and frame == self.shown_frame and self._waiting is None:
             return
         dark = _dark_mode()
-        jpeg = None
+        item = None
         if self._reader.running():
             self._reader.note(frame)
-            jpeg = self._reader.get(frame)
+            item = self._reader.get(frame)
+            self.reclaim_play(frame - 2)
+        if item is not None and item[0] == "gpu":
+            self._clear_wait()
+            try:
+                self._show_device(item[1], dark)
+                self.shown_frame = frame
+            except Exception as e:
+                print(f"Sequence Player device show failed: {e}")
+                self._present(dark, self.shown_frame is not None)
+            return
+        jpeg = item[1] if item is not None else None
         if jpeg is None:
             try:
                 from sequence_preview import FrameRetrieve

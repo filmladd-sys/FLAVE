@@ -141,11 +141,16 @@ def _nvjpeg_lib():
                                       c.c_int, c.c_int, vp]
     lib.nvjpegEncodeRetrieveBitstream.argtypes = [vp, vp, c.c_void_p,
                                                   c.POINTER(c.c_size_t), vp]
+    lib.nvjpegJpegStateCreate.argtypes = [vp, c.POINTER(vp)]
+    lib.nvjpegJpegStateDestroy.argtypes = [vp]
+    lib.nvjpegDecode.argtypes = [vp, vp, c.c_void_p, c.c_size_t, c.c_int,
+                                 c.POINTER(_NvImage), vp]
     for fn in ("nvjpegCreateSimple", "nvjpegDestroy", "nvjpegEncoderStateCreate",
                "nvjpegEncoderStateDestroy", "nvjpegEncoderParamsCreate",
                "nvjpegEncoderParamsDestroy", "nvjpegEncoderParamsSetQuality",
                "nvjpegEncoderParamsSetSamplingFactors", "nvjpegEncodeImage",
-               "nvjpegEncodeRetrieveBitstream"):
+               "nvjpegEncodeRetrieveBitstream", "nvjpegJpegStateCreate",
+               "nvjpegJpegStateDestroy", "nvjpegDecode"):
         getattr(lib, fn).restype = c.c_int
     _NVJPEG[0] = lib
     return lib
@@ -247,6 +252,56 @@ class _NvJpegEncoder(object):
             lib.nvjpegEncoderStateDestroy(self.state)
         if self.handle.value:
             lib.nvjpegDestroy(self.handle)
+
+
+class _NvJpegDecoder(object):
+    # One nvJPEG decoder per player. Decodes interleaved RGB JPEGs into
+    # device buffers. decode_many queues the batch on the stream and syncs once.
+    def __init__(self, lib, stream):
+        self.lib = lib
+        self.stream = stream
+        self.handle = ctypes.c_void_p()
+        self.states = []
+        _check(lib.nvjpegCreateSimple(ctypes.byref(self.handle)), "nvjpeg decode create")
+
+    def _state(self, index):
+        lib = self.lib
+        while len(self.states) <= index:
+            state = ctypes.c_void_p()
+            _check(lib.nvjpegJpegStateCreate(self.handle, ctypes.byref(state)),
+                   "nvjpeg jpeg state")
+            self.states.append(state)
+        return self.states[index]
+
+    def decode_many(self, jpegs, bufs, pitch):
+        # jpegs: host JPEG bytes. bufs: device RGB pointers, one per jpeg.
+        # Host buffers stay alive until the sync.
+        lib = self.lib
+        cudart = _libs()[0]
+        hosts = []
+        for i, (jpeg, buf) in enumerate(zip(jpegs, bufs)):
+            host = ctypes.create_string_buffer(jpeg)
+            hosts.append(host)
+            img = _NvImage()
+            img.channel[0] = int(buf.value)
+            img.pitch[0] = int(pitch)
+            _check(lib.nvjpegDecode(self.handle, self._state(i),
+                                    ctypes.cast(host, ctypes.c_void_p),
+                                    len(jpeg), NVJPEG_INPUT_RGBI,
+                                    ctypes.byref(img), self.stream),
+                   "nvjpeg decode")
+        _check(cudart.cudaStreamSynchronize(self.stream), "nvjpeg decode sync")
+        return True
+
+    def destroy(self):
+        lib = self.lib
+        for state in self.states:
+            if state:
+                lib.nvjpegJpegStateDestroy(state)
+        self.states = []
+        if self.handle:
+            lib.nvjpegDestroy(self.handle)
+            self.handle = ctypes.c_void_p()
 
 
 def _load_cudart():
