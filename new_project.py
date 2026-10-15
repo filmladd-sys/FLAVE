@@ -167,7 +167,8 @@ class NewProjectWindow(QMainWindow):
                 font_size INTEGER,
                 pos_x INTEGER,
                 pos_y INTEGER,
-                scale REAL
+                scale REAL,
+                link_id INTEGER
             )
         """)
 

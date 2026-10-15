@@ -647,10 +647,9 @@ class SequenceTimeline(QMainWindow):
 
     def _linked_clips(self, clip):
         # Other clips sharing clip's link_id (any track), as live lists.
-        # Keyframe clips participate (same link_id on keyframe_clips); captions
-        # do not start a link group.
+        # Footage, caption, and keyframe clips all participate.
         link_id = clip[8] if len(clip) > 8 else None
-        if link_id is None or is_caption_id(clip[0]):
+        if link_id is None:
             return []
         return [c for clips in self.clips_by_track.values() for c in clips
                 if c[0] != clip[0] and len(c) > 8 and c[8] == link_id]
@@ -1263,10 +1262,13 @@ class SequenceTimeline(QMainWindow):
                 self.delete_selected_clip()
             return
         if is_caption_id(clip[0]):
-            # Caption clip menu: Edit, Slice, Delete (no link this pass)
+            # Caption clip menu: Edit, Slice, Link, Unlink, Delete
             menu = QMenu(self)
             edit_action = menu.addAction("Edit")
             slice_action = menu.addAction("Slice")
+            link_action = menu.addAction("Link")
+            link_action.setEnabled(len(self._selected_clips()) >= 2)
+            unlink_action = menu.addAction("Unlink")
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -1274,6 +1276,10 @@ class SequenceTimeline(QMainWindow):
                 self.edit_caption(clip)
             elif action == slice_action:
                 self.slice_clip(clip, self._x_in_clips(pos))
+            elif action == link_action:
+                self.link_selected_clips()
+            elif action == unlink_action:
+                self.unlink_clips(clip)
             elif action == delete_action:
                 self.delete_selected_clip()
             return
@@ -1309,18 +1315,21 @@ class SequenceTimeline(QMainWindow):
 
     def link_selected_clips(self):
         # Link: every selected clip gets link_id = first selected clip's id
-        # (captions stay unlinked; keyframe clips use keyframe_clips.link_id)
-        selected = [c for c in self._selected_clips() if not is_caption_id(c[0])]
+        # (footage clips / captions / keyframe_clips each store their own)
+        selected = list(self._selected_clips())
         if len(selected) < 2:
             return
         new_link = selected[0][0]
         try:
             from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
+            from sequence_timeline_captions import persist_caption_link_id
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
             for c in selected:
                 if is_keyframe_clip_id(c[0]):
                     persist_keyframe_link_id(cur, c[0], new_link)
+                elif is_caption_id(c[0]):
+                    persist_caption_link_id(cur, c[0], new_link)
                 else:
                     cur.execute("UPDATE clips SET link_id = ? WHERE id = ?",
                                 (new_link, c[0]))
@@ -1341,11 +1350,14 @@ class SequenceTimeline(QMainWindow):
             ids = [clip[0]]
         try:
             from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
+            from sequence_timeline_captions import persist_caption_link_id
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
             for cid in ids:
                 if is_keyframe_clip_id(cid):
                     persist_keyframe_link_id(cur, cid, None)
+                elif is_caption_id(cid):
+                    persist_caption_link_id(cur, cid, None)
                 else:
                     cur.execute("UPDATE clips SET link_id = NULL WHERE id = ?",
                                 (cid,))

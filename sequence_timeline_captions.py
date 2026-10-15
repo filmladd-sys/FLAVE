@@ -24,7 +24,8 @@ def ensure_captions_table(project_db):
             font_size INTEGER,
             pos_x INTEGER,
             pos_y INTEGER,
-            scale REAL
+            scale REAL,
+            link_id INTEGER
         )
     """)
     conn.commit()
@@ -58,17 +59,30 @@ def clip_table_and_id(clip_id):
 
 
 def load_captions(cur, sequence_id, clips):
-    # Caption clips: captions table, negative in-memory ids, never linked
-    cur.execute(
-        "SELECT id, track_id, start_frame, length_frames, text FROM captions "
-        "WHERE sequence_id = ? ORDER BY start_frame, id",
-        (sequence_id,)
-    )
-    for cap_id, track_id, start_frame, length_frames, text in cur.fetchall():
+    # Caption clips: captions table, negative in-memory ids; link_id for groups
+    try:
+        cur.execute(
+            "SELECT id, track_id, start_frame, length_frames, text, link_id "
+            "FROM captions WHERE sequence_id = ? ORDER BY start_frame, id",
+            (sequence_id,)
+        )
+    except sqlite3.OperationalError:
+        # Old scratch DB without captions.link_id: skip caption rows
+        return
+    for row in cur.fetchall():
+        cap_id, track_id, start_frame, length_frames, text, link_id = row
         clips.setdefault(track_id, []).append(
             [-cap_id, None, max(0, int(start_frame or 0)),
-             max(1, int(length_frames or 1)), text or "", 1, 0, 0, None]
+             max(1, int(length_frames or 1)), text or "", 1, 0, 0, link_id]
         )
+
+
+def persist_caption_link_id(cur, clip_mem_id, link_id):
+    # clip_mem_id is -captions.id; None clears group membership
+    cur.execute(
+        "UPDATE captions SET link_id = ? WHERE id = ?",
+        (link_id, -int(clip_mem_id))
+    )
 
 
 def paint_caption_bar(painter, clip_rect):
