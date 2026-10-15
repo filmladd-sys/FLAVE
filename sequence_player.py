@@ -122,6 +122,7 @@ class PreviewReader(object):
                 self.wake.wait(0.05)
                 self.wake.clear()
                 continue
+            t0 = time.perf_counter()
             try:
                 rows = self.conn.execute(
                     "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
@@ -131,12 +132,17 @@ class PreviewReader(object):
                 self.wake.wait(0.05)
                 self.wake.clear()
                 continue
+            t_sql = (time.perf_counter() - t0) * 1000.0
             items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
             decoded = []
+            t1 = time.perf_counter()
             try:
                 decoded = self.player.decode_play_batch(items)
             except Exception as e:
                 print(f"Play decode batch failed: {e}")
+            t_dec = (time.perf_counter() - t1) * 1000.0
+            print(f"PLAY: batch n={len(items)} decoded={len(decoded)} "
+                  f"sql={t_sql:.1f} decode={t_dec:.1f}")
             got = {frame for frame, _buf in decoded}
             with self.lock:
                 for frame, buf in decoded:
@@ -635,11 +641,19 @@ class SequencePlayer(QWindow):
         # Decode buffer is RGB. Expand, copy into the texture, draw.
         _cudart, nvcuda, _gl = _libs()
         self.ctx.makeCurrent(self)
+        t0 = time.perf_counter()
         with self._play_lock:
             nvcuda.cuCtxSetCurrent(self.cuda_ctx)
+            t1 = time.perf_counter()
             self._expand(ptr)
+            t2 = time.perf_counter()
             self._copy_to_texture()
+            t3 = time.perf_counter()
         self._present(dark, True)
+        t4 = time.perf_counter()
+        print(f"PLAY: show ctx={(t1-t0)*1000:.1f} expand={(t2-t1)*1000:.1f} "
+              f"copy={(t3-t2)*1000:.1f} present={(t4-t3)*1000:.1f} "
+              f"total={(t4-t0)*1000:.1f}")
 
     def request_frame(self, force=True):
         # Display comes only from {sequence_id}_preview.db. A miss signals
@@ -666,8 +680,12 @@ class SequencePlayer(QWindow):
                 print(f"Sequence Player device show failed: {e}")
                 self._present(dark, self.shown_frame is not None)
             return
+        if item is not None and item[0] == "cpu":
+            print(f"PLAY: frame={frame} cpu fallback")
         jpeg = item[1] if item is not None else None
         if jpeg is None:
+            if self._reader.running():
+                print(f"PLAY: frame={frame} miss")
             try:
                 from sequence_preview import FrameRetrieve
                 jpeg = FrameRetrieve(self.timeline._project_db(),
