@@ -394,7 +394,8 @@ class SequenceTimeline(QMainWindow):
         self._play_start_time = 0.0
         self._play_shown_count = 0
         self._play_last_shown = None
-        self._play_audio_clock = False  # True after first video frame is ready/shown
+        self._play_audio_clock = False  # True after first video frame is shown
+        self._play_prime_tries = 0
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(20)
         self._play_timer.timeout.connect(self._play_tick)
@@ -1538,7 +1539,8 @@ class SequenceTimeline(QMainWindow):
         self.status_bar.showMessage(f"Filling preview: {left} frames left")
 
     def _start_clock(self):
-        import time
+        # Prime the start-frame batch, then audio, then the tick timer.
+        # Do not start the WAV until play_has(start) is true.
         self._play_filling = False
         try:
             from sequence_preview_worker import set_play_priority
@@ -1546,22 +1548,67 @@ class SequenceTimeline(QMainWindow):
         except Exception:
             pass
         self._play_start_frame = int(self._play_from)
-        self._play_start_time = time.perf_counter()
+        self._play_start_time = 0.0
         self._play_cursor = int(self._play_from)
         self._play_shown_count = 0
         self._play_last_shown = None
         self._play_audio_clock = False
+        self._play_prime_tries = 0
         self._playing = True
+        self._play_timer.stop()
+        self._play_prime_once()
+
+    def _play_prime_once(self):
+        # (1) play_fill start (2) wait for play_has (3) start_preview_audio
+        # (4) start the play timer. Retries cover a new player still in _setup.
+        if not self._playing:
+            return
         player = getattr(self, "_player", None)
-        if player is not None and not getattr(player, "closed", False):
+        if player is None or getattr(player, "closed", False):
+            self._stop_play()
+            return
+        start = int(self._play_start_frame)
+        max_tries = 100  # 100 * 20ms ~= 2s for GL init + first nvJPEG batch
+        ready = bool(getattr(player, "ready", False))
+        if ready:
             try:
-                player.start_preview_audio(self._play_from)
+                if not player.play_has(start):
+                    player.play_fill(start, self._play_batch_n())
+            except Exception as e:
+                # print("play prime fill failed: %s" % e)
+                pass
+        has = False
+        if ready:
+            try:
+                has = bool(player.play_has(start))
+            except Exception:
+                has = False
+        if has:
+            import time
+            self._play_start_time = time.perf_counter()
+            try:
+                player.start_preview_audio(start)
             except Exception as e:
                 # print("preview audio start failed: %s" % e)
                 pass
-        self._play_timer.setInterval(10)
-        self._play_timer.start()
-        self._play_tick()
+            self._play_timer.setInterval(10)
+            self._play_timer.start()
+            self._play_tick()
+            return
+        self._play_prime_tries += 1
+        if self._play_prime_tries >= max_tries:
+            # Bounded give-up: start anyway so Play is not stuck forever.
+            import time
+            self._play_start_time = time.perf_counter()
+            try:
+                player.start_preview_audio(start)
+            except Exception:
+                pass
+            self._play_timer.setInterval(10)
+            self._play_timer.start()
+            self._play_tick()
+            return
+        QTimer.singleShot(20, self._play_prime_once)
 
     def _play_batch_n(self):
         try:
@@ -1571,10 +1618,9 @@ class SequenceTimeline(QMainWindow):
         return max(1, min(30, n))
 
     def _play_tick(self):
-        # Audio position is the master clock only after the first video frame
-        # is ready or shown; until then wait on the start frame / wall clock
-        # so play_show is not skipped while the first nvJPEG batch fills.
-        # The playhead moves silent, so no scrub or preview events fire.
+        # After prime, audio position is the master clock once the first
+        # frame has been shown; wall clock is the fallback. Until the first
+        # play_show, hold on the start frame (batch already filled).
         import time
         if not self._playing:
             return
@@ -1583,12 +1629,6 @@ class SequenceTimeline(QMainWindow):
             self._stop_play()
             return
         start = int(self._play_start_frame)
-        if not self._play_audio_clock:
-            try:
-                if player.play_has(start):
-                    self._play_audio_clock = True
-            except Exception:
-                pass
         clock = None
         if self._play_audio_clock:
             try:
@@ -1603,7 +1643,6 @@ class SequenceTimeline(QMainWindow):
                     clock = None
         if clock is None:
             if not self._play_audio_clock:
-                # Hold on the start frame until the first batch is presentable
                 clock = start
             else:
                 elapsed = time.perf_counter() - self._play_start_time
@@ -1613,7 +1652,7 @@ class SequenceTimeline(QMainWindow):
             clock = 0
         if clock > last:
             clock = last
-        if clock - self._play_cursor > 2:
+        if self._play_audio_clock and clock - self._play_cursor > 2:
             player.play_drop_before(clock)
             self._play_cursor = clock
         if self._play_cursor > clock:
@@ -1640,6 +1679,7 @@ class SequenceTimeline(QMainWindow):
         was = self._playing or self._play_filling
         self._playing = False
         self._play_filling = False
+        self._play_prime_tries = 0
         self._play_timer.stop()
         try:
             from sequence_preview_worker import set_play_priority
