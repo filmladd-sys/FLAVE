@@ -16,6 +16,7 @@ import ctypes
 import os
 import time
 import sqlite3
+import threading
 
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QImage, QWindow, QOpenGLContext
@@ -45,6 +46,98 @@ from sequence_player_preview import (
 # The player is waiting on a preview frame. The worker skips its idle yield
 # while this is set, so a miss is filled instead of deferred.
 _preview_wait = [0]
+
+
+class PreviewReader(object):
+    # One connection and one thread for playback. Reads previewBatchSeconds
+    # of JPEGs at a time into a ring. The GUI never opens the file.
+
+    def __init__(self, player):
+        self.player = player
+        self.conn = None
+        self.thread = None
+        self.lock = threading.Lock()
+        self.ring = {}
+        self.playhead = 0
+        self.stop = threading.Event()
+        self.wake = threading.Event()
+
+    def start(self, frame):
+        self.stop_reader()
+        from sequence_preview import preview_db_path
+        path = preview_db_path(self.player.timeline._project_db(),
+                               self.player.sequence_id)
+        if not os.path.isfile(path):
+            return
+        self.conn = sqlite3.connect(path)
+        self.conn.execute("PRAGMA query_only = ON")
+        self.playhead = int(frame)
+        self.stop.clear()
+        self.wake.clear()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def note(self, frame):
+        with self.lock:
+            self.playhead = int(frame)
+        self.wake.set()
+
+    def get(self, frame):
+        with self.lock:
+            blob = self.ring.get(int(frame))
+        return blob
+
+    def running(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def stop_reader(self):
+        self.stop.set()
+        self.wake.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+            self.thread = None
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+        with self.lock:
+            self.ring.clear()
+
+    def _batch_frames(self):
+        try:
+            seconds = float(_get_global_setting("previewBatchSeconds", "1") or 1)
+        except ValueError:
+            seconds = 1.0
+        fps = float(getattr(self.player.timeline, "fps", 30) or 30)
+        return max(1, int(round(seconds * fps)))
+
+    def _run(self):
+        while not self.stop.is_set():
+            with self.lock:
+                head = self.playhead
+                have = set(self.ring)
+            count = self._batch_frames()
+            last = int(self.player.timeline.total_frames()) - 1
+            end = min(last, head + count - 1)
+            missing = [f for f in range(head, end + 1) if f not in have]
+            if not missing or self.conn is None:
+                self.wake.wait(0.05)
+                self.wake.clear()
+                continue
+            try:
+                rows = self.conn.execute(
+                    "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
+                    "AND dirty = 0 AND jpeg IS NOT NULL",
+                    (missing[0], missing[-1])).fetchall()
+            except sqlite3.Error:
+                self.wake.wait(0.05)
+                self.wake.clear()
+                continue
+            with self.lock:
+                for frame, blob in rows:
+                    if blob is not None:
+                        self.ring[int(frame)] = bytes(blob)
+                for frame in [f for f in self.ring if f < self.playhead - 2]:
+                    del self.ring[frame]
 
 
 def timeline_snapshot(tl):
@@ -113,6 +206,7 @@ class SequencePlayer(QWindow):
         self._restoring = False
         self._waiting = None             # frame we asked the worker for
         self._retry_armed = False
+        self._reader = PreviewReader(self)
 
     # ---- geometry, same scheme as the other windows
 
@@ -171,6 +265,7 @@ class SequencePlayer(QWindow):
             return
         self.closed = True
         self._clear_wait()
+        self._reader.stop_reader()
         self._save_geometry()
         self._release_gpu()
         if getattr(self.timeline, "_player", None) is self:
@@ -384,6 +479,13 @@ class SequencePlayer(QWindow):
 
     # ---- one frame: show the preview JPEG, or ask the worker for it
 
+    def start_read_ahead(self, frame):
+        # Play is starting. One connection, then batches from this frame.
+        self._reader.start(frame)
+
+    def stop_read_ahead(self):
+        self._reader.stop_reader()
+
     def request_frame(self, force=True):
         # Display comes only from {sequence_id}_preview.db. A miss signals
         # the preview worker and holds the last picture until that JPEG lands.
@@ -395,13 +497,18 @@ class SequencePlayer(QWindow):
         if not force and frame == self.shown_frame and self._waiting is None:
             return
         dark = _dark_mode()
-        try:
-            from sequence_preview import FrameRetrieve
-            jpeg = FrameRetrieve(self.timeline._project_db(),
-                                 self.sequence_id, frame)
-        except Exception as e:
-            print(f"Sequence Player preview read failed: {e}")
-            jpeg = None
+        jpeg = None
+        if self._reader.running():
+            self._reader.note(frame)
+            jpeg = self._reader.get(frame)
+        if jpeg is None:
+            try:
+                from sequence_preview import FrameRetrieve
+                jpeg = FrameRetrieve(self.timeline._project_db(),
+                                     self.sequence_id, frame)
+            except Exception as e:
+                print(f"Sequence Player preview read failed: {e}")
+                jpeg = None
         if jpeg is not None:
             self._clear_wait()
             try:

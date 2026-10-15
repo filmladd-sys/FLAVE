@@ -1536,6 +1536,9 @@ class SequenceTimeline(QMainWindow):
         self._play_last_shown = None
         self._playing = True
         self._play_timer.start()
+        player = getattr(self, "_player", None)
+        if player is not None and not player.closed:
+            player.start_read_ahead(self._play_start_frame)
         self._play_tick()
 
     def _play_tick(self):
@@ -1576,6 +1579,9 @@ class SequenceTimeline(QMainWindow):
             pass
         if was:
             self._save_view_state()
+        player = getattr(self, "_player", None)
+        if player is not None and not player.closed:
+            player.stop_read_ahead()
 
     def open_player(self):
         # Player menu: open this timeline's Sequence Player, or raise it
