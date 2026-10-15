@@ -1,17 +1,17 @@
 # footage_manager.py
 # Footage Manager window for Ladd Video Editor
-# Menus: Footage (Import, Replace, Remove) and Sort By.
+# Menus: top-level Import and Sort By.
 # ASCII only.
 
 import os
 import sqlite3
 from PySide6.QtWidgets import (
-    QMainWindow, QLabel, QMenuBar, QMenu, QFileDialog,
+    QApplication, QMainWindow, QLabel, QMenuBar, QMenu, QFileDialog,
     QMessageBox, QStatusBar, QWidget, QVBoxLayout,
     QTableWidget, QHeaderView, QSizePolicy
 )
 from PySide6.QtCore import Qt, QPoint, QMimeData
-from PySide6.QtGui import QAction, QDrag
+from PySide6.QtGui import QAction, QDrag, QCursor
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
@@ -190,12 +190,10 @@ class FootageManager(QMainWindow):
     def _create_menus(self):
         menubar = self.menuBar()
 
-        # Footage menu
-        footage_menu = menubar.addMenu("Footage")
-
+        # Top-level Import
         import_action = QAction("Import", self)
         import_action.triggered.connect(self._import_footage)
-        footage_menu.addAction(import_action)
+        menubar.addAction(import_action)
 
         # Sort By menu
         sort_menu = menubar.addMenu("Sort By")
@@ -224,19 +222,28 @@ class FootageManager(QMainWindow):
             QMessageBox.warning(self, "Import", "footage_importer.py not found")
             return
         start_dir = _get_global_setting("last_project_folder", "")
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Import Footage",
             start_dir,
             "Media Files (*.mp4 *.mov *.mkv *.avi *.mp3 *.wav *.png *.jpg *.jpeg);;All Files (*)"
         )
-        if path:
-            new_id = import_footage(self.project_db, path)
-            if new_id:
-                self.status_bar.showMessage(f"Imported: {os.path.basename(path)}")
+        if not paths:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            imported = 0
+            for path in paths:
+                new_id = import_footage(self.project_db, path)
+                if new_id:
+                    imported += 1
+            if imported:
+                self.status_bar.showMessage(f"Imported {imported} file(s)")
                 self.refresh()
             else:
-                QMessageBox.warning(self, "Import", "Could not import file")
+                QMessageBox.warning(self, "Import", "Could not import files")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def refresh(self):
         self.table.setRowCount(0)

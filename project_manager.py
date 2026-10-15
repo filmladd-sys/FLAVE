@@ -185,17 +185,10 @@ class ProjectManager(QMainWindow):
         self.footage_mgr_action.triggered.connect(self._open_footage_manager)
         self.windows_menu.addAction(self.footage_mgr_action)
 
-
-        self.seq_player_action = QAction("Sequence Player", self)
-        self.seq_player_action.setEnabled(False)
-        self.seq_player_action.triggered.connect(self._open_sequence_player)
-        self.windows_menu.addAction(self.seq_player_action)
-
     def _update_windows_menu(self):
         enabled = self.current_project is not None
         self.seq_mgr_action.setEnabled(enabled)
         self.footage_mgr_action.setEnabled(enabled)
-        self.seq_player_action.setEnabled(enabled)
         self.close_action.setEnabled(enabled)
         self.project_settings_action.setEnabled(enabled)
 
@@ -307,9 +300,6 @@ class ProjectManager(QMainWindow):
             return
         self.footage_window = FootageManager(self)
         self.footage_window.show()
-
-    def _open_sequence_player(self):
-        QMessageBox.information(self, "Windows", "Sequence Player stub")
 
     def _restore_geometry(self):
         geo = _get_global_setting("project_manager_geometry", "")
