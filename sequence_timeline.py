@@ -1587,6 +1587,12 @@ class SequenceTimeline(QMainWindow):
             return
         enabled = bool(clip[5])
         menu = QMenu(self)
+        # Gain... on clips of audio and video tracks (a video clip's row is
+        # also mixed as audio); right-clicked clip only, like Enable / Solo
+        gain_action = None
+        if self._track_type(self._clip_track_id(clip)) in ("audio", "video"):
+            gain_action = menu.addAction("Gain...")
+            menu.addSeparator()
         slice_action = menu.addAction("Slice")
         link_action = menu.addAction("Link")
         link_action.setEnabled(len(self._selected_clips()) >= 2)
@@ -1603,6 +1609,10 @@ class SequenceTimeline(QMainWindow):
             # Same as the Delete key: selected clips, plus link partners
             # unless selection solo
             self.delete_selected_clip()
+            return
+        if gain_action is not None and action == gain_action:
+            from clip_gain import edit_clip_gain
+            edit_clip_gain(self, clip)
             return
         if action == slice_action:
             self.slice_clip(clip, self._x_in_clips(pos))

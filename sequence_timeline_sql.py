@@ -219,7 +219,8 @@ def ensure_clips_table(project_db):
             in_frame INTEGER NOT NULL DEFAULT 0,
             enabled INTEGER DEFAULT 1,
             solo INTEGER DEFAULT 0,
-            link_id INTEGER
+            link_id INTEGER,
+            gain_db REAL DEFAULT 0
         )
     """)
     conn.commit()

@@ -51,12 +51,17 @@ def _load_mix_rows(project_db, sequence_id):
     conn = sqlite3.connect(project_db)
     try:
         cur = conn.cursor()
+        # gain_db is new in BUILD 74; an older clips table reads it as 0
+        cur.execute("PRAGMA table_info(clips)")
+        gain_sql = ("COALESCE(c.gain_db, 0)"
+                    if "gain_db" in [r[1] for r in cur.fetchall()] else "0")
         cur.execute(
             "SELECT t.id, LOWER(COALESCE(t.track_type, '')), "
             "COALESCE(t.enabled, 1), COALESCE(t.solo, 0), "
             "c.footage_id, c.start_frame, c.length_frames, "
             "COALESCE(c.in_frame, 0), COALESCE(c.enabled, 1), "
-            "COALESCE(c.solo, 0), f.original_path, f.filename, c.link_id "
+            "COALESCE(c.solo, 0), f.original_path, f.filename, c.link_id, "
+            + gain_sql + " "
             "FROM clips c "
             "JOIN tracks t ON t.id = c.track_id "
             "LEFT JOIN footage f ON f.id = c.footage_id "
@@ -72,7 +77,7 @@ def _load_mix_rows(project_db, sequence_id):
     out = []
     for (track_id, track_type, track_en, track_solo, footage_id,
          start_frame, length_frames, in_frame, clip_en, clip_solo,
-         original_path, filename, link_id) in rows:
+         original_path, filename, link_id, gain_db) in rows:
         if not int(track_en) or not int(clip_en):
             continue
         if any_solo and not int(track_solo):
@@ -86,6 +91,7 @@ def _load_mix_rows(project_db, sequence_id):
             "in_frame": max(0, int(in_frame or 0)),
             "basename": _basename_for_row(original_path, filename),
             "link_id": link_id,
+            "gain_db": float(gain_db or 0.0),
         })
     return out
 
@@ -134,6 +140,11 @@ def _load_volume_clips(project_db, sequence_id, track_order):
         out.append((link_id, int(in_f), int(out_f), by_id.get(int(db_id), []),
                     int(order)))
     return out
+
+
+def db_to_linear(gain_db):
+    # Clip gain in dB -> linear factor (0 dB = 1.0, +6 dB ~ 2.0)
+    return 10.0 ** (float(gain_db or 0.0) / 20.0)
 
 
 def _interp(points, f):
@@ -202,7 +213,8 @@ def audio_timeline_signature(project_db, sequence_id, fps, total_frames):
     parts = ["fps=%s" % repr(float(fps)), "frames=%d" % int(total_frames)]
     order = _track_order(project_db, sequence_id)
     for r in rows:
-        parts.append("link=%s order=%s" % (r.get("link_id"), order.get(r["track_id"])))
+        parts.append("link=%s order=%s gain=%r" % (
+            r.get("link_id"), order.get(r["track_id"]), r.get("gain_db", 0.0)))
     for link_id, in_f, out_f, pts, kf_order in _load_volume_clips(
             project_db, sequence_id, order):
         parts.append("vol link=%s in=%d out=%d order=%d keys=%s" % (
@@ -266,10 +278,14 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
             use = dst1 - dst0
             gain = volume_gain(vol_clips, r.get("link_id"),
                                track_order.get(r["track_id"]), dst0, use, fps)
+            lin = db_to_linear(r.get("gain_db", 0.0))
             if gain is None:
-                acc[dst0:dst1] += src[src0:src0 + use]
+                if lin == 1.0:
+                    acc[dst0:dst1] += src[src0:src0 + use]
+                else:
+                    acc[dst0:dst1] += src[src0:src0 + use] * lin
             else:
-                acc[dst0:dst1] += src[src0:src0 + use] * gain
+                acc[dst0:dst1] += src[src0:src0 + use] * (gain * lin)
         acc = np.clip(acc, -32768, 32767).astype("<i2")
         return acc.tobytes()
     # array-module fallback
@@ -292,11 +308,12 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
         take = min(count, len(src) - src0)
         gain = volume_gain(vol_clips, r.get("link_id"),
                            track_order.get(r["track_id"]), dst0, take, fps)
+        lin = db_to_linear(r.get("gain_db", 0.0))
         for i in range(take):
             d = dst0 + i
             if d >= n:
                 break
-            g = 1.0 if gain is None else gain[i]
+            g = lin if gain is None else gain[i] * lin
             acc[d] += float(src[src0 + i]) * g
     out = array.array("h")
     for v in acc:
