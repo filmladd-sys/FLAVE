@@ -149,6 +149,10 @@ class ProjectManager(QMainWindow):
         # Simple central status
         self.status_label = QLabel("No project open")
         self.status_label.setAlignment(Qt.AlignCenter)
+        # Selectable / copyable project path (QLabel keeps its right-click Copy)
+        self.status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.status_label.setCursor(Qt.IBeamCursor)
         self.setCentralWidget(self.status_label)
 
         self.status_bar = QStatusBar()
