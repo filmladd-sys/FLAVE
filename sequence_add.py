@@ -31,19 +31,8 @@ def _get_global_setting(key, default=None):
 
 
 def ensure_sequences_table(project_db):
-    conn = sqlite3.connect(project_db)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sequences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            width INTEGER NOT NULL,
-            height INTEGER NOT NULL,
-            fps REAL NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 class SequenceAddDialog(QDialog):

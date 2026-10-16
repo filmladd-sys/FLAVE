@@ -86,24 +86,8 @@ def get_display_rows(project_db, id_list):
 
 
 def _ensure_icons_table(conn):
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(icons)")
-    cols = [row[1] for row in cur.fetchall()]
-    # Clean schema only: an icons table without frame_number is dropped
-    if cols and "frame_number" not in cols:
-        cur.execute("DROP TABLE icons")
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS icons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            footage_id INTEGER NOT NULL,
-            width INTEGER,
-            height INTEGER,
-            is_original INTEGER DEFAULT 0,
-            frame_number INTEGER DEFAULT 0,
-            data BLOB
-        )
-    """)
-    conn.commit()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 JPEG_QUALITY = 90

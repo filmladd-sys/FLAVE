@@ -42,32 +42,18 @@ KEY_MARK_SIZE = 20
 
 
 def ensure_keyframe_clips_table(conn):
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS keyframe_clips ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "sequence_id INTEGER NOT NULL, "
-        "track_id INTEGER NOT NULL, "
-        "type TEXT NOT NULL, "
-        "link_id INTEGER, "
-        "in_frame INTEGER NOT NULL, "
-        "out_frame INTEGER NOT NULL, "
-        "name TEXT)"
-    )
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def ensure_keyframes_table(conn):
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS keyframes ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "keyframe_clip_id INTEGER NOT NULL, "
-        "frame INTEGER NOT NULL, "
-        "value REAL NOT NULL)"
-    )
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def ensure_keyframe_tables(conn):
-    ensure_keyframe_clips_table(conn)
-    ensure_keyframes_table(conn)
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def is_keyframe_clip_id(clip_id):

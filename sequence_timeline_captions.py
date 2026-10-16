@@ -10,26 +10,8 @@ CAPTION_LANGUAGES = ["eng", "spa", "fra", "deu", "ita", "por", "jpn", "kor",
 
 
 def ensure_captions_table(project_db):
-    conn = sqlite3.connect(project_db)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS captions (
-            id INTEGER PRIMARY KEY,
-            sequence_id INTEGER NOT NULL,
-            track_id INTEGER NOT NULL,
-            start_frame INTEGER NOT NULL,
-            length_frames INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            font_family TEXT,
-            font_size INTEGER,
-            pos_x INTEGER,
-            pos_y INTEGER,
-            scale REAL,
-            link_id INTEGER
-        )
-    """)
-    conn.commit()
-    conn.close()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def is_caption_id(clip_id):

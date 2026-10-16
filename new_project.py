@@ -69,6 +69,9 @@ class NewProjectWindow(QMainWindow):
         self.close()
 
     def _init_db(self, db_path):
+        # The one definition of every project-db table (BUILD 78). Side
+        # databases (.audiotmp.db, .undo.db, _preview.db, global settings)
+        # are created by their own modules.
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
 
@@ -183,11 +186,28 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
-        try:
-            from keyframe import ensure_keyframe_tables
-            ensure_keyframe_tables(conn)
-        except Exception:
-            pass
+        # Keyframe clips (position X / Y, scale, volume) and their keys
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS keyframe_clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sequence_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                link_id INTEGER,
+                in_frame INTEGER NOT NULL,
+                out_frame INTEGER NOT NULL,
+                name TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS keyframes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyframe_clip_id INTEGER NOT NULL,
+                frame INTEGER NOT NULL,
+                value REAL NOT NULL
+            )
+        """)
 
         conn.commit()
         conn.close()

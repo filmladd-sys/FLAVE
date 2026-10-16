@@ -63,18 +63,8 @@ def _set_global_setting(key, value):
 
 
 def _ensure_children_table(project_db):
-    conn = sqlite3.connect(project_db)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sequence_children (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            parent_id INTEGER NOT NULL,
-            child_id INTEGER NOT NULL,
-            UNIQUE(parent_id, child_id)
-        )
-    """)
-    conn.commit()
-    conn.close()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 class SequenceTable(QTableWidget):

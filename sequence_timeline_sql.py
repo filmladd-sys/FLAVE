@@ -167,64 +167,13 @@ def _load_sequence_name(sequence_id):
 
 
 def ensure_tracks_table(project_db):
-    conn = sqlite3.connect(project_db)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS tracks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sequence_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            track_type TEXT NOT NULL,
-            sort_order INTEGER DEFAULT 0
-        )
-    """)
-    # Older project DBs have a different tracks layout; add missing columns
-    cur.execute("PRAGMA table_info(tracks)")
-    cols = [row[1] for row in cur.fetchall()]
-    if "name" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN name TEXT")
-    if "track_type" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN track_type TEXT")
-    if "sort_order" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN sort_order INTEGER DEFAULT 0")
-    if "enabled" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN enabled INTEGER DEFAULT 1")
-    if "solo" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN solo INTEGER DEFAULT 0")
-    if "height_px" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN height_px INTEGER DEFAULT 64")
-    if "bg_color" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN bg_color TEXT")
-    if "language" not in cols:
-        cur.execute("ALTER TABLE tracks ADD COLUMN language TEXT DEFAULT ''")
-    conn.commit()
-    conn.close()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def ensure_clips_table(project_db):
-    conn = sqlite3.connect(project_db)
-    cur = conn.cursor()
-    # Clean schema only: a clips table without in_frame or link_id is dropped
-    cur.execute("PRAGMA table_info(clips)")
-    cols = [row[1] for row in cur.fetchall()]
-    if cols and ("in_frame" not in cols or "link_id" not in cols):
-        cur.execute("DROP TABLE clips")
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS clips (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id INTEGER NOT NULL,
-            footage_id INTEGER NOT NULL,
-            start_frame INTEGER NOT NULL,
-            length_frames INTEGER NOT NULL,
-            in_frame INTEGER NOT NULL DEFAULT 0,
-            enabled INTEGER DEFAULT 1,
-            solo INTEGER DEFAULT 0,
-            link_id INTEGER,
-            gain_db REAL DEFAULT 0
-        )
-    """)
-    conn.commit()
-    conn.close()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def _load_sequence_duration(sequence_id):

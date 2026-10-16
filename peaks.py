@@ -20,14 +20,7 @@ SAMPLES_PER_BUCKET = PEAKS_SAMPLE_RATE // PEAKS_PER_SECOND   # 480
 PEAK_AUDIO_EXTS = {"mp3", "wav", "aac", "flac", "m4a", "ogg"}
 PEAK_VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "m4v"}
 
-PEAKS_CREATE_SQL = """
-    CREATE TABLE IF NOT EXISTS peaks (
-        footage_id INTEGER PRIMARY KEY,
-        peaks_per_second INTEGER NOT NULL,
-        duration_seconds REAL NOT NULL,
-        data BLOB NOT NULL
-    )
-"""
+# peaks table (project db): defined in new_project.py
 
 AUDIO_TMP_CREATE_SQL = """
     CREATE TABLE IF NOT EXISTS AudioTmp (
@@ -39,8 +32,8 @@ AUDIO_TMP_CREATE_SQL = """
 
 
 def ensure_peaks_table(conn):
-    conn.execute(PEAKS_CREATE_SQL)
-    conn.commit()
+    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
+    return None
 
 
 def audiotmp_db_path(project_db):
