@@ -127,7 +127,9 @@ class NewProjectWindow(QMainWindow):
                 fps REAL,
                 has_audio INTEGER DEFAULT 0,
                 size_bytes INTEGER,
-                file_type TEXT
+                file_type TEXT,
+                proxy_percent INTEGER NOT NULL DEFAULT 0,
+                codec TEXT
             )
         """)
 
@@ -154,7 +156,8 @@ class NewProjectWindow(QMainWindow):
                 enabled INTEGER DEFAULT 1,
                 solo INTEGER DEFAULT 0,
                 link_id INTEGER,
-                gain_db REAL DEFAULT 0
+                gain_db REAL DEFAULT 0,
+                proxy_percent INTEGER NOT NULL DEFAULT 0
             )
         """)
 

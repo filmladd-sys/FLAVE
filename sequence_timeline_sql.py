@@ -543,6 +543,16 @@ def drop_footage(self, footage_id, row, x_in_clips):
             "VALUES (?, ?, ?, ?, 0)",
             (track_id, footage_id, start_frame, length_frames)
         )
+        if track_type in ("video", "image"):
+            # New video / image clip takes the footage Proxy Default
+            # (older DBs without proxy_percent: skipped)
+            try:
+                cur.execute(
+                    "UPDATE clips SET proxy_percent = (SELECT COALESCE(proxy_percent, 0) "
+                    "FROM footage WHERE id = ?) WHERE id = ?",
+                    (footage_id, cur.lastrowid))
+            except sqlite3.OperationalError:
+                pass
         if audio_track_id is not None:
             # link_id is the video clip id, shared by both clips
             link_id = cur.lastrowid
@@ -641,6 +651,7 @@ def slice_clip(self, clip, x_in_clips):
         cur = conn.cursor()
         right_ids = []
         has_gain = None
+        has_proxy = False
         for c in members:
             c_start, c_len, c_in = c[2], c[3], c[7]
             if not (c_start < split_frame < c_start + c_len):
@@ -676,11 +687,17 @@ def slice_clip(self, clip, x_in_clips):
             # Right piece keeps the clip gain (gain_db; older tables lack it)
             if has_gain is None:
                 cur.execute("PRAGMA table_info(clips)")
-                has_gain = "gain_db" in [r[1] for r in cur.fetchall()]
+                clip_cols = [r[1] for r in cur.fetchall()]
+                has_gain = "gain_db" in clip_cols
+                has_proxy = "proxy_percent" in clip_cols
             if has_gain:
                 cur.execute(
                     "UPDATE clips SET gain_db = (SELECT gain_db FROM clips WHERE id = ?) "
                     "WHERE id = ?", (c[0], right_ids[-1]))
+            if has_proxy:
+                cur.execute(
+                    "UPDATE clips SET proxy_percent = (SELECT proxy_percent FROM clips "
+                    "WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
         if linked and right_ids:
             # New link_id for the right pieces: the first right clip's id
             new_link = right_ids[0]

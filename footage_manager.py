@@ -8,7 +8,7 @@ import sqlite3
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QMenuBar, QMenu, QFileDialog,
     QMessageBox, QStatusBar, QWidget, QVBoxLayout,
-    QTableWidget, QHeaderView, QSizePolicy
+    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
 )
 from PySide6.QtCore import Qt, QPoint, QMimeData
 from PySide6.QtGui import QAction, QDrag, QCursor
@@ -156,10 +156,11 @@ class FootageManager(QMainWindow):
         self.selected_footage = None
 
         self.table = FootageTable(self)
-        # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Type, 4 Size, 5 Length
-        self.table.setColumnCount(6)
+        # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Proxy Default, 4 Type,
+        # 5 Size, 6 Length
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["Icon", "Name", "#Proxies", "Type", "Size", "Length"])
+            ["Icon", "Name", "#Proxies", "Proxy Default", "Type", "Size", "Length"])
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -289,16 +290,68 @@ class FootageManager(QMainWindow):
             for col, item in enumerate(items):
                 if col == 1 and "id" in row:
                     item.setData(Qt.UserRole, row["id"])
-                self.table.setItem(i, col, item)
+                # Display rows have no Proxy Default: columns 3+ shift by one
+                self.table.setItem(i, col if col < 3 else col + 1, item)
+            self.table.setItem(i, 3, self._proxy_default_item(items))
             if icon_widget is not None:
                 self.table.setCellWidget(i, 0, icon_widget)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
 
+    def _proxy_default_item(self, items):
+        # Video / image rows (the #Proxies cell carries the footage id):
+        # 'None' or 'NN%', clickable. Audio rows: empty, inert.
+        item = QTableWidgetItem("")
+        item.setTextAlignment(Qt.AlignCenter)
+        fid = items[2].data(Qt.UserRole + 1) if len(items) > 2 else None
+        if fid is None:
+            return item
+        try:
+            from clip_proxy import footage_proxy_percent, proxy_label
+            item.setText(proxy_label(footage_proxy_percent(self.project_db, fid)))
+        except Exception:
+            item.setText("None")
+        item.setData(Qt.UserRole + 1, fid)
+        font = item.font()
+        font.setUnderline(True)
+        item.setFont(font)
+        item.setToolTip("Choose the proxy for new clips of this footage")
+        return item
+
+    def _proxy_default_menu(self, row):
+        item = self.table.item(row, 3)
+        fid = item.data(Qt.UserRole + 1) if item is not None else None
+        if fid is None:
+            return
+        from clip_proxy import (proxy_options, footage_proxy_percent,
+                                build_proxy_menu, set_footage_proxy_percent)
+        menu = QMenu(self)
+        actions = build_proxy_menu(menu, proxy_options(self.project_db, fid),
+                                   footage_proxy_percent(self.project_db, fid))
+        rect = self.table.visualItemRect(item)
+        chosen = menu.exec(self.table.viewport().mapToGlobal(rect.bottomLeft()))
+        if chosen is None or chosen not in actions:
+            return
+        try:
+            ok = set_footage_proxy_percent(self.project_db, fid, actions[chosen])
+        except Exception as e:
+            QMessageBox.warning(self, "Proxy Default", f"Could not save: {e}")
+            return
+        if not ok:
+            QMessageBox.information(
+                self, "Proxy Default",
+                "Proxy Default is not available in this project because it was "
+                "created with an older version.")
+            return
+        self.refresh()
+
     def _cell_clicked(self, row, col):
         # #Proxies cell (video / image only): cellClicked fires for a click
         # anywhere in the cell; audio cells carry no id and stay inert
+        if col == 3:
+            self._proxy_default_menu(row)
+            return
         if col != 2:
             return
         item = self.table.item(row, 2)

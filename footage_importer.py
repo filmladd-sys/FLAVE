@@ -6,6 +6,9 @@ import os
 import sqlite3
 import subprocess
 
+_VISUAL_EXTS = {"mov", "mp4", "mkv", "avi", "m4v",
+                "png", "jpg", "jpeg", "bmp", "gif", "webp"}
+
 
 def import_footage(project_db, media_path):
     if not project_db or not os.path.isfile(media_path):
@@ -27,6 +30,24 @@ def import_footage(project_db, media_path):
     new_id = cur.lastrowid
     conn.commit()
     conn.close()
+
+    # Video / image: width, height, codec of v:0 (ffprobe). Audio stays NULL.
+    # Older footage tables without codec: skipped, import still succeeds.
+    if ext in _VISUAL_EXTS:
+        try:
+            from clip_proxy import probe_video_info
+            info = probe_video_info(media_path)
+            if info is not None:
+                conn = sqlite3.connect(project_db)
+                try:
+                    conn.execute(
+                        "UPDATE footage SET width = ?, height = ?, codec = ? WHERE id = ?",
+                        (info[0], info[1], info[2], new_id))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            pass
 
     # Ensure sibling audio cache DB exists before peaks/PCM store
     try:

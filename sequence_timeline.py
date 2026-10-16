@@ -1602,9 +1602,18 @@ class SequenceTimeline(QMainWindow):
         solo_action = menu.addAction("Solo")
         solo_action.setCheckable(True)
         solo_action.setChecked(bool(clip[6]))
+        # Proxy submenu on video / image clips only (not audio)
+        proxy_actions = {}
+        if self._track_type(self._clip_track_id(clip)) in ("video", "image"):
+            from clip_proxy import add_clip_proxy_submenu
+            proxy_actions = add_clip_proxy_submenu(self, menu, clip)
         menu.addSeparator()
         delete_action = menu.addAction("Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action is not None and action in proxy_actions:
+            from clip_proxy import apply_clip_proxy
+            apply_clip_proxy(self, clip, proxy_actions[action])
+            return
         if action == delete_action:
             # Same as the Delete key: selected clips, plus link partners
             # unless selection solo
