@@ -224,11 +224,13 @@ def footage_size(db_path, footage_id):
 
 def build_proxy_cmd(src, out, w, h):
     # User's exact shape (GPU decode, scale_cuda, hevc_nvenc) plus -tag:v hvc1
-    # so MP4 players recognise the HEVC track. No CPU filter.
+    # so MP4 players recognise the HEVC track. No CPU filter; the 8-bit
+    # conversion is scale_cuda format=yuv420p (no -pix_fmt: it would force a
+    # software auto_scale from CUDA frames and fail).
     return ["ffmpeg", "-y", "-hide_banner", "-hwaccel", "cuda",
             "-hwaccel_output_format", "cuda", "-i", src, "-map", "0:v:0", "-an",
-            "-vf", "scale_cuda=%d:%d" % (int(w), int(h)),
-            "-c:v", PROXY_ENCODER, "-preset", "p4", "-pix_fmt", "yuv420p",
+            "-vf", "scale_cuda=%d:%d:format=yuv420p" % (int(w), int(h)),
+            "-c:v", PROXY_ENCODER, "-preset", "p4",
             "-g", "15", "-tag:v", "hvc1", out]
 
 
