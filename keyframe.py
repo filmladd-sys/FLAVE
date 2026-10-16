@@ -544,13 +544,13 @@ def key_drag_move(timeline, pos):
 
 
 def key_drag_release(timeline):
+    # Single click/drag: move only. Edit is double-click / context menu.
     drag = timeline._key_drag
     timeline._key_drag = None
     if drag is None:
         return
     clip = drag["clip"]
     if not drag.get("dragging"):
-        edit_key(timeline, clip, drag["key_id"], drag["orig_frame"], drag["value"])
         return
     frame = int(drag.get("frame", drag["orig_frame"]))
     in_f = max(0, int(clip[2]))
@@ -571,3 +571,33 @@ def key_drag_release(timeline):
         timeline._after_clip_change("Key move failed")
         return
     timeline._after_clip_change("Moved key to frame %d" % frame)
+
+
+def delete_key(timeline, key_id):
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM keyframes WHERE id = ?", (int(key_id),))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Delete Keyframe", "Could not delete: %s" % e)
+        return
+    timeline._after_clip_change("Deleted keyframe")
+
+
+def key_context_menu(timeline, key_hit, pos):
+    # Right-click on a key box: Edit Keyframe / Delete Keyframe
+    from PySide6.QtWidgets import QMenu
+    menu = QMenu(timeline)
+    edit_action = menu.addAction("Edit Keyframe")
+    delete_action = menu.addAction("Delete Keyframe")
+    action = menu.exec(timeline.table.viewport().mapToGlobal(pos))
+    if action == edit_action:
+        edit_key(timeline, key_hit["clip"], key_hit["key_id"],
+                 key_hit["frame"], key_hit["value"])
+    elif action == delete_action:
+        delete_key(timeline, key_hit["key_id"])

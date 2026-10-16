@@ -496,6 +496,12 @@ class SequenceTimeline(QMainWindow):
         return item.data(Qt.UserRole) if item is not None else None
 
     def _track_context_menu(self, pos):
+        # Key boxes first so right-click does not open the clip menu
+        from keyframe import hit_test_key, key_context_menu
+        key_hit = hit_test_key(self, pos)
+        if key_hit is not None:
+            key_context_menu(self, key_hit, pos)
+            return
         # Right-click on an image or video clip gets the clip menu instead
         clip = self._clip_at(pos)
         if clip is not None:
@@ -816,6 +822,16 @@ class SequenceTimeline(QMainWindow):
             if etype == QEvent.Drop:
                 self._handle_drop(event)
                 return True
+            if etype == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                # Double-click a key box: edit value only (no clip actions)
+                from keyframe import hit_test_key, edit_key
+                dbl_pos = event.position().toPoint()
+                key_hit = hit_test_key(self, dbl_pos)
+                if key_hit is not None:
+                    edit_key(self, key_hit["clip"], key_hit["key_id"],
+                             key_hit["frame"], key_hit["value"])
+                    return True
+                return False
             if etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 # Click selection: normal = clip + link partners, Alt = only
                 # that clip (selection solo), Shift = add to the selection,
@@ -966,13 +982,16 @@ class SequenceTimeline(QMainWindow):
 
     def _select_clip(self, clip, mode):
         # mode: "normal" = clip + link partners, "solo" = only clip with
-        # selection solo on, "add" = add clip to the selection
+        # selection solo on, "add" = add clip and its link partners (keep
+        # existing selection; drop nothing)
         if mode == "add":
             if self._selection_solo:
                 self._selection_solo = False
-            if clip[0] not in self._selected_clip_ids:
-                self._selected_clip_ids.add(clip[0])
-                self._selection_order.append(clip[0])
+            members = [clip] + self._linked_clips(clip)
+            for m in members:
+                if m[0] not in self._selected_clip_ids:
+                    self._selected_clip_ids.add(m[0])
+                    self._selection_order.append(m[0])
         elif mode == "solo":
             self._selected_clip_ids = {clip[0]}
             self._selection_order = [clip[0]]
