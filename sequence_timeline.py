@@ -452,6 +452,9 @@ class SequenceTimeline(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Home), self, activated=self.go_home)
         QShortcut(QKeySequence(Qt.Key_End), self, activated=self.go_end)
         QShortcut(QKeySequence(Qt.Key_Delete), self, activated=self.delete_selected_clip)
+        # Space = Play / Pause for this timeline. Window shortcut only; text
+        # fields and spin boxes take Space first (shortcut override)
+        QShortcut(QKeySequence(Qt.Key_Space), self, activated=self._toggle_play)
 
         self._create_menus()
         self.refresh()
@@ -897,6 +900,7 @@ class SequenceTimeline(QMainWindow):
                         "src_track": self._clip_track_id(clip),
                         "target_track": None,
                         "target_ok": True,
+                        "snap_px": self._snap_pixels(),
                     }
                     self._edge_drag["group"] = self._drag_group(clip, "move")
                     return True
@@ -1064,6 +1068,7 @@ class SequenceTimeline(QMainWindow):
                 drag["target_track"] = None
                 drag["target_ok"] = True
             delta = (frame - drag["grab_offset"]) - drag["orig_start"]
+            delta = self._snap_move_delta(drag, group, delta)
         elif edge == "left":
             delta = frame - drag["orig_start"]
         else:
@@ -1088,6 +1093,38 @@ class SequenceTimeline(QMainWindow):
                 c[3] = m["length"] + delta
         self.table.viewport().update()
         self.status_bar.showMessage(f"Clip start {clip[2]}, length {clip[3]}")
+
+    def _snap_pixels(self):
+        # Global setting 'Pixel Snap-To' (pixels, default 2), read per drag
+        try:
+            return max(0, int(_get_global_setting("Pixel Snap-To", "2") or "2"))
+        except (TypeError, ValueError):
+            return 2
+
+    def _snap_move_delta(self, drag, group, delta):
+        # Snap the dragged clip's in-point to the nearest in-point of a clip
+        # on another track (moving clips excluded) within snap_px pixels at
+        # the current zoom. Group members keep their offsets (same delta).
+        snap_px = drag.get("snap_px", 0)
+        ppf = float(self.pixels_per_frame or 0)
+        if snap_px <= 0 or ppf <= 0:
+            return delta
+        ids = {m["clip"][0] for m in group}
+        src = drag.get("src_track")
+        want = drag["orig_start"] + delta
+        best = None
+        for track_id, clips in self.clips_by_track.items():
+            if track_id == src:
+                continue
+            for c in clips:
+                if c[0] in ids:
+                    continue
+                dist = abs(int(c[2]) - want) * ppf
+                if dist <= snap_px and (best is None or dist < best[0]):
+                    best = (dist, int(c[2]))
+        if best is None:
+            return delta
+        return best[1] - drag["orig_start"]
 
     def _group_delta_range(self, group, edge):
         # Allowed (lo, hi) frame delta for all members at once
@@ -1318,9 +1355,10 @@ class SequenceTimeline(QMainWindow):
             else:
                 continue
             ln = max(1, int(c[3]))
+            old_ln = max(1, int(m.get("length", drag.get("orig_length", c[3]))))
             old = max(0, int(m.get("start", drag["orig_start"])))
             new = max(0, int(c[2]))
-            ranges.append((old, old + ln - 1))
+            ranges.append((old, old + old_ln - 1))
             ranges.append((new, new + ln - 1))
         if kf_links or vis_links:
             for track_id, clips in self.clips_by_track.items():
@@ -1602,6 +1640,9 @@ class SequenceTimeline(QMainWindow):
                 )
             conn.commit()
             conn.close()
+            # Preview: old and new ranges of trimmed video/image/keyframe
+            # clips and linked partners (re-marked after the reload below)
+            self._mark_preview_dirty(self._move_preview_ranges(group, drag))
         except Exception as e:
             QMessageBox.warning(self, "Clip Edge", f"Could not save clip: {e}")
         # The video clip of the group gets its out icon (dragged or partner)
@@ -1763,6 +1804,13 @@ class SequenceTimeline(QMainWindow):
             self._stop_play()
         else:
             print(name)
+
+    def _toggle_play(self):
+        # Same as the Pause button while playing or filling, else Play
+        if self._playing or self._play_filling:
+            self._on_play_control("Pause")
+        else:
+            self._on_play_control("Play")
 
     def _begin_play(self):
         # Fill every missing preview frame from the tick to the end, then

@@ -214,6 +214,12 @@ class GlobalSettingsWindow(QMainWindow):
         self.undo_max_edit.setPlaceholderText("50")
         layout.addWidget(self.undo_max_edit)
 
+        snap_label = QLabel("Pixel Snap-To")
+        layout.addWidget(snap_label)
+        self.snap_px_edit = QLineEdit()
+        self.snap_px_edit.setPlaceholderText("2")
+        layout.addWidget(self.snap_px_edit)
+
         apply_btn = QPushButton("Apply")
         apply_btn.clicked.connect(self._apply)
         layout.addWidget(apply_btn)
@@ -246,6 +252,7 @@ class GlobalSettingsWindow(QMainWindow):
         self.batch_edit.setText(_get_global_setting("previewBatchSeconds", "1") or "1")
         self.gpu_batch_edit.setText(_get_global_setting("previewGpuBatchFrames", "8") or "8")
         self.undo_max_edit.setText(_get_global_setting("UndoStackMax", "50") or "50")
+        self.snap_px_edit.setText(_get_global_setting("Pixel Snap-To", "2") or "2")
 
         align = _get_global_setting("playercontrols_alignment", "left")
         idx = self.align_combo.findData(align or "left")
@@ -296,7 +303,8 @@ class GlobalSettingsWindow(QMainWindow):
                 (self.idle_edit, "previewIdleMs", 250, 0, 5000),
                 (self.batch_edit, "previewBatchSeconds", 1, 1, 10),
                 (self.gpu_batch_edit, "previewGpuBatchFrames", 8, 1, 30),
-                (self.undo_max_edit, "UndoStackMax", 50, 1, 1000000000)):
+                (self.undo_max_edit, "UndoStackMax", 50, 1, 1000000000),
+                (self.snap_px_edit, "Pixel Snap-To", 2, 0, 1000)):
             try:
                 v = int(edit.text().strip() or str(default))
             except ValueError:
