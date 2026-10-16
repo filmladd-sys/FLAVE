@@ -468,6 +468,22 @@ class SequenceTimeline(QMainWindow):
     def _create_menus(self):
         menubar = self.menuBar()
 
+        # Edit menu (in-memory clipboard per sequence, timeline_clipboard.py)
+        edit_menu = menubar.addMenu("Edit")
+        self._copy_action = QAction("Copy", self)
+        self._copy_action.triggered.connect(self._clip_copy)
+        self._paste_tic_action = QAction("Paste To Tic", self)
+        self._paste_tic_action.triggered.connect(self._clip_paste_tic)
+        self._paste_end_action = QAction("Paste to End", self)
+        self._paste_end_action.triggered.connect(self._clip_paste_end)
+        self._cut_action = QAction("Cut", self)
+        self._cut_action.triggered.connect(self._clip_cut)
+        for a in (self._copy_action, self._paste_tic_action,
+                  self._paste_end_action, self._cut_action):
+            edit_menu.addAction(a)
+        edit_menu.aboutToShow.connect(self._update_edit_actions)
+        self._update_edit_actions()
+
         # Tracks menu
         tracks_menu = menubar.addMenu("Tracks")
         for label in ["+ Video", "+ Audio", "+ Image", "+ Caption", "+ Keyframe"]:
@@ -493,6 +509,43 @@ class SequenceTimeline(QMainWindow):
 
     def _project_db(self):
         return _get_global_setting("current_project", "")
+
+    def _update_edit_actions(self):
+        # Copy/Cut need a selection; Paste needs this sequence's clipboard
+        if not hasattr(self, "_copy_action"):
+            return
+        try:
+            from timeline_clipboard import has_clipboard
+            has = has_clipboard(self)
+        except Exception:
+            has = False
+        sel = bool(getattr(self, "_selected_clip_ids", None))
+        self._copy_action.setEnabled(sel)
+        self._cut_action.setEnabled(sel)
+        self._paste_tic_action.setEnabled(has)
+        self._paste_end_action.setEnabled(has)
+
+    def _clip_copy(self):
+        from timeline_clipboard import copy_selection
+        n = copy_selection(self)
+        if n:
+            self.status_bar.showMessage(f"Copied {n} item(s)", 3000)
+        self._update_edit_actions()
+
+    def _clip_cut(self):
+        from timeline_clipboard import cut_selection
+        cut_selection(self)
+        self._update_edit_actions()
+
+    def _clip_paste_tic(self):
+        from timeline_clipboard import paste
+        paste(self, int(self.current_frame), True)
+        self._update_edit_actions()
+
+    def _clip_paste_end(self):
+        from timeline_clipboard import paste, end_anchor
+        paste(self, end_anchor(self), False)
+        self._update_edit_actions()
 
 
     def _row_track_id(self, row):
@@ -985,6 +1038,7 @@ class SequenceTimeline(QMainWindow):
             self._selection_order = []
             self._selection_solo = False
             self.table.viewport().update()
+        self._update_edit_actions()
 
     def _select_clip(self, clip, mode):
         # mode: "normal" = clip + link partners, "solo" = only clip with
@@ -1008,6 +1062,7 @@ class SequenceTimeline(QMainWindow):
             self._selected_clip_ids = set(self._selection_order)
             self._selection_solo = False
         self.table.viewport().update()
+        self._update_edit_actions()
 
     def _selected_clips(self):
         # Live clip lists of the selection, in selection order
@@ -1628,6 +1683,7 @@ class SequenceTimeline(QMainWindow):
 
     def _after_clip_change(self, message):
         self.refresh()
+        self._update_edit_actions()
         self.table.viewport().update()
         self.ruler.viewport().update()
         self._refresh_sequence_manager()
