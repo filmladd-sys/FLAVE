@@ -129,7 +129,7 @@ def add_proxy_row(db_path, footage_id, percentage):
         conn.close()
 
 
-# ---- video proxies (FFmpeg h264_nvenc / hevc_nvenc above 4096, BUILD 86)
+# ---- video proxies (FFmpeg CUDA decode + scale_cuda + hevc_nvenc, BUILD 87)
 
 _VIDEO_EXTS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
 
@@ -166,23 +166,19 @@ def _run(cmd):
             proc.stderr.decode("ascii", "replace"))
 
 
-NVENC_MAX_H264 = 4096   # h264_nvenc limit per side; above it use hevc_nvenc
+PROXY_ENCODER = "hevc_nvenc"   # every proxy
 
 
 def choose_encoder(w, h):
-    # (encoder, profile, extra args) for the target size
-    if int(w) > NVENC_MAX_H264 or int(h) > NVENC_MAX_H264:
-        return "hevc_nvenc", "main", ["-tag:v", "hvc1"]
-    return "h264_nvenc", "high", []
+    # Every proxy is HEVC NVENC (kept as a function for callers)
+    return PROXY_ENCODER
 
 
-def nvenc_available(encoder="h264_nvenc", w=None, h=None):
+def nvenc_available(encoder=PROXY_ENCODER, w=None, h=None):
     # (ok, message). ffmpeg on PATH and encoder listed in -encoders
     why = ""
     if w is not None and h is not None:
-        why = " (chosen for a %dx%d proxy%s)" % (
-            int(w), int(h),
-            "; over 4096 needs HEVC" if encoder == "hevc_nvenc" else "")
+        why = " (needed for the %dx%d proxy)" % (int(w), int(h))
     try:
         code, out, err = _run(["ffmpeg", "-hide_banner", "-encoders"])
     except OSError:
@@ -227,13 +223,13 @@ def footage_size(db_path, footage_id):
 
 
 def build_proxy_cmd(src, out, w, h):
-    # format=yuv420p converts 10-bit sources to 8-bit before nvenc.
-    # Over 4096 a side: hevc_nvenc main (8-bit) tagged hvc1 for MP4.
-    enc, profile, extra = choose_encoder(w, h)
-    return (["ffmpeg", "-y", "-hide_banner", "-i", src, "-map", "0:v:0", "-an",
-             "-vf", "scale=%d:%d,format=yuv420p" % (int(w), int(h)),
-             "-c:v", enc, "-preset", "p4", "-profile:v", profile] + extra +
-            ["-pix_fmt", "yuv420p", "-g", "15", out])
+    # User's exact shape (GPU decode, scale_cuda, hevc_nvenc) plus -tag:v hvc1
+    # so MP4 players recognise the HEVC track. No CPU filter.
+    return ["ffmpeg", "-y", "-hide_banner", "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda", "-i", src, "-map", "0:v:0", "-an",
+            "-vf", "scale_cuda=%d:%d" % (int(w), int(h)),
+            "-c:v", PROXY_ENCODER, "-preset", "p4", "-pix_fmt", "yuv420p",
+            "-g", "15", "-tag:v", "hvc1", out]
 
 
 def save_proxy_row(db_path, footage_id, path, percentage):
@@ -275,7 +271,7 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None):
     if size is None:
         return False, "Could not read the source width and height (ffprobe)."
     w, h = scaled_size(size[0], size[1], percentage)
-    ok, msg = nvenc_available(choose_encoder(w, h)[0], w, h)
+    ok, msg = nvenc_available(choose_encoder(w, h), w, h)
     if not ok:
         return False, msg
     proxy_dir = get_proxy_path(db_path)
