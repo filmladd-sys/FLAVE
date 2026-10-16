@@ -260,7 +260,8 @@ def _load_sequence_fps(sequence_id):
     return DEFAULT_FPS
 
 
-def _add_track(self, track_type, title, name=None, language="", bg_color=None):
+def _add_track(self, track_type, title, name=None, language="", bg_color=None,
+               caption_type=None):
     project_db = self._project_db()
     if not project_db:
         QMessageBox.warning(self, title, "No project open")
@@ -296,6 +297,10 @@ def _add_track(self, track_type, title, name=None, language="", bg_color=None):
                 "language) VALUES (?, ?, ?, ?, ?)",
                 (self.sequence_id, name, track_type, sort_order, language or "")
             )
+        if caption_type:
+            # BUILD 101: caption stream type (column from new_project._init_db)
+            cur.execute("UPDATE tracks SET caption_type = ? WHERE id = ?",
+                        (caption_type, cur.lastrowid))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -322,12 +327,15 @@ def refresh(self):
         except Exception:
             pass
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
-            "COALESCE(height_px, 64), COALESCE(bg_color, '') "
-            "FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id",
-            (self.sequence_id,)
-        )
+        _tsel = ("SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
+                 "COALESCE(height_px, 64), COALESCE(bg_color, ''), "
+                 "COALESCE(language, ''), %s "
+                 "FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id")
+        try:
+            cur.execute(_tsel % "caption_type", (self.sequence_id,))
+        except sqlite3.OperationalError:
+            # Old DB without caption_type (BUILD 101): NULL shows as WebVTT
+            cur.execute(_tsel % "NULL", (self.sequence_id,))
         rows = cur.fetchall()
         cur.execute(
             "SELECT c.id, c.track_id, c.footage_id, c.start_frame, c.length_frames, "
@@ -361,7 +369,8 @@ def refresh(self):
         self.table.setRowCount(len(rows))
         read_only = Qt.ItemIsSelectable | Qt.ItemIsEnabled
         dim = QColor(130, 130, 130)
-        for i, (track_id, name, track_type, enabled, solo, height_px, bg_color) in enumerate(rows):
+        for i, (track_id, name, track_type, enabled, solo, height_px, bg_color,
+                language, caption_type) in enumerate(rows):
             name_item = QTableWidgetItem(name or "")
             name_item.setData(Qt.UserRole, track_id)
             name_item.setData(Qt.UserRole + 1, int(enabled))
@@ -375,6 +384,11 @@ def refresh(self):
             name_item.setFlags(read_only | Qt.ItemIsEditable)
             type_text = ((track_type or "") + (" [S]" if solo else "")
                          + ("" if enabled else " [d]"))
+            if (track_type or "").lower() == "caption":
+                from sequence_timeline_captions import caption_type_text
+                type_text = caption_type_text(
+                    language, caption_type,
+                    (" [S]" if solo else "") + ("" if enabled else " [d]"))
             type_item = QTableWidgetItem(type_text)
             type_item.setFlags(read_only)
             clips_item = QTableWidgetItem("")

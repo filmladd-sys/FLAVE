@@ -78,24 +78,70 @@ def caption_label(painter, label, text_rect):
         max(0, text_rect.width() - 6))
 
 
+CAPTION_TYPES = ["CEA-608", "CEA-708", "mov_text", "WebVTT"]
+DEFAULT_CAPTION_TYPE = "WebVTT"
+
+
+class CaptionTrackDialog(QDialog):
+    # BUILD 101: one popup for Name, Language and Type
+    def __init__(self, parent, default_name):
+        from PySide6.QtWidgets import (QFormLayout, QLineEdit, QComboBox,
+                                       QDialogButtonBox)
+        super().__init__(parent)
+        self.setWindowTitle("+ Caption")
+        form = QFormLayout(self)
+        self.name_edit = QLineEdit(default_name or "")
+        self.name_edit.selectAll()
+        form.addRow("Track name:", self.name_edit)
+        self.lang_combo = QComboBox()
+        self.lang_combo.setEditable(True)
+        self.lang_combo.addItems(CAPTION_LANGUAGES)
+        self.lang_combo.setCurrentIndex(0)
+        form.addRow("Language (ISO 639-2):", self.lang_combo)
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(CAPTION_TYPES)
+        self.type_combo.setCurrentText(DEFAULT_CAPTION_TYPE)
+        form.addRow("Type:", self.type_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        return ((self.name_edit.text() or "").strip(),
+                (self.lang_combo.currentText() or "").strip().lower(),
+                self.type_combo.currentText() or DEFAULT_CAPTION_TYPE)
+
+    def _accept(self):
+        name, lang, _t = self.values()
+        if not name or not lang:
+            QMessageBox.warning(self, "+ Caption", "Name and language are required")
+            return
+        self.accept()
+
+
+def caption_type_text(language, caption_type, flags=""):
+    # BUILD 101: Type column text for a caption track, three lines
+    return "CC%s\n%s\n%s" % (flags, language or "",
+                              caption_type or DEFAULT_CAPTION_TYPE)
+
+
 def _add_caption_track(self):
     project_db = self._project_db()
     if not project_db:
         QMessageBox.warning(self, "+ Caption", "No project open")
         return
-    from track_names import ask_track_name
-    name, ok = ask_track_name(self, "+ Caption", "caption", project_db,
-                              self.sequence_id)
-    name = (name or "").strip()
-    if not ok or not name:
+    from track_names import next_default_name, sequence_track_names
+    default = next_default_name(
+        "caption", sequence_track_names(project_db, self.sequence_id))
+    dlg = CaptionTrackDialog(self, default)
+    if dlg.exec() != QDialog.Accepted:
         return
-    lang, ok = QInputDialog.getItem(
-        self, "+ Caption", "Language (ISO 639-2, pick or type):",
-        CAPTION_LANGUAGES, 0, True)
-    lang = (lang or "").strip().lower()
-    if not ok or not lang:
+    name, lang, ctype = dlg.values()
+    if not name or not lang:
         return
-    self._add_track("caption", "+ Caption", name=name, language=lang)
+    self._add_track("caption", "+ Caption", name=name, language=lang,
+                    caption_type=ctype)
 
 
 def _sequence_size(self):

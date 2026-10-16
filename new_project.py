@@ -112,7 +112,11 @@ class NewProjectWindow(QMainWindow):
                 solo INTEGER DEFAULT 0,
                 height_px INTEGER DEFAULT 64,
                 bg_color TEXT,
-                language TEXT DEFAULT ''
+                language TEXT DEFAULT '',
+                -- BUILD 101: caption stream type for caption tracks.
+                -- Allowed (documented, not enforced): 'CEA-608', 'CEA-708',
+                -- 'mov_text', 'WebVTT'. NULL is shown as WebVTT.
+                caption_type TEXT DEFAULT 'WebVTT'
             )
         """)
 
