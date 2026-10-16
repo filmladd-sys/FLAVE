@@ -12,6 +12,12 @@ import sqlite3
 DEFAULT_RGB = (50, 0, 0)
 MARK_SIZE = 6
 HIT_PX = 3      # click tolerance around a marker line / square
+HOVER_LINE_W = 3
+DELETE_RESULT = 2   # edit popup result code for Delete
+
+
+def line_width(marker_id, hover_id):
+    return HOVER_LINE_W if hover_id is not None and marker_id == hover_id else 1
 
 
 def load_markers(project_db):
@@ -133,19 +139,20 @@ def add_marker(project_db, clip, frame, name=""):
         conn.close()
 
 
-def paint_markers(painter, clip_rect, clip, markers, ppf):
-    # 4x4 square at the clip top plus a full-height line, marker color
-    from PySide6.QtGui import QColor
+def paint_markers(painter, clip_rect, clip, markers, ppf, hover_id=None):
+    # MARK_SIZE square at the clip top plus a full-height line, marker
+    # color; the hovered marker's line is HOVER_LINE_W px wide
+    from PySide6.QtGui import QColor, QPen
     items = markers.get(clip[0]) if markers and int(clip[0]) > 0 else None
     if not items or ppf <= 0:
         return
-    for _mid, mframe, rgb, _name in items:
+    for mid, mframe, rgb, _name in items:
         rel = visible_offset(clip, mframe)
         if rel is None:
             continue
         color = QColor(rgb[0], rgb[1], rgb[2])
         x = int(clip_rect.left() + rel * ppf)
-        painter.setPen(color)
+        painter.setPen(QPen(color, line_width(mid, hover_id)))
         painter.drawLine(x, clip_rect.top(), x, clip_rect.bottom())
         painter.fillRect(x - MARK_SIZE // 2, clip_rect.top(), MARK_SIZE, MARK_SIZE,
                          color)
@@ -194,6 +201,15 @@ def marker_to_source(clip, timeline_frame):
     return _clip_in(clip) + (tf - int(clip[2]))
 
 
+def delete_marker(project_db, marker_id):
+    conn = sqlite3.connect(project_db)
+    try:
+        conn.execute("DELETE FROM Marker WHERE id = ?", (int(marker_id),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def update_marker(project_db, marker_id, frame, name, rgb):
     conn = sqlite3.connect(project_db)
     try:
@@ -232,10 +248,27 @@ def edit_marker(tl, clip, marker):
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
+    # Delete: no confirmation; done(2) closes the popup
+    del_btn = buttons.addButton("Delete", QDialogButtonBox.DestructiveRole)
+    del_btn.clicked.connect(lambda: dlg.done(DELETE_RESULT))
     form.addRow(buttons)
-    if dlg.exec() != QDialog.Accepted:
-        return False
+    result = dlg.exec()
     project_db = tl._project_db()
+    if result == DELETE_RESULT:
+        try:
+            from undo import push_undo
+            push_undo(project_db, "Delete marker")
+        except Exception:
+            pass
+        try:
+            delete_marker(project_db, mid)
+        except Exception as e:
+            QMessageBox.warning(tl, "Marker", "Could not delete marker: %s" % e)
+            return False
+        tl._after_clip_change("Marker deleted")
+        return True
+    if result != QDialog.Accepted:
+        return False
     try:
         from undo import push_undo
         push_undo(project_db, "Edit marker")

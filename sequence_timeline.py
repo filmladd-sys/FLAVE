@@ -166,7 +166,8 @@ class ClipDelegate(QStyledItemDelegate):
             # Markers: square at the top plus a line (video / image / audio only)
             from markers import paint_markers
             if track_type != "caption":
-                paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf)
+                paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf,
+                              getattr(tl, "_hover_marker_id", None))
             # Outline last so the clip's full time span, handle included, is visible
             # Selected clip (last click or clip menu) gets a light yellow border
             if clip_id in tl._selected_clip_ids:
@@ -983,6 +984,10 @@ class SequenceTimeline(QMainWindow):
                     obj.setCursor(Qt.SplitHCursor)
                 else:
                     obj.unsetCursor()
+                # Hovered marker: 3 px line; repaint only when it changes
+                from markers import hit_test_marker
+                mh = hit_test_marker(self, pos)
+                self._set_hover_marker(mh[1][0] if mh is not None else None)
             if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if self._key_drag is not None:
                     from keyframe import key_drag_release
@@ -994,9 +999,17 @@ class SequenceTimeline(QMainWindow):
                     else:
                         self._edge_drag_release()
                     return True
+            if etype == QEvent.Leave:
+                self._set_hover_marker(None)
             if etype == QEvent.Leave and self._edge_drag is None:
                 obj.unsetCursor()
         return super().eventFilter(obj, event)
+
+    def _set_hover_marker(self, marker_id):
+        if getattr(self, "_hover_marker_id", None) == marker_id:
+            return
+        self._hover_marker_id = marker_id
+        self.table.viewport().update()
 
     def _x_in_clips(self, pos):
         return pos.x() - self.ruler.sectionViewportPosition(CLIPS_COL)
