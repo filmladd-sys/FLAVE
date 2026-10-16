@@ -293,6 +293,10 @@ class ProjectManager(QMainWindow):
         if NewProjectWindow is None:
             QMessageBox.warning(self, "New Project", "new_project.py not found")
             return
+        # Close the current project first (same routine as Close Project).
+        # Cancelling the New Project window leaves no project open.
+        if self.current_project:
+            self._close_project()
         self.new_project_window = NewProjectWindow(self)
         self.new_project_window.project_created.connect(self._on_project_created)
         self.new_project_window.show()
@@ -348,6 +352,17 @@ class ProjectManager(QMainWindow):
                 except RuntimeError:
                     pass
             sequence_timeline._open_windows.clear()
+        except ImportError:
+            pass
+        # Proxy Manager windows belong to the project
+        try:
+            import proxy_manager
+            for win in list(proxy_manager._open_windows):
+                try:
+                    win.close()
+                except RuntimeError:
+                    pass
+            del proxy_manager._open_windows[:]
         except ImportError:
             pass
         # Relaunch must not reopen timelines or windows of a closed project
