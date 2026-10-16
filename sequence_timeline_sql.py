@@ -317,7 +317,9 @@ def _add_track(self, track_type, title, name=None, language="", bg_color=None):
         QMessageBox.warning(self, title, "No project open")
         return
     if name is None:
-        name, ok = QInputDialog.getText(self, title, "Track name:")
+        from track_names import ask_track_name
+        name, ok = ask_track_name(self, title, track_type, project_db,
+                                  self.sequence_id)
         name = (name or "").strip()
         if not ok or not name:
             return

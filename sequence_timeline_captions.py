@@ -101,7 +101,9 @@ def _add_caption_track(self):
     if not project_db:
         QMessageBox.warning(self, "+ Caption", "No project open")
         return
-    name, ok = QInputDialog.getText(self, "+ Caption", "Track name:")
+    from track_names import ask_track_name
+    name, ok = ask_track_name(self, "+ Caption", "caption", project_db,
+                              self.sequence_id)
     name = (name or "").strip()
     if not ok or not name:
         return
