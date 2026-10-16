@@ -84,6 +84,7 @@ def get_display_rows(project_db, id_list):
 
         # #Proxies: count for video / image footage (clickable), empty for audio
         proxy_item = QTableWidgetItem("")
+        proxy_item.setTextAlignment(Qt.AlignCenter)
         ext = os.path.splitext(path or filename or "")[1].lower()
         if ext not in _AUDIO_EXTS and ftype not in _AUDIO_TYPES:
             proxy_item.setText(str(counts.get(int(fid), 0)))

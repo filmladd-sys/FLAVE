@@ -297,7 +297,8 @@ class FootageManager(QMainWindow):
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
 
     def _cell_clicked(self, row, col):
-        # #Proxies cell (video / image only): open that footage's Proxies
+        # #Proxies cell (video / image only): cellClicked fires for a click
+        # anywhere in the cell; audio cells carry no id and stay inert
         if col != 2:
             return
         item = self.table.item(row, 2)
@@ -308,7 +309,8 @@ class FootageManager(QMainWindow):
         name = name_item.text() if name_item is not None else ""
         try:
             from proxy_manager import open_proxy_manager
-            open_proxy_manager(self, self.project_db, footage_id, name)
+            open_proxy_manager(self, self.project_db, footage_id, name,
+                               on_change=self.refresh)
         except Exception as e:
             QMessageBox.warning(self, "Proxies", f"Could not open Proxies: {e}")
 
