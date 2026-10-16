@@ -885,6 +885,7 @@ class SequenceTimeline(QMainWindow):
                         "orig_start": clip[2],
                         "orig_length": clip[3],
                         "orig_in": clip[7],
+                        "snap_px": self._snap_pixels(),
                     }
                     self._edge_drag["group"] = self._drag_group(clip, edge)
                     return True
@@ -1068,11 +1069,11 @@ class SequenceTimeline(QMainWindow):
                 drag["target_track"] = None
                 drag["target_ok"] = True
             delta = (frame - drag["grab_offset"]) - drag["orig_start"]
-            delta = self._snap_move_delta(drag, group, delta)
         elif edge == "left":
             delta = frame - drag["orig_start"]
         else:
             delta = frame - (drag["orig_start"] + drag["orig_length"])
+        delta = self._snap_drag_delta(drag, group, pos, delta)
         lo, hi = self._group_delta_range(group, edge)
         delta = max(lo, min(hi, delta)) if lo <= hi else 0
         for m in group:
@@ -1101,30 +1102,42 @@ class SequenceTimeline(QMainWindow):
         except (TypeError, ValueError):
             return 2
 
-    def _snap_move_delta(self, drag, group, delta):
-        # Snap the dragged clip's in-point to the nearest in-point of a clip
-        # on another track (moving clips excluded) within snap_px pixels at
-        # the current zoom. Group members keep their offsets (same delta).
+    def _snap_drag_delta(self, drag, group, pos, delta):
+        # Move: the dragged clip's in or out point; trim: the dragged edge.
+        # Snaps to the nearest in/out point of any clip on any track that is
+        # not being moved or trimmed (linked partners left in place count),
+        # within snap_px pixels. Distance uses the unrounded mouse position,
+        # so it is a real pixel distance at the current zoom. The group
+        # moves by the one returned delta; the clamp after it still allows
+        # butting up to a neighbor.
         snap_px = drag.get("snap_px", 0)
         ppf = float(self.pixels_per_frame or 0)
         if snap_px <= 0 or ppf <= 0:
             return delta
-        ids = {m["clip"][0] for m in group}
-        src = drag.get("src_track")
-        want = drag["orig_start"] + delta
-        best = None
-        for track_id, clips in self.clips_by_track.items():
-            if track_id == src:
-                continue
-            for c in clips:
-                if c[0] in ids:
-                    continue
-                dist = abs(int(c[2]) - want) * ppf
-                if dist <= snap_px and (best is None or dist < best[0]):
-                    best = (dist, int(c[2]))
-        if best is None:
+        try:
+            from clip_snap import snap_delta, snap_targets
+            x = self._x_in_clips(pos)
+            frame_f = max(0.0, self.view_start_frame + x / ppf)
+            start, length = drag["orig_start"], drag["orig_length"]
+            edge = drag["edge"]
+            if edge == "move":
+                raw = (frame_f - drag["grab_offset"]) - start
+                edges = [start, start + length]
+            elif edge == "left":
+                raw = frame_f - start
+                edges = [start]
+            else:
+                raw = frame_f - (start + length)
+                edges = [start + length]
+            ids = {m["clip"][0] for m in group}
+            ids.add(drag["clip"][0])
+            snapped = snap_delta(raw, edges,
+                                 snap_targets(self.clips_by_track, ids),
+                                 ppf, snap_px)
+        except Exception as e:
+            # print(f"Snap failed: {e}")
             return delta
-        return best[1] - drag["orig_start"]
+        return delta if snapped is None else snapped
 
     def _group_delta_range(self, group, edge):
         # Allowed (lo, hi) frame delta for all members at once
