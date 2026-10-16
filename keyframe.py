@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QPushButton, QMessageBox, QDoubleSpinBox, QApplication,
+    QPushButton, QMessageBox, QDoubleSpinBox, QApplication, QInputDialog,
 )
 
 # Stored on keyframe_clips.type. Not enforced beyond storing the string.
@@ -322,8 +322,55 @@ def key_mark_layout(clip_rect, frame, value, clip_start, ppf, stored_type,
     return text, sq, x, body_top
 
 
+NOT_LINKED_SUFFIX = " (not linked yet)"
+
+
+def title_with_link_state(title, linked):
+    return (title or "") + ("" if linked else NOT_LINKED_SUFFIX)
+
+
+def graph_value_range(stored_type, values):
+    # (low, high) for the value graph: 0..100 for percent types, else min..max
+    rng = KEY_VALUE_RANGES.get(stored_type or "")
+    if rng is not None:
+        return float(rng[0]), float(rng[1])
+    return float(min(values)), float(max(values))
+
+
+def graph_points(keys, stored_type, clip_start, length, ppf, left, top, height):
+    # Polyline points [(x, y)] for the key value graph, or [] when there are
+    # fewer than two keys or all values are equal. Flat before the first and
+    # after the last key (clip in..out).
+    pts = []
+    for item in keys or []:
+        if len(item) >= 3:
+            pts.append((int(item[1]), float(item[2])))
+        elif len(item) >= 2:
+            pts.append((int(item[0]), float(item[1])))
+    if len(pts) < 2:
+        return []
+    pts.sort(key=lambda p: (p[0], p[1]))
+    values = [v for _f, v in pts]
+    if max(values) == min(values):
+        return []
+    low, high = graph_value_range(stored_type, values)
+    span = (high - low) or 1.0
+    bottom = top + max(1, height) - 1
+
+    def xy(frame, value):
+        v = max(low, min(high, value))
+        x = left + (frame - int(clip_start)) * ppf
+        y = bottom - (v - low) / span * (max(1, height) - 1)
+        return int(round(x)), int(round(y))
+
+    out = [xy(int(clip_start), pts[0][1])]
+    out += [xy(f, v) for f, v in pts]
+    out.append(xy(int(clip_start) + int(length), pts[-1][1]))
+    return out
+
+
 def paint_keyframe_clip(painter, clip_rect, title, keys=None,
-                        clip_start=0, ppf=1.0, stored_type=""):
+                        clip_start=0, ppf=1.0, stored_type="", linked=True):
     # Caption-like body fill, plus a 15 px title bar. Keys: full-height white
     # vertical line, then a sized white square with black border and light
     # grey value text, clipped to the clip rect.
@@ -336,7 +383,7 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
     painter.drawRect(title_rect.adjusted(0, 0, -1, -1))
     if title_rect.width() > 4:
         text = painter.fontMetrics().elidedText(
-            " ".join((title or "").split()), Qt.ElideRight,
+            " ".join(title_with_link_state(title, linked).split()), Qt.ElideRight,
             max(0, title_rect.width() - 4))
         painter.drawText(title_rect, Qt.AlignCenter, text)
     if not keys or ppf <= 0:
@@ -346,6 +393,14 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
         return
     painter.save()
     painter.setClipRect(clip_rect)
+    # Value graph under the key marks (two or more keys, values differ)
+    length = int(round(clip_rect.width() / float(ppf))) if ppf > 0 else 0
+    gpts = graph_points(keys, stored_type, clip_start, length, ppf,
+                        clip_rect.left(), clip_rect.top() + h, body_h)
+    if gpts:
+        painter.setPen(QPen(QColor(255, 210, 90), 2))
+        for i in range(len(gpts) - 1):
+            painter.drawLine(gpts[i][0], gpts[i][1], gpts[i + 1][0], gpts[i + 1][1])
     fm = painter.fontMetrics()
     for item in keys:
         if len(item) >= 3:
@@ -564,6 +619,49 @@ def default_key_value(timeline, stored_type):
     if stored_type == "opacity":
         return 100.0
     return 0.0
+
+
+def rename_keyframe_clip(timeline, clip):
+    # Rename popup prefilled with the stored name; OK writes it (undoable)
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    db_id = db_id_from_mem(clip[0])
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            row = conn.execute("SELECT COALESCE(name, '') FROM keyframe_clips "
+                               "WHERE id = ?", (db_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Rename", "Could not read name: %s" % e)
+        return
+    current = row[0] if row else ""
+    name, ok = QInputDialog.getText(timeline, "Rename", "Name:", QLineEdit.Normal,
+                                    current)
+    if not ok:
+        return
+    name = (name or "").strip()
+    if name == current:
+        return
+    try:
+        from undo import push_undo
+        push_undo(project_db, "Rename keyframe clip")
+    except Exception:
+        pass
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            conn.execute("UPDATE keyframe_clips SET name = ? WHERE id = ?",
+                         (name, db_id))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Rename", "Could not rename: %s" % e)
+        return
+    timeline._after_clip_change("Renamed to %s" % name)
 
 
 def add_key(timeline, clip, click_frame):

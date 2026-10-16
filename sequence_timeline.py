@@ -96,7 +96,8 @@ class ClipDelegate(QStyledItemDelegate):
                 ktype = clip[10] if len(clip) > 10 else ""
                 paint_keyframe_clip(
                     painter, clip_rect, filename or "", keys=keys,
-                    clip_start=start_frame, ppf=ppf, stored_type=ktype)
+                    clip_start=start_frame, ppf=ppf, stored_type=ktype,
+                    linked=(len(clip) > 8 and clip[8] is not None))
                 if clip_id in tl._selected_clip_ids:
                     painter.setPen(QColor(255, 255, 160))
                 else:
@@ -1546,19 +1547,35 @@ class SequenceTimeline(QMainWindow):
         from keyframe import is_keyframe_clip_id, add_key as _add_key
         if is_keyframe_clip_id(clip[0]):
             menu = QMenu(self)
-            add_key_action = menu.addAction("Add Key")
-            link_action = menu.addAction("Link")
-            link_action.setEnabled(len(self._selected_clips()) >= 2)
-            unlink_action = menu.addAction("Unlink")
+            key_menu = menu.addMenu("Key")
+            key_click_action = key_menu.addAction("At Mouse Click")
+            key_tick_action = key_menu.addAction("At Timeline Tick")
+            rename_action = menu.addAction("Rename")
+            # Linked: Unlink only; not linked: Link only
+            linked = len(clip) > 8 and clip[8] is not None
+            link_action = unlink_action = None
+            if linked:
+                unlink_action = menu.addAction("Unlink")
+            else:
+                link_action = menu.addAction("Link")
+                link_action.setEnabled(len(self._selected_clips()) >= 2)
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            if action == add_key_action:
+            if action is None:
+                return
+            if action == key_click_action:
                 click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
                 _add_key(self, clip, click_frame)
-            elif action == link_action:
+            elif action == key_tick_action:
+                # Playhead frame; add_key clamps it to the clip [in, out)
+                _add_key(self, clip, int(self.current_frame))
+            elif action == rename_action:
+                from keyframe import rename_keyframe_clip
+                rename_keyframe_clip(self, clip)
+            elif link_action is not None and action == link_action:
                 self.link_selected_clips()
-            elif action == unlink_action:
+            elif unlink_action is not None and action == unlink_action:
                 self.unlink_clips(clip)
             elif action == delete_action:
                 self.delete_selected_clip()
