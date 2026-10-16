@@ -565,6 +565,12 @@ class SequenceTimeline(QMainWindow):
         if key_hit is not None:
             key_context_menu(self, key_hit, pos)
             return
+        # Markers next: Edit / Delete instead of the clip menu
+        from markers import hit_test_marker, marker_context_menu
+        marker_hit = hit_test_marker(self, pos)
+        if marker_hit is not None:
+            marker_context_menu(self, marker_hit, pos)
+            return
         # Right-click on an image or video clip gets the clip menu instead
         clip = self._clip_at(pos)
         if clip is not None:
@@ -900,11 +906,12 @@ class SequenceTimeline(QMainWindow):
                 # that clip (selection solo), Shift = add to the selection,
                 # empty clip-area space = clear
                 press_pos = event.position().toPoint()
-                # Marker under the mouse: edit popup only (no select / drag)
-                from markers import hit_test_marker, edit_marker
+                # Marker under the mouse: marker drag only (no clip select /
+                # drag, no edit popup)
+                from markers import hit_test_marker, marker_drag_start
                 marker_hit = hit_test_marker(self, press_pos)
                 if marker_hit is not None:
-                    edit_marker(self, marker_hit[0], marker_hit[1])
+                    marker_drag_start(self, marker_hit, press_pos)
                     return True
                 hit_clip = self._clip_at(press_pos)
                 edge_hit = self._clip_edge_at(press_pos)
@@ -973,6 +980,10 @@ class SequenceTimeline(QMainWindow):
                     return True
             if etype == QEvent.MouseMove:
                 pos = event.position().toPoint()
+                if getattr(self, "_marker_drag", None) is not None:
+                    from markers import marker_drag_move
+                    marker_drag_move(self, pos)
+                    return True
                 if self._key_drag is not None:
                     from keyframe import key_drag_move
                     key_drag_move(self, pos)
@@ -989,6 +1000,10 @@ class SequenceTimeline(QMainWindow):
                 mh = hit_test_marker(self, pos)
                 self._set_hover_marker(mh[1][0] if mh is not None else None)
             if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if getattr(self, "_marker_drag", None) is not None:
+                    from markers import marker_drag_release
+                    marker_drag_release(self)
+                    return True
                 if self._key_drag is not None:
                     from keyframe import key_drag_release
                     key_drag_release(self)

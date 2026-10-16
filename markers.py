@@ -13,7 +13,6 @@ DEFAULT_RGB = (50, 0, 0)
 MARK_SIZE = 6
 HIT_PX = 3      # click tolerance around a marker line / square
 HOVER_LINE_W = 3
-DELETE_RESULT = 2   # edit popup result code for Delete
 
 
 def line_width(marker_id, hover_id):
@@ -248,25 +247,9 @@ def edit_marker(tl, clip, marker):
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     buttons.accepted.connect(dlg.accept)
     buttons.rejected.connect(dlg.reject)
-    # Delete: no confirmation; done(2) closes the popup
-    del_btn = buttons.addButton("Delete", QDialogButtonBox.DestructiveRole)
-    del_btn.clicked.connect(lambda: dlg.done(DELETE_RESULT))
     form.addRow(buttons)
     result = dlg.exec()
     project_db = tl._project_db()
-    if result == DELETE_RESULT:
-        try:
-            from undo import push_undo
-            push_undo(project_db, "Delete marker")
-        except Exception:
-            pass
-        try:
-            delete_marker(project_db, mid)
-        except Exception as e:
-            QMessageBox.warning(tl, "Marker", "Could not delete marker: %s" % e)
-            return False
-        tl._after_clip_change("Marker deleted")
-        return True
     if result != QDialog.Accepted:
         return False
     try:
@@ -281,4 +264,87 @@ def edit_marker(tl, clip, marker):
         QMessageBox.warning(tl, "Marker", "Could not save marker: %s" % e)
         return False
     tl._after_clip_change("Marker updated")
+    return True
+
+
+def remove_marker(tl, marker):
+    # Delete one marker (undo snapshot), then redraw
+    from PySide6.QtWidgets import QMessageBox
+    project_db = tl._project_db()
+    try:
+        from undo import push_undo
+        push_undo(project_db, "Delete marker")
+    except Exception:
+        pass
+    try:
+        delete_marker(project_db, marker[0])
+    except Exception as e:
+        QMessageBox.warning(tl, "Marker", "Could not delete marker: %s" % e)
+        return False
+    tl._after_clip_change("Marker deleted")
+    return True
+
+
+def marker_context_menu(tl, hit, pos):
+    # Right-click on a marker: Edit / Delete (instead of the clip menu)
+    from PySide6.QtWidgets import QMenu
+    clip, marker = hit
+    menu = QMenu(tl)
+    edit_action = menu.addAction("Edit")
+    delete_action = menu.addAction("Delete")
+    action = menu.exec(tl.table.viewport().mapToGlobal(pos))
+    if action is None:
+        return
+    if action == edit_action:
+        edit_marker(tl, clip, marker)
+    elif action == delete_action:
+        remove_marker(tl, marker)
+
+
+def _timeline_frame_at(tl, pos):
+    return int(round(tl.view_start_frame + tl._x_in_clips(pos) / float(tl.pixels_per_frame)))
+
+
+def marker_drag_start(tl, hit, pos):
+    # Left press on a marker: drag state only (no edit, no clip selection)
+    clip, marker = hit
+    tl._marker_drag = {"clip": clip, "marker_id": marker[0],
+                       "orig_frame": int(marker[1]), "frame": int(marker[1])}
+
+
+def marker_drag_move(tl, pos):
+    # Live: new source frame (clamped to the visible range), no snapping
+    drag = tl._marker_drag
+    src = marker_to_source(drag["clip"], _timeline_frame_at(tl, pos))
+    if src == drag["frame"]:
+        return
+    drag["frame"] = src
+    items = (getattr(tl, "_markers", None) or {}).get(drag["clip"][0], [])
+    for i, m in enumerate(items):
+        if m[0] == drag["marker_id"]:
+            items[i] = (m[0], src, m[2], m[3])
+    tl.table.viewport().update()
+
+
+def marker_drag_release(tl):
+    # One write and one undo snapshot per drag; a click without movement
+    # changes nothing
+    drag = tl._marker_drag
+    tl._marker_drag = None
+    if drag is None or drag["frame"] == drag["orig_frame"]:
+        return False
+    project_db = tl._project_db()
+    try:
+        from undo import push_undo
+        push_undo(project_db, "Move marker")
+    except Exception:
+        pass
+    conn = sqlite3.connect(project_db)
+    try:
+        conn.execute("UPDATE Marker SET frame = ? WHERE id = ?",
+                     (int(drag["frame"]), int(drag["marker_id"])))
+        conn.commit()
+    finally:
+        conn.close()
+    tl._after_clip_change("Marker moved")
     return True
