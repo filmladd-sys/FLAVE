@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QPushButton, QMessageBox, QDoubleSpinBox,
+    QPushButton, QMessageBox, QDoubleSpinBox, QApplication,
 )
 
 # Stored on keyframe_clips.type. Not enforced beyond storing the string.
@@ -83,7 +83,7 @@ def clip_title(name, stored_type):
 def load_keyframe_clips(cur, sequence_id, clips):
     # Into clips_by_track like captions: list
     # [mem_id, None, start, length, title, enabled, solo, in_src, link_id,
-    #  keys] where keys is [(absolute_frame, value), ...]
+    #  keys, type] where keys is [(key_id, absolute_frame, value), ...]
     by_db = {}
     try:
         cur.execute(
@@ -100,31 +100,57 @@ def load_keyframe_clips(cur, sequence_id, clips):
         out_f = max(in_f + 1, int(out_f or (in_f + 1)))
         length = max(1, out_f - in_f)
         entry = [mem_id_from_db(db_id), None, in_f, length,
-                 clip_title(name, ktype), 1, 0, 0, link_id, []]
+                 clip_title(name, ktype), 1, 0, 0, link_id, [], ktype]
         clips.setdefault(track_id, []).append(entry)
         by_db[int(db_id)] = entry
     if not by_db:
         return
     try:
         cur.execute(
-            "SELECT k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
+            "SELECT k.id, k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
             "JOIN keyframe_clips c ON c.id = k.keyframe_clip_id "
             "WHERE c.sequence_id = ? ORDER BY k.frame, k.id",
             (sequence_id,)
         )
     except sqlite3.OperationalError:
         return
-    for db_id, frame, value in cur.fetchall():
+    for key_id, db_id, frame, value in cur.fetchall():
         entry = by_db.get(int(db_id))
         if entry is not None:
-            entry[9].append((int(frame), float(value)))
+            entry[9].append((int(key_id), int(frame), float(value)))
+
+
+def format_key_value(value, stored_type):
+    # Position X/Y and scale: two decimal places
+    return "%.2f" % float(value)
+
+
+def key_square_size(text, font_metrics):
+    pad = 4
+    tw = font_metrics.horizontalAdvance(text)
+    th = font_metrics.height()
+    return max(KEY_MARK_SIZE, tw + pad * 2), max(KEY_MARK_SIZE, th + pad * 2)
+
+
+def key_mark_layout(clip_rect, frame, value, clip_start, ppf, stored_type,
+                    font_metrics):
+    # (text, square QRect, center_x) for one key; line is full body height
+    text = format_key_value(value, stored_type)
+    w, h = key_square_size(text, font_metrics)
+    title_h = min(TITLE_BAR_H, max(1, clip_rect.height()))
+    body_top = clip_rect.top() + title_h
+    body_h = max(0, clip_rect.height() - title_h)
+    x = int(clip_rect.left() + (int(frame) - int(clip_start)) * ppf)
+    cy = body_top + body_h // 2
+    sq = QRect(x - w // 2, cy - h // 2, w, h)
+    return text, sq, x, body_top
 
 
 def paint_keyframe_clip(painter, clip_rect, title, keys=None,
-                        clip_start=0, ppf=1.0):
-    # Caption-like body fill, plus a 15 px title bar (black, white outline,
-    # white centered Name: Type). Keys: white vertical line then 20x20
-    # white square with black border, clipped to the clip rect.
+                        clip_start=0, ppf=1.0, stored_type=""):
+    # Caption-like body fill, plus a 15 px title bar. Keys: full-height white
+    # vertical line, then a sized white square with black border and light
+    # grey value text, clipped to the clip rect.
     body = QColor(30, 110, 110)
     painter.fillRect(clip_rect, body)
     h = min(TITLE_BAR_H, max(1, clip_rect.height()))
@@ -139,23 +165,28 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
         painter.drawText(title_rect, Qt.AlignCenter, text)
     if not keys or ppf <= 0:
         return
-    body_top = clip_rect.top() + h
     body_h = max(0, clip_rect.height() - h)
     if body_h <= 0:
         return
     painter.save()
     painter.setClipRect(clip_rect)
-    half = KEY_MARK_SIZE // 2
-    cy = body_top + body_h // 2
-    for frame, _value in keys:
-        x = int(clip_rect.left() + (int(frame) - int(clip_start)) * ppf)
+    fm = painter.fontMetrics()
+    for item in keys:
+        if len(item) >= 3:
+            _kid, frame, value = item[0], item[1], item[2]
+        else:
+            frame, value = item[0], item[1]
+        text, sq, x, body_top = key_mark_layout(
+            clip_rect, frame, value, clip_start, ppf, stored_type, fm)
         painter.setPen(QPen(QColor(255, 255, 255)))
         painter.drawLine(x, body_top, x, clip_rect.top() + clip_rect.height() - 1)
-        sq = QRect(x - half, cy - half, KEY_MARK_SIZE, KEY_MARK_SIZE)
         painter.fillRect(sq, QColor(255, 255, 255))
         painter.setPen(QPen(QColor(0, 0, 0)))
         painter.drawRect(sq.adjusted(0, 0, -1, -1))
+        painter.setPen(QPen(QColor(180, 180, 180)))
+        painter.drawText(sq, Qt.AlignCenter, text)
     painter.restore()
+
 
 
 def keyframe_range_overlaps(cur, track_id, start, length, ignore_id=None):
@@ -194,7 +225,11 @@ def persist_keyframe_clip_time(cur, clip):
             (delta, db_id)
         )
         if len(clip) > 9 and clip[9]:
-            clip[9][:] = [(int(f) + delta, v) for f, v in clip[9]]
+            clip[9][:] = [
+                (item[0], int(item[1]) + delta, item[2]) if len(item) >= 3
+                else (int(item[0]) + delta, item[1])
+                for item in clip[9]
+            ]
 
 
 def persist_keyframe_clip_track(cur, clip, track_id):
@@ -295,16 +330,18 @@ def add_keyframe_clip(timeline, track_id, click_frame):
 
 class AddKeyDialog(QDialog):
     # One numeric value labeled with the clip type (X / Y / Scale)
-    def __init__(self, parent, type_label):
+    def __init__(self, parent, type_label, initial=None, title="Add Key"):
         super().__init__(parent)
-        self.setWindowTitle("Add Key")
+        self.setWindowTitle(title)
         layout = QVBoxLayout(self)
         row = QHBoxLayout()
         row.addWidget(QLabel("%s:" % (type_label or "Value")))
         self.spin = QDoubleSpinBox()
-        self.spin.setDecimals(6)
+        self.spin.setDecimals(2)
         self.spin.setRange(-1000000000.0, 1000000000.0)
         self.spin.setSingleStep(0.1)
+        if initial is not None:
+            self.spin.setValue(float(initial))
         row.addWidget(self.spin)
         layout.addLayout(row)
         ok_btn = QPushButton("OK")
@@ -315,12 +352,27 @@ class AddKeyDialog(QDialog):
         return float(self.spin.value())
 
 
-def clip_type_label_from_db(cur, db_id):
+def clip_type_from_db(cur, db_id):
     cur.execute("SELECT type FROM keyframe_clips WHERE id = ?", (int(db_id),))
     row = cur.fetchone()
-    if not row:
-        return "Value"
-    return type_display_label(row[0]) or "Value"
+    return (row[0] if row else "") or ""
+
+
+def clip_type_label_from_db(cur, db_id):
+    return type_display_label(clip_type_from_db(cur, db_id)) or "Value"
+
+
+def default_key_value(timeline, stored_type):
+    # position X/Y = sequence center; scale = 100
+    if stored_type == "position X":
+        w, _h = timeline._sequence_size()
+        return float(w) / 2.0
+    if stored_type == "position Y":
+        _w, h = timeline._sequence_size()
+        return float(h) / 2.0
+    if stored_type == "scale":
+        return 100.0
+    return 0.0
 
 
 def add_key(timeline, clip, click_frame):
@@ -338,12 +390,14 @@ def add_key(timeline, clip, click_frame):
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         ensure_keyframe_tables(conn)
-        type_label = clip_type_label_from_db(cur, db_id)
+        stored_type = clip_type_from_db(cur, db_id)
+        type_label = type_display_label(stored_type) or "Value"
         conn.close()
     except Exception as e:
         QMessageBox.warning(timeline, "Add Key", "Could not read clip: %s" % e)
         return
-    dlg = AddKeyDialog(timeline, type_label)
+    initial = default_key_value(timeline, stored_type)
+    dlg = AddKeyDialog(timeline, type_label, initial=initial)
     if dlg.exec() != QDialog.Accepted:
         return
     value = dlg.value()
@@ -362,3 +416,158 @@ def add_key(timeline, clip, click_frame):
         QMessageBox.warning(timeline, "Add Key", "Could not add key: %s" % e)
         return
     timeline._after_clip_change("Added key at frame %d" % frame)
+
+
+def persist_keyframe_frame(cur, key_id, frame):
+    cur.execute(
+        "UPDATE keyframes SET frame = ? WHERE id = ?",
+        (int(frame), int(key_id))
+    )
+
+
+def persist_keyframe_value(cur, key_id, value):
+    cur.execute(
+        "UPDATE keyframes SET value = ? WHERE id = ?",
+        (float(value), int(key_id))
+    )
+
+
+def edit_key(timeline, clip, key_id, frame, value):
+    # Prefill edit popup; OK writes keyframes.value
+    db_id = db_id_from_mem(clip[0])
+    stored_type = clip[10] if len(clip) > 10 else ""
+    type_label = type_display_label(stored_type) or "Value"
+    if not stored_type:
+        project_db = timeline._project_db()
+        if project_db:
+            try:
+                conn = sqlite3.connect(project_db)
+                cur = conn.cursor()
+                stored_type = clip_type_from_db(cur, db_id)
+                type_label = type_display_label(stored_type) or "Value"
+                conn.close()
+            except Exception:
+                pass
+    dlg = AddKeyDialog(timeline, type_label, initial=value, title="Edit Key")
+    if dlg.exec() != QDialog.Accepted:
+        return
+    new_val = dlg.value()
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        persist_keyframe_value(cur, key_id, new_val)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Edit Key", "Could not save: %s" % e)
+        return
+    timeline._after_clip_change("Updated key at frame %d" % int(frame))
+
+
+def hit_test_key(timeline, pos):
+    # Topmost key square under pos on a keyframe track, or None
+    from sequence_timeline_ruler import CLIPS_COL
+    row = timeline.table.rowAt(pos.y())
+    if row < 0:
+        return None
+    name_item = timeline.table.item(row, 0)
+    if name_item is None:
+        return None
+    if (name_item.data(Qt.UserRole + 4) or "").lower() != "keyframe":
+        return None
+    track_id = name_item.data(Qt.UserRole)
+    x_in_clips = timeline._x_in_clips(pos)
+    if x_in_clips < 0:
+        return None
+    cell = timeline.table.visualRect(timeline.table.model().index(row, CLIPS_COL))
+    if cell.isNull():
+        return None
+    ppf = timeline.pixels_per_frame
+    fm = timeline.table.fontMetrics()
+    # Later clips on top (same as _clip_at reversed)
+    for clip in reversed(timeline.clips_by_track.get(track_id, [])):
+        if not is_keyframe_clip_id(clip[0]):
+            continue
+        start = int(clip[2])
+        length = max(1, int(clip[3]))
+        x = int(cell.left() + (start - timeline.view_start_frame) * ppf)
+        w = max(1, int(length * ppf))
+        clip_rect = QRect(x, cell.top(), w, cell.height())
+        keys = clip[9] if len(clip) > 9 else []
+        stored_type = clip[10] if len(clip) > 10 else ""
+        for i in range(len(keys) - 1, -1, -1):
+            item = keys[i]
+            if len(item) >= 3:
+                key_id, frame, value = item[0], item[1], item[2]
+            else:
+                continue
+            _text, sq, _cx, _bt = key_mark_layout(
+                clip_rect, frame, value, start, ppf, stored_type, fm)
+            if sq.contains(pos):
+                return {
+                    "clip": clip,
+                    "index": i,
+                    "key_id": int(key_id),
+                    "frame": int(frame),
+                    "value": float(value),
+                }
+    return None
+
+
+def key_drag_move(timeline, pos):
+    drag = timeline._key_drag
+    if drag is None:
+        return
+    press = drag["press_pos"]
+    dist = (pos - press)
+    threshold = max(1, QApplication.startDragDistance())
+    if not drag["dragging"]:
+        if abs(dist.x()) < threshold and abs(dist.y()) < threshold:
+            return
+        drag["dragging"] = True
+    clip = drag["clip"]
+    in_f = max(0, int(clip[2]))
+    out_f = in_f + max(1, int(clip[3]))
+    frame = timeline._frame_at_clips_x(timeline._x_in_clips(pos))
+    frame = max(in_f, min(out_f - 1, int(frame)))
+    idx = drag["index"]
+    if 0 <= idx < len(clip[9]):
+        kid, _old_f, val = clip[9][idx]
+        clip[9][idx] = (kid, frame, val)
+    drag["frame"] = frame
+    timeline.table.viewport().update()
+
+
+
+
+def key_drag_release(timeline):
+    drag = timeline._key_drag
+    timeline._key_drag = None
+    if drag is None:
+        return
+    clip = drag["clip"]
+    if not drag.get("dragging"):
+        edit_key(timeline, clip, drag["key_id"], drag["orig_frame"], drag["value"])
+        return
+    frame = int(drag.get("frame", drag["orig_frame"]))
+    in_f = max(0, int(clip[2]))
+    out_f = in_f + max(1, int(clip[3]))
+    frame = max(in_f, min(out_f - 1, frame))
+    project_db = timeline._project_db()
+    if not project_db:
+        timeline.table.viewport().update()
+        return
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        persist_keyframe_frame(cur, drag["key_id"], frame)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Move Key", "Could not save: %s" % e)
+        timeline._after_clip_change("Key move failed")
+        return
+    timeline._after_clip_change("Moved key to frame %d" % frame)

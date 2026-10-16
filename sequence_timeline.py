@@ -93,9 +93,10 @@ class ClipDelegate(QStyledItemDelegate):
             if track_type == "keyframe":
                 from keyframe import paint_keyframe_clip
                 keys = clip[9] if len(clip) > 9 else []
+                ktype = clip[10] if len(clip) > 10 else ""
                 paint_keyframe_clip(
                     painter, clip_rect, filename or "", keys=keys,
-                    clip_start=start_frame, ppf=ppf)
+                    clip_start=start_frame, ppf=ppf, stored_type=ktype)
                 if clip_id in tl._selected_clip_ids:
                     painter.setPen(QColor(255, 255, 160))
                 else:
@@ -439,6 +440,7 @@ class SequenceTimeline(QMainWindow):
         # Clip edge dragging: hover cursor needs mouse tracking
         self.table.viewport().setMouseTracking(True)
         self._edge_drag = None
+        self._key_drag = None
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -841,6 +843,20 @@ class SequenceTimeline(QMainWindow):
                     pass
                 else:
                     self._select_clip(hit_clip, "normal")
+                from keyframe import hit_test_key
+                key_hit = hit_test_key(self, press_pos)
+                if key_hit is not None:
+                    self._key_drag = {
+                        "clip": key_hit["clip"],
+                        "index": key_hit["index"],
+                        "key_id": key_hit["key_id"],
+                        "orig_frame": key_hit["frame"],
+                        "frame": key_hit["frame"],
+                        "value": key_hit["value"],
+                        "press_pos": press_pos,
+                        "dragging": False,
+                    }
+                    return True
                 hit = self._clip_edge_at(event.position().toPoint())
                 if hit is not None:
                     clip, edge = hit
@@ -870,6 +886,10 @@ class SequenceTimeline(QMainWindow):
                     return True
             if etype == QEvent.MouseMove:
                 pos = event.position().toPoint()
+                if self._key_drag is not None:
+                    from keyframe import key_drag_move
+                    key_drag_move(self, pos)
+                    return True
                 if self._edge_drag is not None:
                     self._edge_drag_move(pos)
                     return True
@@ -878,6 +898,10 @@ class SequenceTimeline(QMainWindow):
                 else:
                     obj.unsetCursor()
             if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._key_drag is not None:
+                    from keyframe import key_drag_release
+                    key_drag_release(self)
+                    return True
                 if self._edge_drag is not None:
                     if self._edge_drag["edge"] == "move":
                         self._move_drag_release()
@@ -1032,13 +1056,15 @@ class SequenceTimeline(QMainWindow):
             if edge == "move":
                 c[2] = m["start"] + delta
                 if "keys" in m:
-                    c[9] = [(f + delta, v) for f, v in m["keys"]]
+                    c[9] = [(item[0], item[1] + delta, item[2])
+                            for item in m["keys"]]
             elif edge == "left":
                 c[2] = m["start"] + delta
                 c[3] = m["length"] - delta
                 c[7] = m["in"] + delta
                 if "keys" in m:
-                    c[9] = [(f + delta, v) for f, v in m["keys"]]
+                    c[9] = [(item[0], item[1] + delta, item[2])
+                            for item in m["keys"]]
             else:
                 c[3] = m["length"] + delta
         self.table.viewport().update()
