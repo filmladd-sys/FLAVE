@@ -69,7 +69,8 @@ def edit_clip_gain(timeline, clip):
     if not editable:
         QMessageBox.information(
             timeline, "Gain",
-            "This project's clips table has no gain column (older project).")
+            "Gain is not available in this project because it was created "
+            "with an older version. Create a new project to use Gain.")
         return
     dlg = GainDialog(timeline, current)
     if dlg.exec() != QDialog.Accepted:
