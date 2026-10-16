@@ -1233,6 +1233,8 @@ class SequenceTimeline(QMainWindow):
                     if self._range_overlaps(cur, target, new_start, int(clip[3])):
                         refused = True
                     else:
+                        from undo import push_undo
+                        push_undo(self._project_db(), "Move clip to track")
                         table, row_id = clip_table_and_id(clip[0])
                         cur.execute(
                             f"UPDATE {table} SET track_id = ? WHERE id = ?",
@@ -1254,6 +1256,8 @@ class SequenceTimeline(QMainWindow):
         new_start = max(0, int(clip[2]))
         if new_start == drag["orig_start"]:
             return
+        from undo import push_undo
+        push_undo(self._project_db(), "Move clip")
         try:
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
@@ -1389,6 +1393,8 @@ class SequenceTimeline(QMainWindow):
         if len(selected) < 2:
             return
         new_link = selected[0][0]
+        from undo import push_undo
+        push_undo(self._project_db(), "Link clips")
         try:
             from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
             from sequence_timeline_captions import persist_caption_link_id
@@ -1419,6 +1425,8 @@ class SequenceTimeline(QMainWindow):
             ids = [c[0] for c in selected]
         else:
             ids = [clip[0]]
+        from undo import push_undo
+        push_undo(self._project_db(), "Unlink clips")
         try:
             from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
             from sequence_timeline_captions import persist_caption_link_id
@@ -1465,6 +1473,8 @@ class SequenceTimeline(QMainWindow):
                 and clip[7] == drag["orig_in"]):
             return
         group = drag.get("group") or [{"clip": clip}]
+        from undo import push_undo
+        push_undo(self._project_db(), "Trim clip")
         try:
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()

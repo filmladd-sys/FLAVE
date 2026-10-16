@@ -320,6 +320,8 @@ def _add_track(self, track_type, title, name=None, language="", bg_color=None):
         name = (name or "").strip()
         if not ok or not name:
             return
+    from undo import push_undo
+    push_undo(project_db, "Add track")
     try:
         ensure_tracks_table(project_db)
         conn = sqlite3.connect(project_db)
@@ -468,6 +470,8 @@ def _save_track_display(self, track_id, height_px, bg_color):
 
 def _move_track(self, track_id, direction):
     project_db = self._project_db()
+    from undo import push_undo
+    push_undo(project_db, "Reorder track")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
@@ -580,6 +584,8 @@ def drop_footage(self, footage_id, row, x_in_clips):
                     f"Drop refused: overlaps a clip on the {refused} track", 3000)
                 return False
         # All drops start at source frame 0
+        from undo import push_undo
+        push_undo(project_db, "Add clip")
         cur.execute(
             "INSERT INTO clips (track_id, footage_id, start_frame, length_frames, in_frame) "
             "VALUES (?, ?, ?, ?, 0)",
@@ -634,6 +640,8 @@ def delete_selected_clip(self):
         for c in self._selected_clips():
             for m in self._linked_clips(c):
                 ids.add(m[0])
+    from undo import push_undo
+    push_undo(self._project_db(), "Delete clip")
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
@@ -674,6 +682,8 @@ def slice_clip(self, clip, x_in_clips):
     else:
         linked = clip[8] is not None if len(clip) > 8 else False
         members = [clip] + self._linked_clips(clip)
+    from undo import push_undo
+    push_undo(self._project_db(), "Slice clip")
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
@@ -762,6 +772,8 @@ def ripple_delete(self, track_id, click_frame):
     if delta >= 0:
         self.status_bar.showMessage("Ripple Delete: no gap to close", 3000)
         return
+    from undo import push_undo
+    push_undo(self._project_db(), "Ripple delete")
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()

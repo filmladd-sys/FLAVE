@@ -450,6 +450,8 @@ def add_keyframe_clip(timeline, track_id, click_frame):
             timeline.status_bar.showMessage(
                 "Add Keyframe Clip refused: overlaps a clip on this track", 3000)
             return
+        from undo import push_undo
+        push_undo(project_db, "Add keyframe clip")
         cur.execute(
             "INSERT INTO keyframe_clips (sequence_id, track_id, type, link_id, "
             "in_frame, out_frame, name) VALUES (?, ?, ?, NULL, ?, ?, ?)",
@@ -544,6 +546,8 @@ def add_key(timeline, clip, click_frame):
     if dlg.exec() != QDialog.Accepted:
         return
     value = dlg.value()
+    from undo import push_undo
+    push_undo(project_db, "Add key")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
@@ -599,6 +603,8 @@ def edit_key(timeline, clip, key_id, frame, value):
     project_db = timeline._project_db()
     if not project_db:
         return
+    from undo import push_undo
+    push_undo(project_db, "Edit key")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
@@ -705,6 +711,9 @@ def key_drag_release(timeline):
     if not project_db:
         timeline.table.viewport().update()
         return
+    if frame != int(drag["orig_frame"]):
+        from undo import push_undo
+        push_undo(project_db, "Move key")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
@@ -723,6 +732,8 @@ def delete_key(timeline, key_id, clip=None):
     project_db = timeline._project_db()
     if not project_db:
         return
+    from undo import push_undo
+    push_undo(project_db, "Delete key")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QStatusBar
 )
 from PySide6.QtCore import Qt, QSettings
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 
 # Stub import for the separate settings window
 try:
@@ -124,6 +124,15 @@ def _ensure_keyframe_tables_for(project_db):
         pass
 
 
+def _ensure_undo_db_for(project_db):
+    # <project stem>.undo.db next to the project, created if missing
+    try:
+        from undo import ensure_undo_db
+        ensure_undo_db(project_db)
+    except Exception as e:
+        print(f"Undo db init failed: {e}")
+
+
 class ProjectManager(QMainWindow):
     TRACKED_WINDOWS = [
         ("footage", "footage_window"),
@@ -187,6 +196,28 @@ class ProjectManager(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        # Edit menu: snapshot undo/redo (undo.py). Ctrl+Z / Ctrl+Y are
+        # application-wide shortcuts on these actions, so they fire from
+        # every QWidget window; the Sequence Player QWindow forwards them.
+        edit_menu = menubar.addMenu("Edit")
+        self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut(QKeySequence("Ctrl+Z"))
+        self.undo_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.undo_action.triggered.connect(lambda: self._undo_redo("undo"))
+        edit_menu.addAction(self.undo_action)
+        self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
+        self.redo_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.redo_action.triggered.connect(lambda: self._undo_redo("redo"))
+        edit_menu.addAction(self.redo_action)
+        try:
+            import undo
+            undo.add_listener(self._update_undo_actions)
+            undo.add_refresher(self._refresh_after_undo)
+        except Exception as e:
+            print(f"Undo unavailable: {e}")
+        self._update_undo_actions()
+
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
 
@@ -212,7 +243,35 @@ class ProjectManager(QMainWindow):
         self.footage_mgr_action.triggered.connect(self._open_footage_manager)
         self.windows_menu.addAction(self.footage_mgr_action)
 
+    def _undo_redo(self, which):
+        if not self.current_project:
+            return
+        import undo
+        if undo.perform(which, self.current_project):
+            self.status_bar.showMessage("Undo" if which == "undo" else "Redo", 3000)
+
+    def _update_undo_actions(self):
+        try:
+            import undo
+            n_undo, n_redo = undo.counts(self.current_project)
+        except Exception:
+            n_undo, n_redo = 0, 0
+        self.undo_action.setEnabled(n_undo > 0)
+        self.redo_action.setEnabled(n_redo > 0)
+
+    def _refresh_after_undo(self, project_path, message):
+        # Footage and sequence managers reload from the restored tables
+        for attr in ("footage_window", "sequence_window"):
+            win = getattr(self, attr, None)
+            if win is not None and win.isVisible() and hasattr(win, "refresh"):
+                try:
+                    win.refresh()
+                except Exception as e:
+                    print(f"Undo refresh {attr} failed: {e}")
+
     def _update_windows_menu(self):
+        if hasattr(self, "undo_action"):
+            self._update_undo_actions()
         enabled = self.current_project is not None
         self.seq_mgr_action.setEnabled(enabled)
         self.footage_mgr_action.setEnabled(enabled)
@@ -227,6 +286,7 @@ class ProjectManager(QMainWindow):
             self.status_bar.showMessage("Project loaded")
             _ensure_audiotmp_for(path)
             _ensure_keyframe_tables_for(path)
+            _ensure_undo_db_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -247,6 +307,7 @@ class ProjectManager(QMainWindow):
         _set_global_setting("current_project", db_path)
         _ensure_audiotmp_for(db_path)
         _ensure_keyframe_tables_for(db_path)
+        _ensure_undo_db_for(db_path)
         self._update_windows_menu()
 
     def _open_project(self):
@@ -264,6 +325,7 @@ class ProjectManager(QMainWindow):
             _set_global_setting("current_project", path)
             _ensure_audiotmp_for(path)
             _ensure_keyframe_tables_for(path)
+            _ensure_undo_db_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

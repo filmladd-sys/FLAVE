@@ -294,6 +294,11 @@ class SequencePlayer(QWindow):
         return super().event(event)
 
     def keyPressEvent(self, event):
+        # Ctrl+Z / Ctrl+Y: QWindow is not a QWidget, so the application
+        # shortcuts do not reach it; forward to the undo module.
+        from undo import handle_key_event
+        if handle_key_event(event):
+            return
         # F11 toggles fullscreen. Escape leaves it. Title bar goes away.
         if event.key() == Qt.Key_F11:
             if self.visibility() == QWindow.FullScreen:

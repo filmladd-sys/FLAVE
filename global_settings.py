@@ -208,6 +208,12 @@ class GlobalSettingsWindow(QMainWindow):
         self.gpu_batch_edit.setPlaceholderText("8")
         layout.addWidget(self.gpu_batch_edit)
 
+        undo_max_label = QLabel("Undo stack max")
+        layout.addWidget(undo_max_label)
+        self.undo_max_edit = QLineEdit()
+        self.undo_max_edit.setPlaceholderText("50")
+        layout.addWidget(self.undo_max_edit)
+
         apply_btn = QPushButton("Apply")
         apply_btn.clicked.connect(self._apply)
         layout.addWidget(apply_btn)
@@ -239,6 +245,7 @@ class GlobalSettingsWindow(QMainWindow):
         self.idle_edit.setText(_get_global_setting("previewIdleMs", "250") or "250")
         self.batch_edit.setText(_get_global_setting("previewBatchSeconds", "1") or "1")
         self.gpu_batch_edit.setText(_get_global_setting("previewGpuBatchFrames", "8") or "8")
+        self.undo_max_edit.setText(_get_global_setting("UndoStackMax", "50") or "50")
 
         align = _get_global_setting("playercontrols_alignment", "left")
         idx = self.align_combo.findData(align or "left")
@@ -288,7 +295,8 @@ class GlobalSettingsWindow(QMainWindow):
                 (self.burst_edit, "previewBurstFrames", 15, 1, 300),
                 (self.idle_edit, "previewIdleMs", 250, 0, 5000),
                 (self.batch_edit, "previewBatchSeconds", 1, 1, 10),
-                (self.gpu_batch_edit, "previewGpuBatchFrames", 8, 1, 30)):
+                (self.gpu_batch_edit, "previewGpuBatchFrames", 8, 1, 30),
+                (self.undo_max_edit, "UndoStackMax", 50, 1, 1000000000)):
             try:
                 v = int(edit.text().strip() or str(default))
             except ValueError:
