@@ -1247,9 +1247,14 @@ class SequenceTimeline(QMainWindow):
                 self._after_clip_change("Move refused: overlaps a clip on the target track")
             else:
                 # Same frames, new layer order: that range is dirty
-                if self._track_type(drag.get("src_track")) in ("video", "image"):
+                src_kind = self._track_type(drag.get("src_track"))
+                if src_kind in ("video", "image"):
                     s0, ln = int(drag["orig_start"]), int(clip[3])
                     self._mark_preview_dirty([(s0, s0 + ln - 1)])
+                elif src_kind == "keyframe":
+                    # Above/below changes which linked clips it drives
+                    self._mark_preview_dirty(self._move_preview_ranges(
+                        [{"clip": clip, "start": drag["orig_start"]}], drag))
                 self._after_clip_change(f"Clip moved to track {target}")
             return
         group = drag.get("group") or [{"clip": clip}]
@@ -1272,21 +1277,118 @@ class SequenceTimeline(QMainWindow):
                             (max(0, int(c[2])), row_id))
             conn.commit()
             conn.close()
-            # Preview frames the moved video/image clips covered and now cover
-            ranges = []
-            for m in group:
-                c = m["clip"]
-                if self._track_type(self._clip_track_id(c)) not in ("video", "image"):
-                    continue
-                ln = int(c[3])
-                old = int(m.get("start", drag["orig_start"]))
-                new = max(0, int(c[2]))
-                ranges.append((old, old + ln - 1))
-                ranges.append((new, new + ln - 1))
-            self._mark_preview_dirty(ranges)
+            # Preview: a whole linked group alone over its frames moves its
+            # clean frames with it (run right after the next forced
+            # retarget, see _retarget_preview); otherwise old and new
+            # ranges go dirty
+            ranges = self._move_preview_ranges(group, drag)
+            plan = self._preview_shift_plan(group, drag)
+            if plan is None:
+                self._mark_preview_dirty(ranges)
+            else:
+                self._preview_pending_shift = (plan, ranges)
         except Exception as e:
             QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
         self._after_clip_change(f"Clip moved to frame {new_start}")
+        leftover = getattr(self, "_preview_pending_shift", None)
+        if leftover:
+            # The retarget did not run the shift: rebuild instead
+            self._preview_pending_shift = None
+            self._mark_preview_dirty(leftover[1])
+
+    def _move_preview_ranges(self, group, drag):
+        # Inclusive frame ranges a time move changes in the preview: old and
+        # new ranges of moved video/image and keyframe clips, plus linked
+        # partners left in place (solo drag) that composite with them.
+        from keyframe import is_keyframe_clip_id
+        ranges = []
+        ids = set()
+        kf_links = set()
+        vis_links = set()
+        for m in group:
+            c = m["clip"]
+            ids.add(c[0])
+            link_id = c[8] if len(c) > 8 else None
+            if is_keyframe_clip_id(c[0]):
+                if link_id is not None:
+                    kf_links.add(link_id)
+            elif self._track_type(self._clip_track_id(c)) in ("video", "image"):
+                if link_id is not None:
+                    vis_links.add(link_id)
+            else:
+                continue
+            ln = max(1, int(c[3]))
+            old = max(0, int(m.get("start", drag["orig_start"])))
+            new = max(0, int(c[2]))
+            ranges.append((old, old + ln - 1))
+            ranges.append((new, new + ln - 1))
+        if kf_links or vis_links:
+            for track_id, clips in self.clips_by_track.items():
+                kind = self._track_type(track_id)
+                for c in clips:
+                    link_id = c[8] if len(c) > 8 else None
+                    if c[0] in ids or link_id is None:
+                        continue
+                    if ((link_id in kf_links and kind in ("video", "image"))
+                            or (link_id in vis_links and is_keyframe_clip_id(c[0]))):
+                        s0 = max(0, int(c[2]))
+                        ranges.append((s0, s0 + max(1, int(c[3])) - 1))
+        return ranges
+
+    def _preview_shift_plan(self, group, drag):
+        # (first, last, delta) when the clean preview rows can move with the
+        # group (FramesShift): the whole linked group moved by one delta and
+        # no other video/image clip touches the old or new frame span. Any
+        # doubt returns None and the caller marks old and new ranges dirty.
+        if self.sequence_id is None or not group:
+            return None
+        try:
+            from keyframe import is_keyframe_clip_id
+            ids = set()
+            links = set()
+            deltas = set()
+            span = []
+            visual = False
+            for m in group:
+                c = m["clip"]
+                ids.add(c[0])
+                if len(c) > 8 and c[8] is not None:
+                    links.add(c[8])
+                old = int(m.get("start", drag["orig_start"]))
+                deltas.add(max(0, int(c[2])) - old)
+                kind = self._track_type(self._clip_track_id(c))
+                if is_keyframe_clip_id(c[0]) or kind in ("video", "image"):
+                    visual = visual or kind in ("video", "image")
+                    span.append((old, old + max(1, int(c[3])) - 1))
+            if len(deltas) != 1 or not links or not visual or not span:
+                return None
+            delta = deltas.pop()
+            if delta == 0:
+                return None
+            first = min(a for a, _b in span)
+            last = max(b for _a, b in span)
+            if first + delta < 0:
+                return None
+            for track_id, clips in self.clips_by_track.items():
+                kind = self._track_type(track_id)
+                for c in clips:
+                    if c[0] in ids:
+                        continue
+                    # Part of a moved link left behind: not the whole group
+                    if len(c) > 8 and c[8] is not None and c[8] in links:
+                        return None
+                    if kind not in ("video", "image"):
+                        continue
+                    s0 = int(c[2])
+                    e0 = s0 + max(1, int(c[3])) - 1
+                    for a, b in ((first, last), (first + delta, last + delta)):
+                        if s0 <= b and e0 >= a:
+                            return None
+            # print(f"Preview shift plan frames {first}..{last} by {delta}")
+            return (first, last, delta)
+        except Exception as e:
+            # print(f"Preview shift skipped: {e}")
+            return None
 
     def _ranges_for_clips(self, clips):
         # Inclusive (first, last) frame ranges for preview dirty marks.
@@ -1305,6 +1407,9 @@ class SequenceTimeline(QMainWindow):
         try:
             from sequence_preview import FramesMarkDirty
             FramesMarkDirty(self._project_db(), self.sequence_id, ranges)
+            # Marked again after the next forced retarget: a frame the worker
+            # builds from the old snapshot in between stays dirty
+            self._preview_remark = (getattr(self, "_preview_remark", None) or []) + list(ranges)
             from sequence_preview_worker import get_worker
             get_worker()
         except Exception as e:
@@ -2011,6 +2116,25 @@ class SequenceTimeline(QMainWindow):
                                   self.total_frames(), snap,
                                   getattr(self, "fps", None))
             self._preview_center = frame
+            pending = getattr(self, "_preview_pending_shift", None)
+            if force and pending:
+                # After the retarget, so the worker's old-snapshot pass
+                # cannot start a new chunk; a chunk already rendering was
+                # numbered before this shift and stays dirty
+                self._preview_pending_shift = None
+                try:
+                    from sequence_preview import FramesShift
+                    first, last, delta = pending[0]
+                    FramesShift(self._project_db(), self.sequence_id,
+                                first, last, delta)
+                except Exception as e:
+                    # print(f"Preview shift failed: {e}")
+                    self._mark_preview_dirty(pending[1])
+            remark = getattr(self, "_preview_remark", None)
+            if force and remark:
+                self._preview_remark = []
+                from sequence_preview import FramesMarkDirty
+                FramesMarkDirty(self._project_db(), self.sequence_id, remark)
         except Exception as e:
             print(f"Preview worker retarget failed: {e}")
 

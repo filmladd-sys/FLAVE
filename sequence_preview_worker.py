@@ -7,7 +7,8 @@
 import threading
 import time
 
-from sequence_preview import PreviewBatch, apply_dirty_queue, clean_set
+from sequence_preview import (PreviewBatch, apply_dirty_queue, clean_set,
+                              dirty_seq, dirty_queue_pending)
 
 
 def _forward(center, total):
@@ -161,6 +162,21 @@ class PreviewWorker(object):
                     j += 1
                 # Let the GUI thread run between card passes (GIL and the lock)
                 time.sleep(0.005)
+                # Dirty mark number before the build: an edit made while
+                # this chunk renders (old snapshot) keeps its frames dirty
+                seq0 = dirty_seq()
+                if dirty_queue_pending():
+                    # Marks or a row shift queued since the pass began: write
+                    # them first (commit runs them; no open write left), and
+                    # stop if an edit retargeted the worker meanwhile
+                    if batch.pending:
+                        n = len(batch.pending)
+                        batch.commit()
+                        self.saved += n
+                    else:
+                        apply_dirty_queue()
+                    if gen != self._gen:
+                        return
                 if len(chunk) == 1:
                     jpegs = [FrameGenerate(project, sequence_id, frame,
                                            snapshot=snapshot, worker=True)]
@@ -171,7 +187,7 @@ class PreviewWorker(object):
                 for f, jpeg in zip(chunk, jpegs):
                     if jpeg is None:
                         return
-                    batch.add(f, jpeg)
+                    batch.add(f, jpeg, seq0)
                     burst_left -= 1
                     if len(batch.pending) >= batch_frames:
                         n = len(batch.pending)

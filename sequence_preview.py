@@ -59,7 +59,7 @@ def mark_clean(project_path, sequence_id, frame_num):
 # sequence number so a batch can drop frames it built before the mark.
 _DIRTY_SEQ = [0]
 _DIRTY_LOG = []     # (seq, key, first, last), newest last, kept short
-_DIRTY_QUEUE = []   # (project_path, sequence_id, first, last)
+_DIRTY_QUEUE = []   # (project_path, sequence_id, first, last[, delta, seq])
 
 
 def FramesMarkDirty(project_path, sequence_id, ranges):
@@ -79,14 +79,83 @@ def FramesMarkDirty(project_path, sequence_id, ranges):
         del _DIRTY_LOG[:-256]
 
 
+def FramesShift(project_path, sequence_id, first, last, delta):
+    # Linked group moved by delta with nothing else under it: the clean
+    # frames of first..last move to first+delta..last+delta. GUI thread.
+    # Both ranges leave the clean set now (and are logged dirty so an
+    # in-flight worker batch keeps them dirty); the worker thread moves the
+    # rows (apply_dirty_queue) and re-adds the moved frames that are still
+    # clean.
+    key = (os.path.abspath(project_path), int(sequence_id))
+    first, last, delta = int(first), int(last), int(delta)
+    if last < first:
+        return
+    s = clean_set(project_path, sequence_id)
+    with _CLEAN_LOCK:
+        for a, b in ((first, last), (first + delta, last + delta)):
+            for f in [f for f in s if a <= f <= b]:
+                s.discard(f)
+            _DIRTY_SEQ[0] += 1
+            _DIRTY_LOG.append((_DIRTY_SEQ[0], key, a, b))
+        _DIRTY_QUEUE.append((project_path, int(sequence_id), first, last,
+                             delta, _DIRTY_SEQ[0]))
+        del _DIRTY_LOG[:-256]
+
+
+def _apply_shift(project_path, sequence_id, first, last, delta, seq):
+    # Worker thread: move clean rows first..last by delta in one transaction
+    key = (os.path.abspath(project_path), int(sequence_id))
+    conn = _connect(project_path, sequence_id)
+    try:
+        rows = conn.execute(
+            "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
+            "AND dirty = 0 AND jpeg IS NOT NULL", (first, last)).fetchall()
+        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
+                     (first, last))
+        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
+                     (first + delta, last + delta))
+        moved = []
+        for frame, jpeg in rows:
+            nf = int(frame) + delta
+            if nf < 0 or jpeg is None:
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO preview (frame, dirty, jpeg) VALUES (?, 0, ?)",
+                (nf, jpeg))
+            moved.append(nf)
+        conn.commit()
+    finally:
+        conn.close()
+    s = clean_set(project_path, sequence_id)
+    with _CLEAN_LOCK:
+        # Match the database: both ranges dirty except the moved frames.
+        # A frame marked dirty after the shift stays out (its queued mark
+        # writes the database next).
+        for a, b in ((first, last), (first + delta, last + delta)):
+            for f in [f for f in s if a <= f <= b]:
+                s.discard(f)
+        s.update(f for f in moved if not _dirty_since(key, seq, f))
+
+
 def apply_dirty_queue():
     # Write queued dirty marks (preview worker thread). A missing preview
     # file is not created: it has no clean rows anyway.
     with _CLEAN_LOCK:
         items = list(_DIRTY_QUEUE)
         del _DIRTY_QUEUE[:]
-    for project_path, sequence_id, first, last in items:
+    for item in items:
+        project_path, sequence_id, first, last = item[:4]
         if not os.path.isfile(preview_db_path(project_path, sequence_id)):
+            continue
+        if len(item) > 4:
+            # (project, sequence, first, last, delta, seq): row shift. On a
+            # failure both ranges are already out of the clean set, so the
+            # worker rebuilds them.
+            try:
+                _apply_shift(project_path, sequence_id, first, last,
+                             item[4], item[5])
+            except Exception as e:
+                print(f"Preview shift failed: {e}")
             continue
         conn = _connect(project_path, sequence_id)
         try:
@@ -95,6 +164,19 @@ def apply_dirty_queue():
             conn.commit()
         finally:
             conn.close()
+
+
+def dirty_queue_pending():
+    # True if GUI dirty marks or shifts wait for apply_dirty_queue
+    with _CLEAN_LOCK:
+        return bool(_DIRTY_QUEUE)
+
+
+def dirty_seq():
+    # Current dirty mark number. Read it before building a frame so a mark
+    # made while the frame was built keeps that frame dirty.
+    with _CLEAN_LOCK:
+        return _DIRTY_SEQ[0]
 
 
 def _dirty_since(key, seq, frame):
@@ -168,7 +250,9 @@ class PreviewBatch(object):
         self.pending = []
         self.seqs = []       # dirty mark number when each pending frame was built
 
-    def add(self, frame_num, jpeg_blob):
+    def add(self, frame_num, jpeg_blob, seq=None):
+        # seq: dirty mark number from before the frame was built (see
+        # dirty_seq); default is the current number
         if self.conn is None:
             self.conn = _connect(self.project_path, self.sequence_id)
         self.conn.execute(
@@ -176,7 +260,7 @@ class PreviewBatch(object):
             (int(frame_num), sqlite3.Binary(jpeg_blob)))
         self.pending.append(int(frame_num))
         with _CLEAN_LOCK:
-            self.seqs.append(_DIRTY_SEQ[0])
+            self.seqs.append(_DIRTY_SEQ[0] if seq is None else int(seq))
 
     def commit(self):
         # Seconds spent committing (0.0 if nothing pending)
