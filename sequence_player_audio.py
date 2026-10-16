@@ -79,6 +79,7 @@ class PreviewAudioPlayer(object):
 
     def __init__(self):
         self.wav_path = None
+        self._wav_stamp = None
         self.fps = 29.97
         self._pcm = b""
         self._qba = None
@@ -105,7 +106,16 @@ class PreviewAudioPlayer(object):
             self._qba = None
             self._buffer = None
             return False
-        if path == self.wav_path and self._pcm and self._buffer is not None:
+        # Reuse the in-memory PCM only if the WAV on disk is the same file
+        # (path, size, mtime). A rebuilt mix (gain, slice, move) keeps the
+        # same path, so the path alone would replay the old audio.
+        try:
+            st = os.stat(path)
+            stamp = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            stamp = None
+        if (path == self.wav_path and self._pcm and self._buffer is not None
+                and stamp is not None and stamp == self._wav_stamp):
             return True
         loaded = _read_wav_pcm(path)
         if not loaded:
@@ -133,6 +143,7 @@ class PreviewAudioPlayer(object):
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
         self._format = fmt
         self.wav_path = path
+        self._wav_stamp = stamp
         self._start_offset_ms = 0
         return True
 
