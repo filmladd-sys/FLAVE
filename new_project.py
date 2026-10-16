@@ -222,6 +222,20 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
+        # Clip markers: clip_id is the timeline clip id (clips.id, or
+        # -captions.id for captions); frame is relative to the clip start
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Marker (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                clip_id INTEGER NOT NULL,
+                frame INTEGER NOT NULL,
+                r INTEGER NOT NULL DEFAULT 139,
+                g INTEGER NOT NULL DEFAULT 0,
+                b INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
         # ProxyPath: folder for proxy files, default the project folder
         cur.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",

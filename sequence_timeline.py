@@ -163,6 +163,9 @@ class ClipDelegate(QStyledItemDelegate):
                         painter.fillRect(QRect(out_x, rect.top(), out_w, rect.height()),
                                          QColor(0, 0, 0))
                     text_rect.setRight(out_x - 1)
+            # Markers: square at the top plus a line (video / image / audio / caption)
+            from markers import paint_markers
+            paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf)
             # Outline last so the clip's full time span, handle included, is visible
             # Selected clip (last click or clip menu) gets a light yellow border
             if clip_id in tl._selected_clip_ids:
@@ -1189,9 +1192,11 @@ class SequenceTimeline(QMainWindow):
                 edges = [start + length]
             ids = {m["clip"][0] for m in group}
             ids.add(drag["clip"][0])
+            from markers import marker_frames
+            targets = sorted(set(snap_targets(self.clips_by_track, ids)) | set(
+                marker_frames(getattr(self, "_markers", None), self.clips_by_track, ids)))
             snapped, target = snap_delta_target(
-                raw, edges, snap_targets(self.clips_by_track, ids),
-                ppf, snap_px)
+                raw, edges, targets, ppf, snap_px)
         except Exception as e:
             # print(f"Snap failed: {e}")
             self._set_snap_frame(None)
@@ -1585,12 +1590,16 @@ class SequenceTimeline(QMainWindow):
             menu = QMenu(self)
             edit_action = menu.addAction("Edit")
             slice_action = menu.addAction("Slice")
+            marker_action = menu.addAction("Add Marker")
             link_action = menu.addAction("Link")
             link_action.setEnabled(len(self._selected_clips()) >= 2)
             unlink_action = menu.addAction("Unlink")
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if action is not None and action == marker_action:
+                self._add_marker(clip, pos)
+                return
             if action == edit_action:
                 self.edit_caption(clip)
             elif action == slice_action:
@@ -1611,9 +1620,15 @@ class SequenceTimeline(QMainWindow):
             gain_action = menu.addAction("Gain...")
             menu.addSeparator()
         slice_action = menu.addAction("Slice")
-        link_action = menu.addAction("Link")
-        link_action.setEnabled(len(self._selected_clips()) >= 2)
-        unlink_action = menu.addAction("Unlink")
+        marker_action = menu.addAction("Add Marker")
+        # Linked: Unlink only; not linked: Link only
+        clip_linked = len(clip) > 8 and clip[8] is not None
+        link_action = unlink_action = None
+        if clip_linked:
+            unlink_action = menu.addAction("Unlink")
+        else:
+            link_action = menu.addAction("Link")
+            link_action.setEnabled(len(self._selected_clips()) >= 2)
         menu.addSeparator()
         enable_action = menu.addAction("Disable" if enabled else "Enable")
         solo_action = menu.addAction("Solo")
@@ -1640,16 +1655,40 @@ class SequenceTimeline(QMainWindow):
             from clip_gain import edit_clip_gain
             edit_clip_gain(self, clip)
             return
-        if action == slice_action:
+        if action is None:
+            return
+        if action == marker_action:
+            self._add_marker(clip, pos)
+        elif action == slice_action:
             self.slice_clip(clip, self._x_in_clips(pos))
-        elif action == link_action:
+        elif link_action is not None and action == link_action:
             self.link_selected_clips()
-        elif action == unlink_action:
+        elif unlink_action is not None and action == unlink_action:
             self.unlink_clips(clip)
         elif action == enable_action:
             self._toggle_clip_flag(clip[0], "enabled")
         elif action == solo_action:
             self._toggle_clip_flag(clip[0], "solo")
+
+    def _add_marker(self, clip, pos):
+        # Marker at the frame under the mouse, dark red, blank name (undoable)
+        project_db = self._project_db()
+        if not project_db:
+            return
+        frame = int(self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame)
+        from undo import push_undo
+        push_undo(project_db, "Add marker")
+        from markers import add_marker
+        try:
+            new_id = add_marker(project_db, clip, frame)
+        except Exception as e:
+            QMessageBox.warning(self, "Add Marker", f"Could not add marker: {e}")
+            return
+        if new_id is None:
+            self.status_bar.showMessage(
+                "Markers are not available in this project (older version)", 3000)
+            return
+        self._after_clip_change(f"Marker at frame {frame}")
 
     def link_selected_clips(self):
         # Link: every selected clip gets link_id = first selected clip's id
@@ -1859,6 +1898,8 @@ class SequenceTimeline(QMainWindow):
     def refresh(self):
         # Table and clips reload (sequence_timeline_sql.py), then the player
         refresh(self)
+        from markers import load_markers
+        self._markers = load_markers(self._project_db())
         self._update_player()
         # Edit: new snapshot, wake the preview worker
         self._retarget_preview(force=True)
@@ -1880,6 +1921,9 @@ class SequenceTimeline(QMainWindow):
             for clip in clips:
                 points.add(int(clip[2]))
                 points.add(int(clip[2]) + int(clip[3]))
+        # Marker frames are stops too
+        from markers import marker_frames
+        points.update(marker_frames(getattr(self, "_markers", None), self.clips_by_track))
         return sorted(points)
 
     def _jump_to_frame(self, frame):
