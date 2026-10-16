@@ -677,10 +677,6 @@ def slice_clip(self, clip, x_in_clips):
                     "pos_x, pos_y, scale FROM captions WHERE id = ?",
                     (split_frame, right_length, cap_id)
                 )
-                # Caption markers are offsets from the caption start
-                from markers import move_markers
-                move_markers(cur, c[0], -cur.lastrowid, left_length, c_len,
-                             -left_length)
                 continue
             cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
                         (left_length, c[0]))

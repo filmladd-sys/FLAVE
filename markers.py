@@ -1,13 +1,11 @@
 # markers.py
 # Clip markers (Marker table, created only in new_project.py _init_db).
-# Marker.clip_id is the timeline's in-memory clip id: clips.id for video /
-# image / audio clips, -captions.id for caption clips (keyframe clips have
-# none). Marker.frame is in SOURCE terms (BUILD 95): clip in_frame + offset
+# Marker.clip_id is clips.id of a video / image / audio clip. Marker.frame is in SOURCE terms (BUILD 95): clip in_frame + offset
 # at add time, so trims and slices never move it on the picture. Timeline
 # frame = clip start + (frame - clip in_frame); markers outside the clip's
-# visible range are hidden. Captions have no in-point (in_frame 0 in the
-# timeline tuple), so a caption marker is an offset from the caption start.
-# Older DBs without Marker load no markers and refuse adds. ASCII only.
+# visible range are hidden. Markers are only for video / audio / image
+# clips (clips.id > 0); rows with a negative clip_id (old caption markers)
+# are skipped everywhere (BUILD 96). Older DBs without Marker load no markers and refuse adds. ASCII only.
 
 import sqlite3
 
@@ -31,6 +29,8 @@ def load_markers(project_db):
     except Exception:
         return out
     for mid, cid, frame, r, g, b, name in rows:
+        if int(cid) <= 0:
+            continue
         out.setdefault(int(cid), []).append(
             (int(mid), int(frame), (int(r), int(g), int(b)), name))
     return out
@@ -53,7 +53,7 @@ def marker_frames(markers, clips_by_track, exclude_ids=()):
         return []
     for clips in clips_by_track.values():
         for c in clips:
-            if c[0] in exclude_ids:
+            if c[0] in exclude_ids or int(c[0]) <= 0:
                 continue
             for _mid, mframe, _rgb, _name in markers.get(c[0], ()):
                 off = visible_offset(c, mframe)
@@ -64,7 +64,7 @@ def marker_frames(markers, clips_by_track, exclude_ids=()):
 
 def delete_markers(cur, mem_ids):
     # Marker rows of deleted clips (caller's transaction / undo snapshot)
-    ids = [int(i) for i in mem_ids]
+    ids = [int(i) for i in mem_ids if int(i) > 0]
     if not ids:
         return
     try:
@@ -86,7 +86,9 @@ def move_markers(cur, old_mem, new_mem, lo, hi, delta=0):
 
 
 def marker_rows(cur, mem_id):
-    # [(name, frame, r, g, b)] for copy / paste
+    # [(name, frame, r, g, b)] for copy / paste (clips only)
+    if int(mem_id) <= 0:
+        return []
     try:
         return cur.execute(
             "SELECT name, frame, r, g, b FROM Marker WHERE clip_id = ? ORDER BY id",
@@ -96,6 +98,8 @@ def marker_rows(cur, mem_id):
 
 
 def insert_marker_rows(cur, mem_id, rows):
+    if int(mem_id) <= 0:
+        return
     for name, frame, r, g, b in rows or ():
         try:
             cur.execute(
@@ -108,6 +112,8 @@ def insert_marker_rows(cur, mem_id, rows):
 def add_marker(project_db, clip, frame, name=""):
     # Insert at absolute timeline frame (clamped into the clip). Returns the
     # new id, or None when the Marker table is missing (older project).
+    if int(clip[0]) <= 0:
+        return None
     start, length = int(clip[2]), max(1, int(clip[3]))
     rel = max(0, min(length - 1, int(frame) - start))
     src = _clip_in(clip) + rel
@@ -129,7 +135,7 @@ def add_marker(project_db, clip, frame, name=""):
 def paint_markers(painter, clip_rect, clip, markers, ppf):
     # 4x4 square at the clip top plus a full-height line, marker color
     from PySide6.QtGui import QColor
-    items = markers.get(clip[0]) if markers else None
+    items = markers.get(clip[0]) if markers and int(clip[0]) > 0 else None
     if not items or ppf <= 0:
         return
     for _mid, mframe, rgb, _name in items:

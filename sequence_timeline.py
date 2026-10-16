@@ -163,9 +163,10 @@ class ClipDelegate(QStyledItemDelegate):
                         painter.fillRect(QRect(out_x, rect.top(), out_w, rect.height()),
                                          QColor(0, 0, 0))
                     text_rect.setRight(out_x - 1)
-            # Markers: square at the top plus a line (video / image / audio / caption)
+            # Markers: square at the top plus a line (video / image / audio only)
             from markers import paint_markers
-            paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf)
+            if track_type != "caption":
+                paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf)
             # Outline last so the clip's full time span, handle included, is visible
             # Selected clip (last click or clip menu) gets a light yellow border
             if clip_id in tl._selected_clip_ids:
@@ -1590,16 +1591,12 @@ class SequenceTimeline(QMainWindow):
             menu = QMenu(self)
             edit_action = menu.addAction("Edit")
             slice_action = menu.addAction("Slice")
-            marker_action = menu.addAction("Add Marker")
             link_action = menu.addAction("Link")
             link_action.setEnabled(len(self._selected_clips()) >= 2)
             unlink_action = menu.addAction("Unlink")
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            if action is not None and action == marker_action:
-                self._add_marker(clip, pos)
-                return
             if action == edit_action:
                 self.edit_caption(clip)
             elif action == slice_action:
