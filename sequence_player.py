@@ -156,7 +156,8 @@ class PreviewReader(object):
 
 def timeline_snapshot(tl):
     # GUI thread only: copy of the track rows and clips the composite reads,
-    # so the preview worker never touches Qt widgets.
+    # so the preview worker never touches Qt widgets. Also copies linked
+    # type-scale keyframe clips once per snapshot for per-frame scale.
     rows = []
     for r in range(tl.table.rowCount()):
         item = tl.table.item(r, 0)
@@ -170,7 +171,9 @@ def timeline_snapshot(tl):
     clips = {}
     for track_id, _en, _solo, _kind in rows:
         clips[track_id] = [list(c) for c in tl.clips_by_track.get(track_id, [])]
-    return rows, clips
+    from keyframe import collect_scale_clips
+    scale_clips = collect_scale_clips(tl.clips_by_track)
+    return rows, clips, scale_clips
 
 
 # ---------------------------------------------------------------- window
@@ -471,14 +474,19 @@ class SequencePlayer(QWindow):
         self.paths[footage_id] = path
         return path
 
-    def _layers(self, frame, snapshot=None):
-        # (kind, path, source_frame) bottom first. Top table row is the top
-        # track, drawn last. Video and image tracks only; disabled tracks
-        # skipped; if any track is solo, only solo tracks. snapshot is a
-        # timeline_snapshot() for the worker; None reads the live timeline.
+    def _layer_items(self, frame, snapshot=None):
+        # (kind, path, source_frame, scale_percent_or_None) bottom first.
+        # scale_percent_or_None is the linked type-scale keyframe result
+        # (percent), or None for no effect. Video/image base scale is 100
+        # (clips table has no scale column).
         if snapshot is None:
             snapshot = timeline_snapshot(self.timeline)
-        rows, clips_by_track = snapshot
+        if len(snapshot) >= 3:
+            rows, clips_by_track, scale_clips = snapshot[0], snapshot[1], snapshot[2]
+        else:
+            rows, clips_by_track = snapshot[0], snapshot[1]
+            scale_clips = []
+        from keyframe import scale_percent_for_link
         any_solo = any(solo for _tid, _en, solo, _k in rows)
         layers = []
         for track_id, enabled, solo, kind in reversed(rows):
@@ -491,9 +499,16 @@ class SequencePlayer(QWindow):
                 path = self._footage_path(clip[1])
                 if path:
                     src = (clip[7] + frame - start) if kind == "video" else 0
-                    layers.append((kind, path, max(0, int(src))))
+                    link_id = clip[8] if len(clip) > 8 else None
+                    scale = scale_percent_for_link(
+                        scale_clips, link_id, frame, base_scale=100.0)
+                    layers.append((kind, path, max(0, int(src)), scale))
                 break
         return layers
+
+    def _layers(self, frame, snapshot=None):
+        # (kind, path, source_frame) for prefetch / callers that ignore scale.
+        return [(k, p, s) for k, p, s, _sc in self._layer_items(frame, snapshot)]
 
     # ---- sources
 
@@ -528,14 +543,60 @@ class SequencePlayer(QWindow):
         self.images[path] = item
         return item
 
-    def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True):
+
+    def _scale_src(self, src_ptr, sw, sh, stride, bpp, factor):
+        # Host rescale of a device RGB/RGBA buffer; returns
+        # (ptr, w, h, stride, bpp) or None. Temps freed at end of _build_dst.
+        cudart = _libs()[0]
+        sw, sh, stride, bpp = int(sw), int(sh), int(stride), int(bpp)
+        if sw <= 0 or sh <= 0 or stride <= 0 or bpp not in (3, 4):
+            return None
+        nbytes = int(stride) * int(sh)
+        host = ctypes.create_string_buffer(nbytes)
+        _check(cudart.cudaMemcpy(host, ctypes.c_void_p(int(src_ptr)), nbytes, 2),
+               "scale download")
+        fmt = QImage.Format_RGB888 if bpp == 3 else QImage.Format_RGBA8888
+        img = QImage(host, sw, sh, stride, fmt)
+        if img.isNull():
+            return None
+        img = img.copy()
+        nw = max(1, int(round(sw * factor)))
+        nh = max(1, int(round(sh * factor)))
+        img = img.scaled(nw, nh)
+        img = img.convertToFormat(fmt)
+        raw = bytes(img.constBits())[: img.sizeInBytes()]
+        ptr = ctypes.c_void_p()
+        _check(cudart.cudaMalloc(ctypes.byref(ptr), len(raw)), "scale malloc")
+        _check(cudart.cudaMemcpy(ptr, raw, len(raw), 1), "scale upload")
+        if not hasattr(self, "_scale_temps"):
+            self._scale_temps = []
+        self._scale_temps.append(ptr)
+        return (ptr.value, img.width(), img.height(), img.bytesPerLine(), bpp)
+
+    def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None):
+        # scale: percent from linked keyframes (None = no effect, same as 100).
+        # Existing clip scale is 100 (clips table has no scale column). Final
+        # size is multiplied by scale/100 via a host rescale, then the usual
+        # center/crop blend (CUDA kernel unchanged).
         cudart, nvcuda, _gl = _libs()
+        if scale is not None:
+            try:
+                factor = float(scale) / 100.0
+            except (TypeError, ValueError):
+                factor = 1.0
+            if factor <= 0.0:
+                return
+            if abs(factor - 1.0) > 1e-9:
+                scaled = self._scale_src(src_ptr, sw, sh, stride, bpp, factor)
+                if scaled is None:
+                    return
+                src_ptr, sw, sh, stride, bpp = scaled
         src = ctypes.c_uint64(int(src_ptr))
         target = self._target if self._target is not None else self.dst
         dst = ctypes.c_uint64(int(target.value))
         vals = [ctypes.c_uint32(v) for v in (sw, sh, stride, bpp, self.seq_w, self.seq_h)]
-        # Centering, no scale: dest offset when the source is smaller,
-        # center-crop offset when it is larger; src = dst + (ox, oy)
+        # Centering: dest offset when the source is smaller, center-crop
+        # offset when it is larger; src = dst + (ox, oy)
         dx = (self.seq_w - sw) // 2 if self.seq_w > sw else 0
         dy = (self.seq_h - sh) // 2 if self.seq_h > sh else 0
         cx = (sw - self.seq_w) // 2 if sw > self.seq_w else 0
@@ -894,42 +955,55 @@ class SequencePlayer(QWindow):
             self._dst_frame = None
         _check(cudart.cudaMemsetAsync(target, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
-        for kind, path, src_frame in self._layers(frame, snapshot):
-            if kind == "image":
-                item = self._image(path)
-                if item is not None:
-                    self._blend(item[0].value, item[1], item[2], item[3], 4)
-                continue
-            if not os.path.isfile(path):
-                continue
-            if prefetched is not None and (path, src_frame) in prefetched:
-                f = prefetched[(path, src_frame)]
+        self._scale_temps = []
+        try:
+            for layer in self._layer_items(frame, snapshot):
+                kind, path, src_frame = layer[0], layer[1], layer[2]
+                scale = layer[3] if len(layer) > 3 else None
+                if kind == "image":
+                    item = self._image(path)
+                    if item is not None:
+                        self._blend(item[0].value, item[1], item[2], item[3], 4,
+                                    scale=scale)
+                    continue
+                if not os.path.isfile(path):
+                    continue
+                if prefetched is not None and (path, src_frame) in prefetched:
+                    f = prefetched[(path, src_frame)]
+                    shape = [int(v) for v in f.shape]
+                    sh, sw = shape[0], shape[1]
+                    stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
+                    self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
+                                scale=scale)
+                    continue
+                dec = self._decoder(path)
+                # Seek only when the asked frame is not the next one this decoder
+                # yields; a run in order continues decoding (HEVC GOP 15)
+                if self.dec_next.get(path) != src_frame:
+                    dec.seek_to_index(src_frame)
+                try:
+                    batch = dec.get_batch_frames(1)
+                except Exception:
+                    self.dec_next.pop(path, None)
+                    raise
+                if not batch:
+                    self.dec_next.pop(path, None)
+                    continue
+                self.dec_next[path] = src_frame + 1
+                f = batch[0]
                 shape = [int(v) for v in f.shape]
                 sh, sw = shape[0], shape[1]
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
-                self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync)
-                continue
-            dec = self._decoder(path)
-            # Seek only when the asked frame is not the next one this decoder
-            # yields; a run in order continues decoding (HEVC GOP 15)
-            if self.dec_next.get(path) != src_frame:
-                dec.seek_to_index(src_frame)
-            try:
-                batch = dec.get_batch_frames(1)
-            except Exception:
-                self.dec_next.pop(path, None)
-                raise
-            if not batch:
-                self.dec_next.pop(path, None)
-                continue
-            self.dec_next[path] = src_frame + 1
-            f = batch[0]
-            shape = [int(v) for v in f.shape]
-            sh, sw = shape[0], shape[1]
-            stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
-            # The kernel reads the decoder frame directly
-            self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3)
-        self._sync()
+                # The kernel reads the decoder frame directly
+                self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
+                            scale=scale)
+            self._sync()
+        finally:
+            cudart = _libs()[0]
+            for ptr in getattr(self, "_scale_temps", []):
+                if ptr is not None and getattr(ptr, "value", None):
+                    cudart.cudaFree(ptr)
+            self._scale_temps = []
         self._target = None
         if target is self.dst:
             self._dst_frame = frame

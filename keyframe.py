@@ -125,6 +125,101 @@ def format_key_value(value, stored_type):
     return "%.2f" % float(value)
 
 
+def evaluate_keyframes(keys, frame):
+    # Pure: keys are (key_id, frame, value) or (frame, value). One key =
+    # that value for the whole clip; two or more = linear between keys,
+    # hold flat before the first and after the last. No keys = None.
+    if not keys:
+        return None
+    points = []
+    for item in keys:
+        if item is None:
+            continue
+        if len(item) >= 3:
+            points.append((int(item[1]), float(item[2])))
+        elif len(item) >= 2:
+            points.append((int(item[0]), float(item[1])))
+    if not points:
+        return None
+    points.sort(key=lambda p: (p[0], p[1]))
+    f = int(frame)
+    if len(points) == 1 or f <= points[0][0]:
+        return points[0][1]
+    if f >= points[-1][0]:
+        return points[-1][1]
+    for i in range(len(points) - 1):
+        f0, v0 = points[i]
+        f1, v1 = points[i + 1]
+        if f0 <= f <= f1:
+            if f1 == f0:
+                return v1
+            t = (f - f0) / float(f1 - f0)
+            return v0 + (v1 - v0) * t
+    return points[-1][1]
+
+
+def evaluate_scale(keys, frame):
+    # Scale key value (percent), or None when there are no keys.
+    return evaluate_keyframes(keys, frame)
+
+
+def scale_percent_for_link(scale_clips, clip_link_id, frame, base_scale=100.0):
+    # Linked type-scale keyframe clip whose [in_frame, out_frame) covers
+    # frame. base_scale is the clip's existing scale percent (video/image
+    # clips have no scale column; callers pass 100). Returns final percent
+    # = base * value/100, or None when there is no effect.
+    if clip_link_id is None or not scale_clips:
+        return None
+    for link_id, in_f, out_f, keys in scale_clips:
+        if link_id is None or link_id != clip_link_id:
+            continue
+        if not (int(in_f) <= int(frame) < int(out_f)):
+            continue
+        value = evaluate_scale(keys, frame)
+        if value is None:
+            continue
+        return float(base_scale) * float(value) / 100.0
+    return None
+
+
+def collect_scale_clips(clips_by_track):
+    # Once per snapshot/pass: (link_id, in_frame, out_frame, keys) for every
+    # type-scale keyframe clip with a non-null link_id.
+    out = []
+    if not clips_by_track:
+        return out
+    for track_clips in clips_by_track.values():
+        for c in track_clips:
+            if not is_keyframe_clip_id(c[0]):
+                continue
+            if len(c) <= 10 or c[10] != "scale":
+                continue
+            link_id = c[8] if len(c) > 8 else None
+            if link_id is None:
+                continue
+            in_f = max(0, int(c[2]))
+            out_f = in_f + max(1, int(c[3]))
+            keys = list(c[9]) if len(c) > 9 and c[9] else []
+            out.append((link_id, in_f, out_f, keys))
+    return out
+
+
+def mark_keyframe_clip_preview_dirty(timeline, clip):
+    # Dirty the preview cache over the keyframe clip's [in, out).
+    if clip is None or timeline is None:
+        return
+    in_f = max(0, int(clip[2]))
+    length = max(1, int(clip[3]))
+    last = in_f + length - 1
+    if last < in_f:
+        return
+    try:
+        timeline._mark_preview_dirty([(in_f, last)])
+    except Exception:
+        pass
+
+
+
 def key_square_size(text, font_metrics):
     pad = 4
     tw = font_metrics.horizontalAdvance(text)
@@ -324,6 +419,11 @@ def add_keyframe_clip(timeline, track_id, click_frame):
         QMessageBox.warning(
             timeline, "Add Keyframe Clip", "Could not add clip: %s" % e)
         return
+    # Preview dirty over the new clip range (scale takes effect once linked)
+    try:
+        timeline._mark_preview_dirty([(in_frame, out_frame - 1)])
+    except Exception:
+        pass
     timeline._after_clip_change(
         "Added keyframe clip at frame %d" % in_frame)
 
@@ -415,6 +515,7 @@ def add_key(timeline, clip, click_frame):
     except Exception as e:
         QMessageBox.warning(timeline, "Add Key", "Could not add key: %s" % e)
         return
+    mark_keyframe_clip_preview_dirty(timeline, clip)
     timeline._after_clip_change("Added key at frame %d" % frame)
 
 
@@ -464,6 +565,7 @@ def edit_key(timeline, clip, key_id, frame, value):
     except Exception as e:
         QMessageBox.warning(timeline, "Edit Key", "Could not save: %s" % e)
         return
+    mark_keyframe_clip_preview_dirty(timeline, clip)
     timeline._after_clip_change("Updated key at frame %d" % int(frame))
 
 
@@ -570,10 +672,11 @@ def key_drag_release(timeline):
         QMessageBox.warning(timeline, "Move Key", "Could not save: %s" % e)
         timeline._after_clip_change("Key move failed")
         return
+    mark_keyframe_clip_preview_dirty(timeline, clip)
     timeline._after_clip_change("Moved key to frame %d" % frame)
 
 
-def delete_key(timeline, key_id):
+def delete_key(timeline, key_id, clip=None):
     project_db = timeline._project_db()
     if not project_db:
         return
@@ -586,6 +689,7 @@ def delete_key(timeline, key_id):
     except Exception as e:
         QMessageBox.warning(timeline, "Delete Keyframe", "Could not delete: %s" % e)
         return
+    mark_keyframe_clip_preview_dirty(timeline, clip)
     timeline._after_clip_change("Deleted keyframe")
 
 
@@ -600,4 +704,4 @@ def key_context_menu(timeline, key_hit, pos):
         edit_key(timeline, key_hit["clip"], key_hit["key_id"],
                  key_hit["frame"], key_hit["value"])
     elif action == delete_action:
-        delete_key(timeline, key_hit["key_id"])
+        delete_key(timeline, key_hit["key_id"], key_hit.get("clip"))

@@ -1284,6 +1284,15 @@ class SequenceTimeline(QMainWindow):
             QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
         self._after_clip_change(f"Clip moved to frame {new_start}")
 
+    def _ranges_for_clips(self, clips):
+        # Inclusive (first, last) frame ranges for preview dirty marks.
+        ranges = []
+        for c in clips:
+            in_f = max(0, int(c[2]))
+            length = max(1, int(c[3]))
+            ranges.append((in_f, in_f + length - 1))
+        return ranges
+
     def _mark_preview_dirty(self, ranges):
         # Clean set drops these frames now (bar turns red); the database
         # UPDATE runs on the preview worker thread. refresh() wakes the worker.
@@ -1398,6 +1407,8 @@ class SequenceTimeline(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Link Clips", f"Could not link clips: {e}")
             return
+        # Scale keyframe link changes affect composite over those ranges
+        self._mark_preview_dirty(self._ranges_for_clips(selected))
         self._after_clip_change(f"Linked {len(selected)} clips (link {new_link})")
 
     def unlink_clips(self, clip):
@@ -1426,6 +1437,10 @@ class SequenceTimeline(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Unlink Clips", f"Could not unlink clips: {e}")
             return
+        affected = [c for c in self._selected_clips() if c[0] in ids]
+        if not affected:
+            affected = [clip]
+        self._mark_preview_dirty(self._ranges_for_clips(affected))
         self._after_clip_change(f"Unlinked {len(ids)} clip(s)")
 
 
