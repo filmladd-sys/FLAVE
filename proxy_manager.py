@@ -129,7 +129,7 @@ def add_proxy_row(db_path, footage_id, percentage):
         conn.close()
 
 
-# ---- video proxies (FFmpeg h264_nvenc, BUILD 84)
+# ---- video proxies (FFmpeg h264_nvenc / hevc_nvenc above 4096, BUILD 86)
 
 _VIDEO_EXTS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
 
@@ -166,14 +166,30 @@ def _run(cmd):
             proc.stderr.decode("ascii", "replace"))
 
 
-def nvenc_available():
-    # (ok, message). ffmpeg on PATH and h264_nvenc listed in -encoders
+NVENC_MAX_H264 = 4096   # h264_nvenc limit per side; above it use hevc_nvenc
+
+
+def choose_encoder(w, h):
+    # (encoder, profile, extra args) for the target size
+    if int(w) > NVENC_MAX_H264 or int(h) > NVENC_MAX_H264:
+        return "hevc_nvenc", "main", ["-tag:v", "hvc1"]
+    return "h264_nvenc", "high", []
+
+
+def nvenc_available(encoder="h264_nvenc", w=None, h=None):
+    # (ok, message). ffmpeg on PATH and encoder listed in -encoders
+    why = ""
+    if w is not None and h is not None:
+        why = " (chosen for a %dx%d proxy%s)" % (
+            int(w), int(h),
+            "; over 4096 needs HEVC" if encoder == "hevc_nvenc" else "")
     try:
         code, out, err = _run(["ffmpeg", "-hide_banner", "-encoders"])
     except OSError:
-        return False, "ffmpeg was not found on PATH."
-    if "h264_nvenc" not in out + err:
-        return False, "ffmpeg on PATH has no h264_nvenc encoder (NVIDIA NVENC)."
+        return False, "ffmpeg was not found on PATH, so %s%s cannot run." % (encoder, why)
+    if encoder not in out + err:
+        return False, ("ffmpeg on PATH has no %s encoder (NVIDIA NVENC)%s." %
+                       (encoder, why))
     return True, ""
 
 
@@ -211,11 +227,13 @@ def footage_size(db_path, footage_id):
 
 
 def build_proxy_cmd(src, out, w, h):
-    # format=yuv420p converts 10-bit sources to 8-bit before nvenc
-    return ["ffmpeg", "-y", "-hide_banner", "-i", src, "-map", "0:v:0", "-an",
-            "-vf", "scale=%d:%d,format=yuv420p" % (int(w), int(h)),
-            "-c:v", "h264_nvenc", "-preset", "p4", "-profile:v", "high",
-            "-pix_fmt", "yuv420p", "-g", "15", out]
+    # format=yuv420p converts 10-bit sources to 8-bit before nvenc.
+    # Over 4096 a side: hevc_nvenc main (8-bit) tagged hvc1 for MP4.
+    enc, profile, extra = choose_encoder(w, h)
+    return (["ffmpeg", "-y", "-hide_banner", "-i", src, "-map", "0:v:0", "-an",
+             "-vf", "scale=%d:%d,format=yuv420p" % (int(w), int(h)),
+             "-c:v", enc, "-preset", "p4", "-profile:v", profile] + extra +
+            ["-pix_fmt", "yuv420p", "-g", "15", out])
 
 
 def save_proxy_row(db_path, footage_id, path, percentage):
@@ -253,13 +271,13 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None):
     src, _name = footage_source(db_path, footage_id)
     if not src or not os.path.isfile(src):
         return False, "Source file not found:\n%s" % src
-    ok, msg = nvenc_available()
-    if not ok:
-        return False, msg
     size = probe_size(src) or footage_size(db_path, footage_id)
     if size is None:
         return False, "Could not read the source width and height (ffprobe)."
     w, h = scaled_size(size[0], size[1], percentage)
+    ok, msg = nvenc_available(choose_encoder(w, h)[0], w, h)
+    if not ok:
+        return False, msg
     proxy_dir = get_proxy_path(db_path)
     try:
         os.makedirs(proxy_dir, exist_ok=True)
