@@ -122,7 +122,12 @@ def apply_clip_proxy(timeline, clip, pct):
         timeline.status_bar.showMessage(
             "Proxy not available in this project (older version)", 3000)
         return
-    timeline.status_bar.showMessage("Clip proxy: %s" % proxy_label(pct), 3000)
+    # The preview composite uses the clip's proxy: rebuild its frames
+    try:
+        timeline._mark_preview_dirty(timeline._ranges_for_clips([clip]))
+    except Exception:
+        pass
+    timeline._after_clip_change("Clip proxy: %s" % proxy_label(pct))
 
 
 def probe_video_info(path):

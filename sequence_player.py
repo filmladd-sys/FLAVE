@@ -159,7 +159,61 @@ class PreviewReader(object):
                         self.ring.pop(frame, None)
 
 
-def timeline_snapshot(tl):
+_ORIG_SIZE_CACHE = {}   # original path -> (w, h) probed once
+
+
+def _original_size(path, w, h):
+    # Original footage box: footage.width/height, else ffprobe once (cached)
+    if w and h:
+        return int(w), int(h)
+    if path in _ORIG_SIZE_CACHE:
+        return _ORIG_SIZE_CACHE[path]
+    size = None
+    try:
+        from clip_proxy import probe_video_info
+        info = probe_video_info(path)
+        if info and info[0] and info[1]:
+            size = (int(info[0]), int(info[1]))
+    except Exception:
+        size = None
+    _ORIG_SIZE_CACHE[path] = size
+    return size
+
+
+def resolve_proxies(project_db, track_ids, use_proxies=True):
+    # {clip_id: (proxy_path, (orig_w, orig_h))} for clips whose proxy_percent
+    # has a Proxies row with an existing file. Anything else (0, no row, no
+    # file, old DB, unknown original size, use_proxies False) is absent and
+    # the clip decodes its original.
+    if not use_proxies or not project_db or not track_ids:
+        return {}
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            marks = ",".join("?" for _ in track_ids)
+            rows = conn.execute(
+                "SELECT c.id, p.path, f.original_path, f.width, f.height "
+                "FROM clips c JOIN footage f ON f.id = c.footage_id "
+                "JOIN Proxies p ON p.footage_id = c.footage_id "
+                "AND p.percentage = c.proxy_percent "
+                "WHERE COALESCE(c.proxy_percent, 0) > 0 AND c.track_id IN (%s) "
+                "ORDER BY p.id" % marks, [int(t) for t in track_ids]).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    out = {}
+    for clip_id, ppath, opath, w, h in rows:
+        if clip_id in out or not ppath or not os.path.isfile(ppath):
+            continue
+        size = _original_size(opath, w, h)
+        if size is None:
+            continue
+        out[int(clip_id)] = (ppath, size)
+    return out
+
+
+def timeline_snapshot(tl, use_proxies=True):
     # GUI thread only: copy of the track rows and clips the composite reads,
     # so the preview worker never touches Qt widgets. Also copies linked
     # scale / position X keyframe clips once per snapshot. track_order maps
@@ -186,7 +240,15 @@ def timeline_snapshot(tl):
     pos_x_clips = collect_position_x_clips(tl.clips_by_track, track_order)
     from keyframe import collect_position_y_clips
     pos_y_clips = collect_position_y_clips(tl.clips_by_track, track_order)
-    return rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips
+    # Proxy files resolved once per snapshot (use_proxies False = originals,
+    # for a future final render)
+    try:
+        project_db = tl._project_db()
+    except Exception:
+        project_db = None
+    proxies = resolve_proxies(project_db, [r[0] for r in rows], use_proxies)
+    return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
+            proxies)
 
 
 # ---------------------------------------------------------------- window
@@ -507,6 +569,7 @@ class SequencePlayer(QWindow):
         pos_x_clips = snapshot[3] if len(snapshot) >= 4 else []
         track_order = snapshot[4] if len(snapshot) >= 5 else {}
         pos_y_clips = snapshot[5] if len(snapshot) >= 6 else []
+        proxies = snapshot[6] if len(snapshot) >= 7 else {}
         from keyframe import scale_percent_for_link, position_x_offset
         from keyframe import position_y_offset
         any_solo = any(solo for _tid, _en, solo, _k in rows)
@@ -520,6 +583,10 @@ class SequencePlayer(QWindow):
                 if not clip[5] or not (start <= frame < start + length):
                     continue
                 path = self._footage_path(clip[1])
+                orig_size = None
+                if path and clip[0] in proxies:
+                    # Proxy: same frame count / timing, so same source frame
+                    path, orig_size = proxies[clip[0]]
                 if path:
                     src = (clip[7] + frame - start) if kind == "video" else 0
                     link_id = clip[8] if len(clip) > 8 else None
@@ -531,7 +598,7 @@ class SequencePlayer(QWindow):
                     pos_dy = position_y_offset(
                         pos_y_clips, link_id, frame, clip_order, self.seq_h)
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
-                                   pos_dy, (clip[0], path)))
+                                   pos_dy, (clip[0], path), orig_size))
                 break
         return layers
 
@@ -563,10 +630,13 @@ class SequencePlayer(QWindow):
         if not self.decoders:
             return
         live = set()
+        proxies = snapshot[6] if len(snapshot) >= 7 else {}
         try:
             for clips in snapshot[1].values():
                 for clip in clips:
                     path = self._footage_path(clip[1])
+                    if clip[0] in proxies:
+                        path = proxies[clip[0]][0]
                     if path:
                         live.add((clip[0], path))
         except Exception:
@@ -621,7 +691,7 @@ class SequencePlayer(QWindow):
 
 
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
-               pos_dx=None, pos_dy=None):
+               pos_dx=None, pos_dy=None, orig_size=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -634,7 +704,16 @@ class SequencePlayer(QWindow):
                 factor = 1.0
         if factor <= 0.0:
             return
-        inv_scale = ctypes.c_float(1.0 / factor)
+        # Proxy: the stage box is the ORIGINAL size times the keyframe scale,
+        # so the decoded proxy is scaled by orig/proxy per axis. Centering /
+        # crop below uses the proxy frame size, which with these factors
+        # frames exactly like the original.
+        fx_, fy_ = factor, factor
+        if orig_size is not None and sw > 0 and sh > 0:
+            fx_ = factor * float(orig_size[0]) / float(sw)
+            fy_ = factor * float(orig_size[1]) / float(sh)
+        inv_scale = ctypes.c_float(1.0 / fx_)
+        inv_scale_y = ctypes.c_float(1.0 / fy_)
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -653,7 +732,7 @@ class SequencePlayer(QWindow):
         cx = (sw - self.seq_w) // 2 if sw > self.seq_w else 0
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
         vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
-                 ctypes.c_int32(pdx), ctypes.c_int32(pdy)]
+                 ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -1017,11 +1096,13 @@ class SequencePlayer(QWindow):
             scale = layer[3] if len(layer) > 3 else None
             pos_dx = layer[4] if len(layer) > 4 else None
             pos_dy = layer[5] if len(layer) > 5 else None
+            orig_size = layer[7] if len(layer) > 7 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
-                                scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
+                                scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
+                                orig_size=orig_size)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -1031,7 +1112,8 @@ class SequencePlayer(QWindow):
                 sh, sw = shape[0], shape[1]
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
-                            scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
+                            scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
+                            orig_size=orig_size)
                 continue
             dec = self._decoder(dkey, frame)
             # Seek only when the asked frame is not the next one THIS clip's
@@ -1053,7 +1135,8 @@ class SequencePlayer(QWindow):
             stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
             # The kernel reads the decoder frame directly
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
-                        scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
+                        scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
+                        orig_size=orig_size)
         self._sync()
         self._target = None
         if target is self.dst:

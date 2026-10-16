@@ -466,6 +466,10 @@ GL_QUADS = 0x0007
 # With inv_scale=1 and pos_dx=pos_dy=0: source = dest + (ox, oy).
 # inv_scale=1/scale scales about the dest center; pos_dx/pos_dy are free
 # placement shifts (nearest). 3 bpp opaque; 4 uses source alpha.
+# inv_scale is x; inv_scale_y is y (they differ slightly for a proxy whose
+# even-rounded size is not an exact fraction of the original).
+# Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
+# inv_scale 1, and a scaled proxy frames to the same pixels as the original.
 PTX = b"""
 .version 7.0
 .target sm_75
@@ -474,13 +478,14 @@ PTX = b"""
     .param .u64 src, .param .u64 dst,
     .param .u32 sw, .param .u32 sh, .param .u32 sstride, .param .u32 bpp,
     .param .u32 dw, .param .u32 dh, .param .s32 ox, .param .s32 oy,
-    .param .f32 inv_scale, .param .s32 pos_dx, .param .s32 pos_dy)
+    .param .f32 inv_scale, .param .s32 pos_dx, .param .s32 pos_dy,
+    .param .f32 inv_scale_y)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
     .reg .u32 usx, usy, off32, r, g, b, a, dr, dg, db, inv, c255;
     .reg .s32 oxv, oyv, sx, sy, pdx, pdy;
-    .reg .f32 invs, fx, fy, fcx, fcy, fox, foy, fdx, fdy;
+    .reg .f32 invs, invsy, fx, fy, fcx, fcy, fox, foy, fdx, fdy;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -501,10 +506,13 @@ PTX = b"""
     ld.param.s32 oxv, [ox];
     ld.param.s32 oyv, [oy];
     ld.param.f32 invs, [inv_scale];
+    ld.param.f32 invsy, [inv_scale_y];
     ld.param.s32 pdx, [pos_dx];
     ld.param.s32 pdy, [pos_dy];
     cvt.rn.f32.u32 fx, x;
     cvt.rn.f32.u32 fy, y;
+    add.f32 fx, fx, 0f3F000000;
+    add.f32 fy, fy, 0f3F000000;
     cvt.rn.f32.u32 fcx, dwv;
     cvt.rn.f32.u32 fcy, dhv;
     mul.f32 fcx, fcx, 0f3F000000;
@@ -517,12 +525,14 @@ PTX = b"""
     add.f32 fx, fx, fcx;
     sub.f32 fy, fy, fcy;
     sub.f32 fy, fy, fdy;
-    mul.f32 fy, fy, invs;
+    mul.f32 fy, fy, invsy;
     add.f32 fy, fy, fcy;
     cvt.rn.f32.s32 fox, oxv;
     cvt.rn.f32.s32 foy, oyv;
     add.f32 fx, fx, fox;
     add.f32 fy, fy, foy;
+    sub.f32 fx, fx, 0f3F000000;
+    sub.f32 fy, fy, 0f3F000000;
     cvt.rni.s32.f32 sx, fx;
     cvt.rni.s32.f32 sy, fy;
     setp.lt.s32 p, sx, 0;
