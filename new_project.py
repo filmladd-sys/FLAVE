@@ -209,6 +209,22 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
+        # Proxies of footage (path to the proxy file, size percentage)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Proxies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                footage_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                percentage INTEGER NOT NULL
+            )
+        """)
+
+        # ProxyPath: folder for proxy files, default the project folder
+        cur.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            ("ProxyPath", os.path.dirname(os.path.abspath(db_path)))
+        )
+
         conn.commit()
         conn.close()
 

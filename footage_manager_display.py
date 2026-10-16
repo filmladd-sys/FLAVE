@@ -46,6 +46,10 @@ def _icon_limits():
     return max(16, w), max(16, h)
 
 
+_AUDIO_EXTS = (".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg")
+_AUDIO_TYPES = ("audio", "mp3", "wav", "aac", "flac", "m4a", "ogg")
+
+
 def get_display_rows(project_db, id_list):
     if not project_db or not id_list:
         return []
@@ -62,6 +66,12 @@ def get_display_rows(project_db, id_list):
         WHERE id IN ({placeholders})
     """, id_list)
 
+    try:
+        from proxy_manager import proxy_counts
+        counts = proxy_counts(project_db)
+    except Exception:
+        counts = {}
+
     rows = []
     for row in cur.fetchall():
         fid, filename, path, file_type, size_bytes, duration = row
@@ -72,9 +82,21 @@ def get_display_rows(project_db, id_list):
 
         icon_widget = _make_icon_widget(project_db, fid, path, ftype, max_w, max_h)
 
+        # #Proxies: count for video / image footage (clickable), empty for audio
+        proxy_item = QTableWidgetItem("")
+        ext = os.path.splitext(path or filename or "")[1].lower()
+        if ext not in _AUDIO_EXTS and ftype not in _AUDIO_TYPES:
+            proxy_item.setText(str(counts.get(int(fid), 0)))
+            proxy_item.setData(Qt.UserRole + 1, int(fid))
+            font = proxy_item.font()
+            font.setUnderline(True)
+            proxy_item.setFont(font)
+            proxy_item.setForeground(QColor(80, 150, 255))
+            proxy_item.setToolTip("Open Proxies for this footage")
         items = [
             QTableWidgetItem(""),
             QTableWidgetItem(name),
+            proxy_item,
             QTableWidgetItem(ftype),
             QTableWidgetItem(size_str),
             QTableWidgetItem(length_str),

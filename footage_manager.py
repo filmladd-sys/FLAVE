@@ -156,8 +156,11 @@ class FootageManager(QMainWindow):
         self.selected_footage = None
 
         self.table = FootageTable(self)
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Icon", "Name", "Type", "Size", "Length"])
+        # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Type, 4 Size, 5 Length
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(
+            ["Icon", "Name", "#Proxies", "Type", "Size", "Length"])
+        self.table.cellClicked.connect(self._cell_clicked)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -292,6 +295,22 @@ class FootageManager(QMainWindow):
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
+
+    def _cell_clicked(self, row, col):
+        # #Proxies cell (video / image only): open that footage's Proxies
+        if col != 2:
+            return
+        item = self.table.item(row, 2)
+        footage_id = item.data(Qt.UserRole + 1) if item is not None else None
+        if footage_id is None:
+            return
+        name_item = self.table.item(row, 1)
+        name = name_item.text() if name_item is not None else ""
+        try:
+            from proxy_manager import open_proxy_manager
+            open_proxy_manager(self, self.project_db, footage_id, name)
+        except Exception as e:
+            QMessageBox.warning(self, "Proxies", f"Could not open Proxies: {e}")
 
     def _row_context_menu(self, pos):
         item = self.table.itemAt(pos)
