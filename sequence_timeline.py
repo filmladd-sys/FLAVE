@@ -1837,21 +1837,11 @@ class SequenceTimeline(QMainWindow):
         row.setStretch(row.count() - 1, right)
 
     def _edit_points(self):
-        # Clip starts and ends on every track (video, audio, image, caption).
-        # Disabled tracks skipped; if any track is solo, only solo tracks.
-        rows = []
-        for r in range(self.table.rowCount()):
-            item = self.table.item(r, 0)
-            if item is None:
-                continue
-            rows.append((item.data(Qt.UserRole), bool(item.data(Qt.UserRole + 1)),
-                         bool(item.data(Qt.UserRole + 2))))
-        any_solo = any(solo for _tid, _en, solo in rows)
+        # Every clip in-point and out-point in the sequence (all tracks and
+        # clip types, enabled or not)
         points = set()
-        for track_id, enabled, solo in rows:
-            if not enabled or (any_solo and not solo):
-                continue
-            for clip in self.clips_by_track.get(track_id, []):
+        for clips in self.clips_by_track.values():
+            for clip in clips:
                 points.add(int(clip[2]))
                 points.add(int(clip[2]) + int(clip[3]))
         return sorted(points)
@@ -1866,14 +1856,18 @@ class SequenceTimeline(QMainWindow):
         self.set_current_frame(frame)
 
     def go_prev_edit(self):
-        before = [p for p in self._edit_points() if p < self.current_frame]
-        if before:
-            self._jump_to_frame(before[-1])
+        # |<: previous edit point; at 0 or none before, wrap to the end
+        from edit_points import end_target, prev_edit_target
+        points = self._edit_points()
+        end = end_target(points, self.total_frames())
+        self._jump_to_frame(prev_edit_target(points, self.current_frame, end))
 
     def go_next_edit(self):
-        after = [p for p in self._edit_points() if p > self.current_frame]
-        if after:
-            self._jump_to_frame(after[0])
+        # >|: next edit point; at/after the end or none after, wrap to 0
+        from edit_points import end_target, next_edit_target
+        points = self._edit_points()
+        end = end_target(points, self.total_frames())
+        self._jump_to_frame(next_edit_target(points, self.current_frame, end))
 
     def _on_play_control(self, name):
         # Home and End use the Home/End key path (playhead, view, scrub hook).

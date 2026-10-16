@@ -116,10 +116,9 @@ def end_anchor(tl):
 
 def paste(tl, anchor, make_room):
     # Paste this sequence's clipboard with its earliest in-point at anchor.
-    # make_room (Paste To Tic): an existing clip that starts before a pasted
-    # item and overlaps it is trimmed to end at the item's start. An
-    # existing clip that starts inside a pasted item's range is a conflict:
-    # nothing is pasted or trimmed and the user is told.
+    # Overwrite: existing clips under a pasted item are trimmed, moved in or
+    # deleted (see the plan below). make_room is kept for callers; Paste To
+    # Tic and Paste to End both overwrite.
     from PySide6.QtWidgets import QMessageBox
     from keyframe import mem_id_from_db
     items = _CLIPBOARDS.get(_key(tl)) if tl.sequence_id is not None else None
@@ -140,32 +139,32 @@ def paste(tl, anchor, make_room):
         tl.status_bar.showMessage(
             f"Paste: {skipped} item(s) skipped, their tracks no longer exist", 5000)
         return
-    # Room and conflicts against the current clips on each target track
-    trims = {}      # mem id -> (start, new_length, old_length, track_id)
-    conflict = None
-    for it in ok:
+    # Overwrite plan against the current clips on each target track (all
+    # types). Items in paste order per track; each existing clip's state is
+    # updated as it goes. Left overlap or spanning: out-point trimmed to the
+    # paste in. Right overlap: in-point moved to the paste out (start and
+    # source in_frame advance, length shrinks; keyframe keys stay put).
+    # Fully inside: deleted.
+    state = {}      # mem id -> dict(cs, ce, shift, orig_cs, orig_ce, deleted)
+    for it in sorted(ok, key=lambda x: x["offset"]):
         s = anchor + it["offset"]
         e = s + it["length"]
         for c in tl.clips_by_track.get(it["track_id"], []):
-            cs, ce = int(c[2]), int(c[2]) + int(c[3])
-            if s <= cs < e:
-                conflict = (it["track_id"], cs)
-                break
-            if cs < s < ce:
-                if not make_room:
-                    conflict = (it["track_id"], cs)
-                    break
-                old = trims.get(c[0])
-                new_len = s - cs if old is None else min(old[1], s - cs)
-                trims[c[0]] = (cs, new_len, ce - cs, it["track_id"])
-        if conflict:
-            break
-    if conflict:
-        QMessageBox.warning(
-            tl, "Paste",
-            f"Nothing pasted: a clip at frame {conflict[1]} on track "
-            f"{conflict[0]} starts inside the pasted range.")
-        return
+            st = state.get(c[0])
+            if st is None:
+                cs0, ce0 = int(c[2]), int(c[2]) + int(c[3])
+                st = {"cs": cs0, "ce": ce0, "shift": 0, "orig_cs": cs0,
+                      "orig_ce": ce0, "deleted": False}
+            if st["deleted"] or st["ce"] <= s or st["cs"] >= e:
+                continue
+            if st["cs"] < s:
+                st["ce"] = s
+            elif st["ce"] > e:
+                st["shift"] += e - st["cs"]
+                st["cs"] = e
+            else:
+                st["deleted"] = True
+            state[c[0]] = st
     from undo import push_undo
     push_undo(project, "Paste clips")
     ranges = []
@@ -174,15 +173,31 @@ def paste(tl, anchor, make_room):
         from sequence_timeline_captions import clip_table_and_id
         conn = sqlite3.connect(project)
         cur = conn.cursor()
-        for mem_id, (cs, new_len, old_len, _tid) in trims.items():
+        trimmed = deleted = 0
+        for mem_id, st in state.items():
             table, row_id = clip_table_and_id(mem_id)
+            ranges.append((st["orig_cs"], st["orig_ce"] - 1))
+            if st["deleted"]:
+                # Same row delete as the Delete path (no second undo)
+                cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+                deleted += 1
+                continue
+            trimmed += 1
+            new_len = max(1, st["ce"] - st["cs"])
             if table == "keyframe_clips":
-                cur.execute("UPDATE keyframe_clips SET out_frame = ? WHERE id = ?",
-                            (cs + new_len, row_id))
+                # Keys are absolute frames: they do not move
+                cur.execute(
+                    "UPDATE keyframe_clips SET in_frame = ?, out_frame = ? WHERE id = ?",
+                    (st["cs"], st["cs"] + new_len, row_id))
+            elif table == "clips":
+                cur.execute(
+                    "UPDATE clips SET start_frame = ?, length_frames = ?, "
+                    "in_frame = in_frame + ? WHERE id = ?",
+                    (st["cs"], new_len, st["shift"], row_id))
             else:
-                cur.execute(f"UPDATE {table} SET length_frames = ? WHERE id = ?",
-                            (new_len, row_id))
-            ranges.append((cs + new_len, cs + old_len - 1))
+                cur.execute(
+                    f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
+                    (st["cs"], new_len, row_id))
         cols_by_table = {}
         groups = {}     # original link_id -> [(table, new row id, mem id)]
         for it in ok:
@@ -249,8 +264,10 @@ def paste(tl, anchor, make_room):
         return
     tl._mark_preview_dirty(ranges)
     msg = f"Pasted {len(ok)} item(s) at frame {anchor}"
-    if trims:
-        msg += f", trimmed {len(trims)}"
+    if trimmed:
+        msg += f", trimmed {trimmed}"
+    if deleted:
+        msg += f", replaced {deleted}"
     if skipped:
         msg += f", skipped {skipped} (track no longer exists)"
     tl._after_clip_change(msg)
