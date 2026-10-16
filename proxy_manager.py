@@ -6,6 +6,7 @@
 
 import os
 import sqlite3
+import time
 
 PROXY_PATH_KEY = "ProxyPath"
 
@@ -128,6 +129,171 @@ def add_proxy_row(db_path, footage_id, percentage):
         conn.close()
 
 
+# ---- video proxies (FFmpeg h264_nvenc, BUILD 84)
+
+_VIDEO_EXTS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
+
+
+def is_video_path(path):
+    return os.path.splitext(path or "")[1].lower() in _VIDEO_EXTS
+
+
+def video_proxy_path(proxy_dir, source_path, percentage):
+    # <ProxyPath>/<source basename>.<pct>.mp4, e.g. VidTest.mov.50.mp4
+    return os.path.join(proxy_dir, os.path.basename(source_path) + "." +
+                        str(int(percentage)) + ".mp4")
+
+
+def scaled_size(width, height, percentage):
+    # Percent of each side, rounded to even, minimum 2
+    def side(v):
+        s = int(round(float(v) * int(percentage) / 100.0 / 2.0)) * 2
+        return max(2, s)
+    return side(width), side(height)
+
+
+def _no_window_flags():
+    import sys
+    return 0x08000000 if sys.platform.startswith("win") else 0   # CREATE_NO_WINDOW
+
+
+def _run(cmd):
+    # (returncode, stdout text, stderr text); raises OSError if not found
+    import subprocess
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          creationflags=_no_window_flags())
+    return (proc.returncode, proc.stdout.decode("ascii", "replace"),
+            proc.stderr.decode("ascii", "replace"))
+
+
+def nvenc_available():
+    # (ok, message). ffmpeg on PATH and h264_nvenc listed in -encoders
+    try:
+        code, out, err = _run(["ffmpeg", "-hide_banner", "-encoders"])
+    except OSError:
+        return False, "ffmpeg was not found on PATH."
+    if "h264_nvenc" not in out + err:
+        return False, "ffmpeg on PATH has no h264_nvenc encoder (NVIDIA NVENC)."
+    return True, ""
+
+
+def probe_size(src):
+    # (width, height) of the first video stream via ffprobe, or None
+    try:
+        code, out, _err = _run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", src])
+    except OSError:
+        return None
+    if code != 0:
+        return None
+    try:
+        w, h = out.strip().splitlines()[0].split("x")[:2]
+        return int(w), int(h)
+    except Exception:
+        return None
+
+
+def footage_size(db_path, footage_id):
+    # Stored footage width / height, or None
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT width, height FROM footage WHERE id = ?",
+                               (int(footage_id),)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if row and row[0] and row[1]:
+        return int(row[0]), int(row[1])
+    return None
+
+
+def build_proxy_cmd(src, out, w, h):
+    # format=yuv420p converts 10-bit sources to 8-bit before nvenc
+    return ["ffmpeg", "-y", "-hide_banner", "-i", src, "-map", "0:v:0", "-an",
+            "-vf", "scale=%d:%d,format=yuv420p" % (int(w), int(h)),
+            "-c:v", "h264_nvenc", "-preset", "p4", "-profile:v", "high",
+            "-pix_fmt", "yuv420p", "-g", "15", out]
+
+
+def save_proxy_row(db_path, footage_id, path, percentage):
+    # Update the path of an existing row for footage + pct, else insert
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id FROM Proxies WHERE footage_id = ? AND percentage = ? "
+            "ORDER BY id LIMIT 1", (int(footage_id), int(percentage))).fetchone()
+        if row:
+            conn.execute("UPDATE Proxies SET path = ? WHERE id = ?", (path, row[0]))
+            rid = row[0]
+        else:
+            rid = conn.execute(
+                "INSERT INTO Proxies (footage_id, path, percentage) VALUES (?, ?, ?)",
+                (int(footage_id), path, int(percentage))).lastrowid
+        conn.commit()
+        return rid
+    finally:
+        conn.close()
+
+
+def _remove_partial(path):
+    try:
+        if path and os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def generate_video_proxy(db_path, footage_id, percentage, wait=None):
+    # Run ffmpeg; on success save the Proxies row. Returns (ok, message).
+    # wait(proc) is called while ffmpeg runs (GUI keeps processing events).
+    import subprocess
+    src, _name = footage_source(db_path, footage_id)
+    if not src or not os.path.isfile(src):
+        return False, "Source file not found:\n%s" % src
+    ok, msg = nvenc_available()
+    if not ok:
+        return False, msg
+    size = probe_size(src) or footage_size(db_path, footage_id)
+    if size is None:
+        return False, "Could not read the source width and height (ffprobe)."
+    w, h = scaled_size(size[0], size[1], percentage)
+    proxy_dir = get_proxy_path(db_path)
+    try:
+        os.makedirs(proxy_dir, exist_ok=True)
+    except Exception as e:
+        return False, "Could not create ProxyPath %s: %s" % (proxy_dir, e)
+    out = video_proxy_path(proxy_dir, src, percentage)
+    cmd = build_proxy_cmd(src, out, w, h)
+    # print("PROXY cmd: %s" % " ".join(cmd))
+    import tempfile
+    err_file = tempfile.TemporaryFile()
+    try:
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_file,
+                                    creationflags=_no_window_flags())
+        except OSError as e:
+            return False, "Could not start ffmpeg: %s" % e
+        if wait is not None:
+            wait(proc)
+        code = proc.wait()
+        err_file.seek(0)
+        err = err_file.read().decode("ascii", "replace")
+    finally:
+        err_file.close()
+    if code != 0 or not os.path.isfile(out) or os.path.getsize(out) <= 0:
+        _remove_partial(out)
+        tail = "\n".join(err.strip().splitlines()[-15:])
+        return False, "ffmpeg failed (exit %s):\n%s" % (code, tail)
+    try:
+        save_proxy_row(db_path, footage_id, out, percentage)
+    except Exception as e:
+        return False, "Proxy file written but the row could not be saved: %s" % e
+    return True, out
+
+
 _open_windows = []   # keeps windows alive (no garbage collection)
 
 
@@ -193,17 +359,44 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                     "created with an older version. Create a new project to use "
                     "proxies.")
                 return
-            try:
-                add_proxy_row(db_path, footage_id, int(pct))
-            except Exception as e:
-                QMessageBox.warning(self, "Proxy Manager", "Could not add proxy: %s" % e)
-                return
+            src_path, _n = footage_source(db_path, footage_id)
+            if is_video_path(src_path):
+                self._generate_video(int(pct))
+            else:
+                # Images: BUILD 82 placeholder row only (no file written)
+                try:
+                    add_proxy_row(db_path, footage_id, int(pct))
+                except Exception as e:
+                    QMessageBox.warning(self, "Proxy Manager",
+                                        "Could not add proxy: %s" % e)
+                    return
             self._reload()
             if on_change is not None:
                 try:
                     on_change()
                 except Exception:
                     pass
+
+        def _generate_video(self, pct):
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import Qt
+
+            def wait(proc):
+                while proc.poll() is None:
+                    QApplication.processEvents()
+                    time.sleep(0.05)
+
+            self.gen_btn.setEnabled(False)
+            self.combo.setEnabled(False)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                ok, msg = generate_video_proxy(db_path, footage_id, pct, wait)
+            finally:
+                QApplication.restoreOverrideCursor()
+                self.combo.setEnabled(True)
+                self._update_button()
+            if not ok:
+                QMessageBox.warning(self, "Proxy Manager", msg)
 
         def closeEvent(self, event):
             try:
