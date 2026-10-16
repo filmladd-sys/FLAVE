@@ -610,6 +610,9 @@ def delete_selected_clip(self):
         for cid in ids:
             table, row_id = clip_table_and_id(cid)
             cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        # Their markers go too (same undo snapshot)
+        from markers import delete_markers
+        delete_markers(cur, ids)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -674,6 +677,10 @@ def slice_clip(self, clip, x_in_clips):
                     "pos_x, pos_y, scale FROM captions WHERE id = ?",
                     (split_frame, right_length, cap_id)
                 )
+                # Caption markers are offsets from the caption start
+                from markers import move_markers
+                move_markers(cur, c[0], -cur.lastrowid, left_length, c_len,
+                             -left_length)
                 continue
             cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
                         (left_length, c[0]))
@@ -684,6 +691,9 @@ def slice_clip(self, clip, x_in_clips):
                  1 if c[5] else 0, 1 if c[6] else 0)
             )
             right_ids.append(cur.lastrowid)
+            # Markers on the right piece's source frames move to it
+            from markers import move_markers
+            move_markers(cur, c[0], right_ids[-1], right_in, right_in + right_length)
             # Right piece keeps the clip gain (gain_db; older tables lack it)
             if has_gain is None:
                 cur.execute("PRAGMA table_info(clips)")

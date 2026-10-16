@@ -78,9 +78,11 @@ def copy_selection(tl):
                     keys.append(kd)
             link_id = row.get("link_id")
             row.pop("id", None)
+            from markers import marker_rows
+            marks = [] if table == "keyframe_clips" else marker_rows(cur, cid)
             items.append({"table": table, "row": row, "track_id": row.get("track_id"),
                           "start": start, "length": length, "link_id": link_id,
-                          "keys": keys})
+                          "keys": keys, "markers": marks})
     finally:
         conn.close()
     if not items:
@@ -180,6 +182,8 @@ def paste(tl, anchor, make_room):
             if st["deleted"]:
                 # Same row delete as the Delete path (no second undo)
                 cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+                from markers import delete_markers
+                delete_markers(cur, [mem_id])
                 deleted += 1
                 continue
             trimmed += 1
@@ -238,6 +242,9 @@ def paste(tl, anchor, make_room):
                 mem = -new_id
             else:
                 mem = new_id
+            if it.get("markers"):
+                from markers import insert_marker_rows
+                insert_marker_rows(cur, mem, it["markers"])
             if it["link_id"] is not None:
                 groups.setdefault(it["link_id"], []).append((table, new_id, mem))
             ranges.append((s, s + it["length"] - 1))
