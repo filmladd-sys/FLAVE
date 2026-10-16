@@ -92,7 +92,10 @@ class ClipDelegate(QStyledItemDelegate):
             painter.setOpacity(1.0 if clip_enabled else 0.4)
             if track_type == "keyframe":
                 from keyframe import paint_keyframe_clip
-                paint_keyframe_clip(painter, clip_rect, filename or "")
+                keys = clip[9] if len(clip) > 9 else []
+                paint_keyframe_clip(
+                    painter, clip_rect, filename or "", keys=keys,
+                    clip_start=start_frame, ppf=ppf)
                 if clip_id in tl._selected_clip_ids:
                     painter.setPen(QColor(255, 255, 160))
                 else:
@@ -983,10 +986,14 @@ class SequenceTimeline(QMainWindow):
             members = [clip] + self._linked_clips(clip)
         ids = {c[0] for c in members}
         group = []
+        from keyframe import is_keyframe_clip_id
         for c in members:
             prev_end, next_start = self._neighbor_bounds(c, c[2], c[3], ignore_ids=ids)
-            group.append({"clip": c, "start": c[2], "length": c[3], "in": c[7],
-                          "prev_end": prev_end, "next_start": next_start})
+            entry = {"clip": c, "start": c[2], "length": c[3], "in": c[7],
+                     "prev_end": prev_end, "next_start": next_start}
+            if is_keyframe_clip_id(c[0]) and len(c) > 9:
+                entry["keys"] = list(c[9])
+            group.append(entry)
         return group
 
     def _edge_drag_move(self, pos):
@@ -1024,10 +1031,14 @@ class SequenceTimeline(QMainWindow):
             c = m["clip"]
             if edge == "move":
                 c[2] = m["start"] + delta
+                if "keys" in m:
+                    c[9] = [(f + delta, v) for f, v in m["keys"]]
             elif edge == "left":
                 c[2] = m["start"] + delta
                 c[3] = m["length"] - delta
                 c[7] = m["in"] + delta
+                if "keys" in m:
+                    c[9] = [(f + delta, v) for f, v in m["keys"]]
             else:
                 c[3] = m["length"] + delta
         self.table.viewport().update()
@@ -1245,16 +1256,20 @@ class SequenceTimeline(QMainWindow):
         # Right-click on an unselected clip selects it like a normal click
         if clip[0] not in self._selected_clip_ids:
             self._select_clip(clip, "normal")
-        from keyframe import is_keyframe_clip_id
+        from keyframe import is_keyframe_clip_id, add_key as _add_key
         if is_keyframe_clip_id(clip[0]):
             menu = QMenu(self)
+            add_key_action = menu.addAction("Add Key")
             link_action = menu.addAction("Link")
             link_action.setEnabled(len(self._selected_clips()) >= 2)
             unlink_action = menu.addAction("Unlink")
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            if action == link_action:
+            if action == add_key_action:
+                click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
+                _add_key(self, clip, click_frame)
+            elif action == link_action:
                 self.link_selected_clips()
             elif action == unlink_action:
                 self.unlink_clips(clip)
