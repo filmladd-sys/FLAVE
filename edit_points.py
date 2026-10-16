@@ -7,21 +7,22 @@ def end_target(points, total_frames):
     return max([int(total_frames) - 1] + [int(p) for p in points])
 
 
-def prev_edit_target(points, current, end):
-    # Previous edit point strictly before current; wraps to end when there
-    # is none or current is 0
-    current = int(current)
-    before = [p for p in points if p < current]
-    if current <= 0 or not before:
-        return int(end)
-    return max(before)
+def jump_targets(points, total_frames):
+    # Sorted, de-duplicated: 0, every edit point, and end_target
+    targets = {0, end_target(points, total_frames)}
+    targets.update(int(p) for p in points)
+    return sorted(targets)
 
 
-def next_edit_target(points, current, end):
-    # Next edit point strictly after current; wraps to 0 when there is none
-    # or current is at or past end
+def prev_edit_target(targets, current):
+    # Largest target strictly before current; none: the last target
     current = int(current)
-    after = [p for p in points if p > current]
-    if current >= int(end) or not after:
-        return 0
-    return min(after)
+    before = [t for t in targets if t < current]
+    return max(before) if before else max(targets)
+
+
+def next_edit_target(targets, current):
+    # Smallest target strictly after current; none: 0
+    current = int(current)
+    after = [t for t in targets if t > current]
+    return min(after) if after else 0

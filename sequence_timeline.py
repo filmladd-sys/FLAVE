@@ -1856,18 +1856,16 @@ class SequenceTimeline(QMainWindow):
         self.set_current_frame(frame)
 
     def go_prev_edit(self):
-        # |<: previous edit point; at 0 or none before, wrap to the end
-        from edit_points import end_target, prev_edit_target
-        points = self._edit_points()
-        end = end_target(points, self.total_frames())
-        self._jump_to_frame(prev_edit_target(points, self.current_frame, end))
+        # |<: previous jump target; none before, wrap to the last target
+        from edit_points import jump_targets, prev_edit_target
+        targets = jump_targets(self._edit_points(), self.total_frames())
+        self._jump_to_frame(prev_edit_target(targets, self.current_frame))
 
     def go_next_edit(self):
-        # >|: next edit point; at/after the end or none after, wrap to 0
-        from edit_points import end_target, next_edit_target
-        points = self._edit_points()
-        end = end_target(points, self.total_frames())
-        self._jump_to_frame(next_edit_target(points, self.current_frame, end))
+        # >|: next jump target; none after, wrap to 0
+        from edit_points import jump_targets, next_edit_target
+        targets = jump_targets(self._edit_points(), self.total_frames())
+        self._jump_to_frame(next_edit_target(targets, self.current_frame))
 
     def _on_play_control(self, name):
         # Home and End use the Home/End key path (playhead, view, scrub hook).
