@@ -689,6 +689,7 @@ def slice_clip(self, clip, x_in_clips):
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
         right_ids = []
+        has_gain = None
         for c in members:
             c_start, c_len, c_in = c[2], c[3], c[7]
             if not (c_start < split_frame < c_start + c_len):
@@ -721,6 +722,14 @@ def slice_clip(self, clip, x_in_clips):
                  1 if c[5] else 0, 1 if c[6] else 0)
             )
             right_ids.append(cur.lastrowid)
+            # Right piece keeps the clip gain (gain_db; older tables lack it)
+            if has_gain is None:
+                cur.execute("PRAGMA table_info(clips)")
+                has_gain = "gain_db" in [r[1] for r in cur.fetchall()]
+            if has_gain:
+                cur.execute(
+                    "UPDATE clips SET gain_db = (SELECT gain_db FROM clips WHERE id = ?) "
+                    "WHERE id = ?", (c[0], right_ids[-1]))
         if linked and right_ids:
             # New link_id for the right pieces: the first right clip's id
             new_link = right_ids[0]

@@ -46,8 +46,10 @@ def _basename_for_row(original_path, filename):
 
 
 def _load_mix_rows(project_db, sequence_id):
-    # Rows that can contribute audio: enabled clips on audio or video tracks.
-    # Solo: if any of those tracks is solo, only solo tracks.
+    # Rows that contribute audio: enabled clips on AUDIO tracks only (what
+    # is visible as audio on the timeline). Video-track rows add nothing;
+    # a video's sound is its linked audio-track clip.
+    # Solo: if any audio track is solo, only solo audio tracks.
     conn = sqlite3.connect(project_db)
     try:
         cur = conn.cursor()
@@ -66,7 +68,7 @@ def _load_mix_rows(project_db, sequence_id):
             "JOIN tracks t ON t.id = c.track_id "
             "LEFT JOIN footage f ON f.id = c.footage_id "
             "WHERE t.sequence_id = ? "
-            "AND LOWER(COALESCE(t.track_type, '')) IN ('audio', 'video') "
+            "AND LOWER(COALESCE(t.track_type, '')) = 'audio' "
             "ORDER BY t.sort_order, t.id, c.start_frame, c.id",
             (int(sequence_id),)
         )
@@ -210,7 +212,8 @@ def volume_gain(vol_clips, link_id, clip_order, dst0, count, fps):
 def audio_timeline_signature(project_db, sequence_id, fps, total_frames):
     # Stable text signature of the mix inputs; hashed for the .sig file.
     rows = _load_mix_rows(project_db, sequence_id)
-    parts = ["fps=%s" % repr(float(fps)), "frames=%d" % int(total_frames)]
+    parts = ["fps=%s" % repr(float(fps)), "frames=%d" % int(total_frames),
+             "mix=audio-tracks-only"]
     order = _track_order(project_db, sequence_id)
     for r in rows:
         parts.append("link=%s order=%s gain=%r" % (

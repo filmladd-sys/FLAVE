@@ -1587,10 +1587,10 @@ class SequenceTimeline(QMainWindow):
             return
         enabled = bool(clip[5])
         menu = QMenu(self)
-        # Gain... on clips of audio and video tracks (a video clip's row is
-        # also mixed as audio); right-clicked clip only, like Enable / Solo
+        # Gain... on audio-track clips only (the only rows the preview audio
+        # mixes); right-clicked clip only, like Enable / Solo
         gain_action = None
-        if self._track_type(self._clip_track_id(clip)) in ("audio", "video"):
+        if self._track_type(self._clip_track_id(clip)) == "audio":
             gain_action = menu.addAction("Gain...")
             menu.addSeparator()
         slice_action = menu.addAction("Slice")
