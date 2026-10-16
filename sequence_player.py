@@ -18,6 +18,11 @@ import os
 import sqlite3
 import threading
 
+# Per-clip decoders: close one unused this many frames from the playhead,
+# and keep at most DEC_MAX open (each may hold an NVDEC session).
+DEC_IDLE_FRAMES = 300
+DEC_MAX = 8
+
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QImage, QWindow, QOpenGLContext
 
@@ -223,8 +228,11 @@ class SequencePlayer(QWindow):
         self.gen_bufs = []               # GPU pass composite buffers (worker)
         self._frame_tms = []             # per-frame timing for the last batch
         self._glb = None                 # GL 1.5 buffer functions (wglGetProcAddress)
-        self.decoders = {}               # path -> SimpleDecoder
-        self.dec_next = {}               # path -> next index the decoder yields
+        # One SimpleDecoder per clip: key (clip_id, path). Two clips of the
+        # same file each decode forward on their own (no ping-pong seeks).
+        self.decoders = {}               # (clip_id, path) -> SimpleDecoder
+        self.dec_next = {}               # (clip_id, path) -> next index it yields
+        self.dec_used = {}               # (clip_id, path) -> last sequence frame used
         self.images = {}                 # path -> (ptr, w, h, stride) or None
         self.paths = {}                  # footage_id -> original_path
         self._restoring = True
@@ -431,8 +439,7 @@ class SequencePlayer(QWindow):
             cudart, nvcuda, gl = _libs()
             self.ctx.makeCurrent(self)
             nvcuda.cuCtxSetCurrent(self.cuda_ctx)
-            self.decoders.clear()
-            self.dec_next.clear()
+            self._close_all_decoders()
             for item in self.images.values():
                 if item is not None:
                     cudart.cudaFree(item[0])
@@ -524,7 +531,7 @@ class SequencePlayer(QWindow):
                     pos_dy = position_y_offset(
                         pos_y_clips, link_id, frame, clip_order, self.seq_h)
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
-                                   pos_dy))
+                                   pos_dy, (clip[0], path)))
                 break
         return layers
 
@@ -534,8 +541,54 @@ class SequencePlayer(QWindow):
 
     # ---- sources
 
-    def _decoder(self, path):
-        dec = self.decoders.get(path)
+    def _close_decoder(self, key):
+        # Drop one per-clip decoder (caller holds _GEN_LOCK / GUI gen lock)
+        dec = self.decoders.pop(key, None)
+        self.dec_next.pop(key, None)
+        self.dec_used.pop(key, None)
+        if dec is not None:
+            # print(f"DECODER close {key}")
+            del dec
+
+    def _close_all_decoders(self):
+        for key in list(self.decoders.keys()):
+            self._close_decoder(key)
+        self.dec_next.clear()
+        self.dec_used.clear()
+
+    def _prune_decoders(self, frame, snapshot):
+        # Close decoders of clips that are gone or whose footage path changed
+        # (timeline reload), and idle ones far from the playhead. Then cap the
+        # count (NVDEC sessions) by closing the least recently used.
+        if not self.decoders:
+            return
+        live = set()
+        try:
+            for clips in snapshot[1].values():
+                for clip in clips:
+                    path = self._footage_path(clip[1])
+                    if path:
+                        live.add((clip[0], path))
+        except Exception:
+            return
+        for key in list(self.decoders.keys()):
+            used = self.dec_used.get(key)
+            far = used is not None and abs(int(frame) - int(used)) > DEC_IDLE_FRAMES
+            if key not in live or far:
+                self._close_decoder(key)
+        if len(self.decoders) > DEC_MAX:
+            order = sorted(self.decoders.keys(),
+                           key=lambda k: abs(int(frame) - int(self.dec_used.get(k, -10 ** 9))),
+                           reverse=True)
+            for key in order[:len(self.decoders) - DEC_MAX]:
+                self._close_decoder(key)
+
+    def _decoder(self, key, frame=None):
+        # Lazy: created only when a layer of that clip is decoded
+        path = key[1]
+        if frame is not None:
+            self.dec_used[key] = int(frame)
+        dec = self.decoders.get(key)
         if dec is None:
             import PyNvVideoCodec as nvc
             dec = nvc.SimpleDecoder(
@@ -545,7 +598,8 @@ class SequencePlayer(QWindow):
                 need_scanned_stream_metadata=True,
                 output_color_type=nvc.OutputColorType.RGB,
             )
-            self.decoders[path] = dec
+            self.decoders[key] = dec
+            # print(f"DECODER open {key} total={len(self.decoders)}")
         return dec
 
     def _image(self, path):
@@ -953,8 +1007,13 @@ class SequencePlayer(QWindow):
             self._dst_frame = None
         _check(cudart.cudaMemsetAsync(target, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
-        for layer in self._layer_items(frame, snapshot):
+        if snapshot is None:
+            snapshot = timeline_snapshot(self.timeline)
+        layer_list = self._layer_items(frame, snapshot)
+        self._prune_decoders(frame, snapshot)
+        for layer in layer_list:
             kind, path, src_frame = layer[0], layer[1], layer[2]
+            dkey = layer[6] if len(layer) > 6 else (None, path)
             scale = layer[3] if len(layer) > 3 else None
             pos_dx = layer[4] if len(layer) > 4 else None
             pos_dy = layer[5] if len(layer) > 5 else None
@@ -966,28 +1025,28 @@ class SequencePlayer(QWindow):
                 continue
             if not os.path.isfile(path):
                 continue
-            if prefetched is not None and (path, src_frame) in prefetched:
-                f = prefetched[(path, src_frame)]
+            if prefetched is not None and (dkey, src_frame) in prefetched:
+                f = prefetched[(dkey, src_frame)]
                 shape = [int(v) for v in f.shape]
                 sh, sw = shape[0], shape[1]
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
                             scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
                 continue
-            dec = self._decoder(path)
-            # Seek only when the asked frame is not the next one this decoder
-            # yields; a run in order continues decoding (HEVC GOP 15)
-            if self.dec_next.get(path) != src_frame:
+            dec = self._decoder(dkey, frame)
+            # Seek only when the asked frame is not the next one THIS clip's
+            # decoder yields; a run in order continues decoding (HEVC GOP 15)
+            if self.dec_next.get(dkey) != src_frame:
                 dec.seek_to_index(src_frame)
             try:
                 batch = dec.get_batch_frames(1)
             except Exception:
-                self.dec_next.pop(path, None)
+                self.dec_next.pop(dkey, None)
                 raise
             if not batch:
-                self.dec_next.pop(path, None)
+                self.dec_next.pop(dkey, None)
                 continue
-            self.dec_next[path] = src_frame + 1
+            self.dec_next[dkey] = src_frame + 1
             f = batch[0]
             shape = [int(v) for v in f.shape]
             sh, sw = shape[0], shape[1]

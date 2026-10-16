@@ -76,32 +76,38 @@ def frames_jpeg_batch(self, frames, quality, snapshot):
     return out
 
 def _prefetch(self, frames, snapshot):
-    # {(path, src_frame): decoded frame} for video sources whose source
-    # frames run consecutively across the batch
+    # {((clip_id, path), src_frame): decoded frame} per clip whose source
+    # frames run consecutively across the batch (one decoder per clip)
     reqs = {}
+    last = {}
+    if frames:
+        self._prune_decoders(frames[0], snapshot)
     for fr in frames:
-        for kind, path, src in self._layers(fr, snapshot):
+        for item in self._layer_items(fr, snapshot):
+            kind, path, src = item[0], item[1], item[2]
             if kind == "video" and os.path.isfile(path):
-                reqs.setdefault(path, []).append(src)
+                key = item[6] if len(item) > 6 else (None, path)
+                reqs.setdefault(key, []).append(src)
+                last[key] = fr
     pre = {}
-    for path, srcs in reqs.items():
+    for key, srcs in reqs.items():
         if len(srcs) < 2 or srcs != list(range(srcs[0], srcs[0] + len(srcs))):
             continue
-        dec = self._decoder(path)
-        if self.dec_next.get(path) != srcs[0]:
+        dec = self._decoder(key, last.get(key))
+        if self.dec_next.get(key) != srcs[0]:
             dec.seek_to_index(srcs[0])
         try:
             got = dec.get_batch_frames(len(srcs))
         except Exception:
-            self.dec_next.pop(path, None)
+            self.dec_next.pop(key, None)
             raise
         got = list(got or [])
         for k, f in enumerate(got):
-            pre[(path, srcs[0] + k)] = f
+            pre[(key, srcs[0] + k)] = f
         if got:
-            self.dec_next[path] = srcs[0] + len(got)
+            self.dec_next[key] = srcs[0] + len(got)
         else:
-            self.dec_next.pop(path, None)
+            self.dec_next.pop(key, None)
     return pre
 
 def _gen_buffers(self, n):
