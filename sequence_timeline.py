@@ -1940,6 +1940,9 @@ class SequenceTimeline(QMainWindow):
         refresh(self)
         from markers import load_markers
         self._markers = load_markers(self._project_db())
+        # Every clip / track change and undo-redo reload comes through here:
+        # keep the Sequence Manager counts current (no timer)
+        self._refresh_sequence_manager()
         self._update_player()
         # Edit: new snapshot, wake the preview worker
         self._retarget_preview(force=True)

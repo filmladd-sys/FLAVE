@@ -382,6 +382,8 @@ def refresh(self):
             if not enabled:
                 name_item.setForeground(dim)
                 type_item.setForeground(dim)
+            name_item.setTextAlignment(Qt.AlignCenter)
+            type_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(i, 0, name_item)
             self.table.setItem(i, 1, type_item)
             self.table.setItem(i, CLIPS_COL, clips_item)

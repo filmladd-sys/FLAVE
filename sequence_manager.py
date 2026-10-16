@@ -116,6 +116,76 @@ class SequenceTable(QTableWidget):
         self.manager.nest_sequence(target_id, source_id)
 
 
+CLIP_COUNT_TYPES = ("video", "image", "audio")
+
+
+def sequence_stats(cur):
+    # {sequence_id: {frames, video, image, audio, caption}}. frames is the
+    # sequence length (latest out-point of clips, captions and keyframe
+    # clips). Counts are clips per track type, captions per sequence.
+    out = {}
+
+    def get(sid):
+        return out.setdefault(int(sid), {"frames": 0, "video": 0, "image": 0,
+                                         "audio": 0, "caption": 0})
+    try:
+        for sid, ttype, n, end in cur.execute(
+                "SELECT t.sequence_id, LOWER(COALESCE(t.track_type, '')), COUNT(c.id), "
+                "MAX(c.start_frame + c.length_frames) FROM clips c "
+                "JOIN tracks t ON t.id = c.track_id GROUP BY t.sequence_id, 2").fetchall():
+            st = get(sid)
+            if ttype in CLIP_COUNT_TYPES:
+                st[ttype] += int(n)
+            st["frames"] = max(st["frames"], int(end or 0))
+    except sqlite3.OperationalError:
+        pass
+    try:
+        for sid, n, end in cur.execute(
+                "SELECT sequence_id, COUNT(*), MAX(start_frame + length_frames) "
+                "FROM captions GROUP BY sequence_id").fetchall():
+            st = get(sid)
+            st["caption"] = int(n)
+            st["frames"] = max(st["frames"], int(end or 0))
+    except sqlite3.OperationalError:
+        pass
+    try:
+        for sid, end in cur.execute(
+                "SELECT sequence_id, MAX(out_frame) FROM keyframe_clips "
+                "GROUP BY sequence_id").fetchall():
+            st = get(sid)
+            st["frames"] = max(st["frames"], int(end or 0))
+    except sqlite3.OperationalError:
+        pass
+    return out
+
+
+def format_duration(frames, fps):
+    # HH:MM:SS:FF at the sequence fps (rounded to whole frames per second)
+    try:
+        rate = max(1, int(round(float(fps or 0)))) if fps else 30
+    except (TypeError, ValueError):
+        rate = 30
+    frames = max(0, int(frames or 0))
+    secs, ff = divmod(frames, rate)
+    mins, ss = divmod(secs, 60)
+    hh, mm = divmod(mins, 60)
+    return "%02d:%02d:%02d:%02d" % (hh, mm, ss, ff)
+
+
+def _retitle_windows(sequence_id, name):
+    # Open timeline (and its player) titles follow a rename
+    win = _open_windows.get(sequence_id) if _open_windows is not None else None
+    if win is None:
+        return
+    try:
+        win.setWindowTitle(f"Sequence Timeline: {name}: #{sequence_id}")
+        player = getattr(win, "_player", None)
+        if player is not None and not getattr(player, "closed", False):
+            player.setTitle(f"Sequence Player: {name}: #{sequence_id}")
+    except Exception:
+        pass
+
+
 class SequenceManager(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -135,7 +205,10 @@ class SequenceManager(QMainWindow):
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # Name (column 0) edits in place; other columns are read-only items
+        self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        self._loading = False
+        self.table.itemChanged.connect(self._name_changed)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._apply_column_sizing()
 
@@ -196,32 +269,81 @@ class SequenceManager(QMainWindow):
                 GROUP BY parent_id
             """)
             child_counts = dict(cur.fetchall())
+            stats = sequence_stats(cur)
             conn.close()
         except Exception as e:
             self.status_bar.showMessage(f"DB error: {e}")
             return
 
+        self._loading = True
         self.table.setRowCount(len(rows))
         for i, (seq_id, name, width, height, fps) in enumerate(rows):
             name_item = QTableWidgetItem(name or "")
             name_item.setData(Qt.UserRole, seq_id)
+            name_item.setData(Qt.UserRole + 1, name or "")
+            # Default flags (drag / drop for nesting) stay; Name is editable
             fps_text = f"{fps:g}" if fps is not None else ""
+            st = stats.get(seq_id, {})
             values = [
                 str(width) if width is not None else "",
                 str(height) if height is not None else "",
                 fps_text,
-                "0",  # Duration
-                "0",  # Video
-                "0",  # Image
-                "0",  # Audio
-                "0",  # Caption
-                str(child_counts.get(seq_id, 0)),  # Sequences
+                format_duration(st.get("frames", 0), fps),
+                str(st.get("video", 0)),
+                str(st.get("image", 0)),
+                str(st.get("audio", 0)),
+                str(st.get("caption", 0)),
+                str(child_counts.get(seq_id, 0)),  # Sequences (nested children)
             ]
             self.table.setItem(i, 0, name_item)
             for col, text in enumerate(values, start=1):
-                self.table.setItem(i, col, QTableWidgetItem(text))
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(i, col, item)
+        self._loading = False
         self._apply_column_sizing()
         self.status_bar.showMessage(f"{len(rows)} sequence(s)")
+
+    def _name_changed(self, item):
+        # In-place rename of column 0: write sequences.name (undoable);
+        # an empty name reverts to the old one
+        if self._loading or item is None or item.column() != 0:
+            return
+        seq_id = item.data(Qt.UserRole)
+        old = item.data(Qt.UserRole + 1) or ""
+        new = (item.text() or "").strip()
+        if seq_id is None or new == old:
+            return
+        if not new:
+            self._loading = True
+            item.setText(old)
+            self._loading = False
+            self.status_bar.showMessage("Sequence name cannot be empty", 3000)
+            return
+        try:
+            from undo import push_undo
+            push_undo(self.project_db, "Rename sequence")
+        except Exception:
+            pass
+        try:
+            conn = sqlite3.connect(self.project_db)
+            conn.execute("UPDATE sequences SET name = ? WHERE id = ?", (new, int(seq_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            QMessageBox.warning(self, "Rename", f"Could not rename sequence: {e}")
+            self._loading = True
+            item.setText(old)
+            self._loading = False
+            return
+        self._loading = True
+        item.setData(Qt.UserRole + 1, new)
+        if new != item.text():
+            item.setText(new)
+        self._loading = False
+        _retitle_windows(int(seq_id), new)
+        self.status_bar.showMessage(f"Renamed to {new}")
 
     def _row_context_menu(self, pos):
         item = self.table.itemAt(pos)

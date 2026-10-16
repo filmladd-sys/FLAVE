@@ -157,10 +157,12 @@ class FootageManager(QMainWindow):
 
         self.table = FootageTable(self)
         # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Proxy Default, 4 Type,
-        # 5 Size, 6 Length
-        self.table.setColumnCount(7)
+        # 5 Size, 6 Length, 7 Height, 8 Width, 9 Codec (appended so the
+        # index-based handlers above are unchanged)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels(
-            ["Icon", "Name", "#Proxies", "Proxy Default", "Type", "Size", "Length"])
+            ["Icon", "Name", "#Proxies", "Proxy Default", "Type", "Size", "Length",
+             "Height", "Width", "Codec"])
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -278,6 +280,7 @@ class FootageManager(QMainWindow):
             return
 
         self.table.setRowCount(len(rows))
+        info = self._media_info()
         max_h = 64
         try:
             max_h = int(_get_global_setting("FootageManager_IconMaxHeightPx", "64") or "64")
@@ -293,11 +296,36 @@ class FootageManager(QMainWindow):
                 # Display rows have no Proxy Default: columns 3+ shift by one
                 self.table.setItem(i, col if col < 3 else col + 1, item)
             self.table.setItem(i, 3, self._proxy_default_item(items))
+            self._set_media_info(i, row.get("id"), items, info)
             if icon_widget is not None:
                 self.table.setCellWidget(i, 0, icon_widget)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
+
+    def _media_info(self):
+        # {footage_id: (height, width, codec)}; older DBs without codec: {}
+        try:
+            conn = sqlite3.connect(self.project_db)
+            try:
+                rows = conn.execute(
+                    "SELECT id, height, width, codec FROM footage").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return {}
+        return {int(r[0]): r[1:] for r in rows}
+
+    def _set_media_info(self, row, footage_id, items, info):
+        # Height / Width / Codec (columns 7-9); empty for audio and NULLs.
+        # Video / image rows carry the footage id on the #Proxies item.
+        visual = len(items) > 2 and items[2].data(Qt.UserRole + 1) is not None
+        vals = info.get(int(footage_id)) if (visual and footage_id is not None) else None
+        for k in range(3):
+            v = vals[k] if vals is not None else None
+            item = QTableWidgetItem("" if v is None else str(v))
+            item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 7 + k, item)
 
     def _proxy_default_item(self, items):
         # Video / image rows (the #Proxies cell carries the footage id):
