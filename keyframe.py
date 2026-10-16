@@ -211,6 +211,18 @@ def position_x_offset(pos_x_clips, clip_link_id, frame, clip_order, seq_w):
     return float(value) - float(seq_w) / 2.0
 
 
+def position_y_offset(pos_y_clips, clip_link_id, frame, clip_order, seq_h):
+    # Absolute center Y in sequence pixels; offset = value - seq_h/2, same
+    # rule as position_x_offset. Default Add Key (seq_h/2) means no shift.
+    keys = _pick_above_keyframe(pos_y_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    return float(value) - float(seq_h) / 2.0
+
+
 def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
     # Once per snapshot: (link_id, in_frame, out_frame, keys, order) for
     # linked keyframe clips of stored_type. order is table row index
@@ -245,6 +257,11 @@ def collect_scale_clips(clips_by_track, track_order=None):
 def collect_position_x_clips(clips_by_track, track_order=None):
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "position X")
+
+
+def collect_position_y_clips(clips_by_track, track_order=None):
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "position Y")
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):

@@ -179,7 +179,9 @@ def timeline_snapshot(tl):
     from keyframe import collect_scale_clips, collect_position_x_clips
     scale_clips = collect_scale_clips(tl.clips_by_track, track_order)
     pos_x_clips = collect_position_x_clips(tl.clips_by_track, track_order)
-    return rows, clips, scale_clips, pos_x_clips, track_order
+    from keyframe import collect_position_y_clips
+    pos_y_clips = collect_position_y_clips(tl.clips_by_track, track_order)
+    return rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips
 
 
 # ---------------------------------------------------------------- window
@@ -486,8 +488,8 @@ class SequencePlayer(QWindow):
         return path
 
     def _layer_items(self, frame, snapshot=None):
-        # (kind, path, source_frame, scale_percent_or_None, pos_dx) bottom
-        # first. Scale / position X apply only from a linked keyframe clip
+        # (kind, path, source_frame, scale_percent_or_None, pos_dx, pos_dy)
+        # bottom first. Scale / position X / Y apply only from a linked keyframe clip
         # whose track sits above this clip on the timeline (smaller table
         # row / sort_order). Video/image base scale is 100.
         if snapshot is None:
@@ -497,7 +499,9 @@ class SequencePlayer(QWindow):
         scale_clips = snapshot[2] if len(snapshot) >= 3 else []
         pos_x_clips = snapshot[3] if len(snapshot) >= 4 else []
         track_order = snapshot[4] if len(snapshot) >= 5 else {}
+        pos_y_clips = snapshot[5] if len(snapshot) >= 6 else []
         from keyframe import scale_percent_for_link, position_x_offset
+        from keyframe import position_y_offset
         any_solo = any(solo for _tid, _en, solo, _k in rows)
         layers = []
         for track_id, enabled, solo, kind in reversed(rows):
@@ -517,13 +521,16 @@ class SequencePlayer(QWindow):
                         base_scale=100.0)
                     pos_dx = position_x_offset(
                         pos_x_clips, link_id, frame, clip_order, self.seq_w)
-                    layers.append((kind, path, max(0, int(src)), scale, pos_dx))
+                    pos_dy = position_y_offset(
+                        pos_y_clips, link_id, frame, clip_order, self.seq_h)
+                    layers.append((kind, path, max(0, int(src)), scale, pos_dx,
+                                   pos_dy))
                 break
         return layers
 
     def _layers(self, frame, snapshot=None):
         # (kind, path, source_frame) for prefetch / callers that ignore xforms.
-        return [(k, p, s) for k, p, s, _sc, _dx in self._layer_items(frame, snapshot)]
+        return [(item[0], item[1], item[2]) for item in self._layer_items(frame, snapshot)]
 
     # ---- sources
 
@@ -950,11 +957,12 @@ class SequencePlayer(QWindow):
             kind, path, src_frame = layer[0], layer[1], layer[2]
             scale = layer[3] if len(layer) > 3 else None
             pos_dx = layer[4] if len(layer) > 4 else None
+            pos_dy = layer[5] if len(layer) > 5 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
-                                scale=scale, pos_dx=pos_dx)
+                                scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -964,7 +972,7 @@ class SequencePlayer(QWindow):
                 sh, sw = shape[0], shape[1]
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
-                            scale=scale, pos_dx=pos_dx)
+                            scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
                 continue
             dec = self._decoder(path)
             # Seek only when the asked frame is not the next one this decoder
@@ -986,7 +994,7 @@ class SequencePlayer(QWindow):
             stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
             # The kernel reads the decoder frame directly
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
-                        scale=scale, pos_dx=pos_dx)
+                        scale=scale, pos_dx=pos_dx, pos_dy=pos_dy)
         self._sync()
         self._target = None
         if target is self.dst:
