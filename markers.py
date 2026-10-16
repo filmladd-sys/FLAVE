@@ -9,8 +9,9 @@
 
 import sqlite3
 
-DEFAULT_RGB = (139, 0, 0)
-MARK_SIZE = 4
+DEFAULT_RGB = (50, 0, 0)
+MARK_SIZE = 6
+HIT_PX = 3      # click tolerance around a marker line / square
 
 
 def load_markers(project_db):
@@ -148,3 +149,103 @@ def paint_markers(painter, clip_rect, clip, markers, ppf):
         painter.drawLine(x, clip_rect.top(), x, clip_rect.bottom())
         painter.fillRect(x - MARK_SIZE // 2, clip_rect.top(), MARK_SIZE, MARK_SIZE,
                          color)
+
+
+def clamp_to_visible(clip, frame):
+    # Timeline frame clamped into the clip's visible range
+    start, length = int(clip[2]), max(1, int(clip[3]))
+    return max(start, min(start + length - 1, int(frame)))
+
+
+def hit_test_marker(tl, pos):
+    # (clip, marker tuple) for a visible marker under pos (line or square,
+    # HIT_PX tolerance), else None. Video / image / audio clips only.
+    markers = getattr(tl, "_markers", None)
+    if not markers:
+        return None
+    name_item = tl._clip_image_track_row(pos)
+    if name_item is None:
+        return None
+    x = tl._x_in_clips(pos)
+    if x < 0:
+        return None
+    ppf = float(tl.pixels_per_frame or 0)
+    if ppf <= 0:
+        return None
+    best = None
+    from PySide6.QtCore import Qt
+    for clip in tl.clips_by_track.get(name_item.data(Qt.UserRole), []):
+        if int(clip[0]) <= 0:
+            continue
+        for m in markers.get(clip[0], ()):
+            off = visible_offset(clip, m[1])
+            if off is None:
+                continue
+            mx = (int(clip[2]) + off - tl.view_start_frame) * ppf
+            d = abs(x - mx)
+            if d <= max(HIT_PX, MARK_SIZE // 2) and (best is None or d < best[0]):
+                best = (d, clip, m)
+    return None if best is None else (best[1], best[2])
+
+
+def marker_to_source(clip, timeline_frame):
+    # Timeline frame (clamped to the visible range) -> stored source frame
+    tf = clamp_to_visible(clip, timeline_frame)
+    return _clip_in(clip) + (tf - int(clip[2]))
+
+
+def update_marker(project_db, marker_id, frame, name, rgb):
+    conn = sqlite3.connect(project_db)
+    try:
+        conn.execute("UPDATE Marker SET frame = ?, name = ?, r = ?, g = ?, b = ? "
+                     "WHERE id = ?", (int(frame), name,
+                                      int(rgb[0]), int(rgb[1]), int(rgb[2]),
+                                      int(marker_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def edit_marker(tl, clip, marker):
+    # Popup: timeline frame, name, R G B (0-255). OK stores the source frame.
+    from PySide6.QtWidgets import (QDialog, QFormLayout, QSpinBox, QLineEdit,
+                                   QDialogButtonBox, QMessageBox)
+    mid, mframe, rgb, name = marker
+    start, length = int(clip[2]), max(1, int(clip[3]))
+    off = visible_offset(clip, mframe)
+    dlg = QDialog(tl)
+    dlg.setWindowTitle("Marker")
+    form = QFormLayout(dlg)
+    frame_spin = QSpinBox()
+    frame_spin.setRange(start, start + length - 1)
+    frame_spin.setValue(start + (off or 0))
+    form.addRow("Frame", frame_spin)
+    name_edit = QLineEdit(name or "")
+    form.addRow("Name", name_edit)
+    spins = []
+    for label, v in zip(("R", "G", "B"), rgb):
+        s = QSpinBox()
+        s.setRange(0, 255)
+        s.setValue(int(v))
+        form.addRow(label, s)
+        spins.append(s)
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    form.addRow(buttons)
+    if dlg.exec() != QDialog.Accepted:
+        return False
+    project_db = tl._project_db()
+    try:
+        from undo import push_undo
+        push_undo(project_db, "Edit marker")
+    except Exception:
+        pass
+    try:
+        update_marker(project_db, mid, marker_to_source(clip, frame_spin.value()),
+                      name_edit.text(), [s.value() for s in spins])
+    except Exception as e:
+        QMessageBox.warning(tl, "Marker", "Could not save marker: %s" % e)
+        return False
+    tl._after_clip_change("Marker updated")
+    return True

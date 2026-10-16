@@ -393,11 +393,12 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self._update_button()
 
         def _update_button(self, *_args):
-            self.gen_btn.setEnabled(self.combo.currentData() is not None)
+            self.gen_btn.setEnabled(not getattr(self, "_generating", False)
+                                    and self.combo.currentData() is not None)
 
         def _generate(self):
             pct = self.combo.currentData()
-            if pct is None:
+            if pct is None or getattr(self, "_generating", False):
                 return
             if not proxies_table_exists(db_path):
                 show_message(
@@ -433,13 +434,18 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                     QApplication.processEvents()
                     time.sleep(0.05)
 
+            # Busy state on this window only (other windows stay usable)
+            self._generating = True
             self.gen_btn.setEnabled(False)
+            self.gen_btn.setText("Generating")
             self.combo.setEnabled(False)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self.setCursor(Qt.WaitCursor)
             try:
                 ok, msg = generate_video_proxy(db_path, footage_id, pct, wait)
             finally:
-                QApplication.restoreOverrideCursor()
+                self.unsetCursor()
+                self._generating = False
+                self.gen_btn.setText("Generate")
                 self.combo.setEnabled(True)
                 self._update_button()
             if not ok:

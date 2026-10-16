@@ -230,7 +230,7 @@ class NewProjectWindow(QMainWindow):
                 name TEXT,
                 clip_id INTEGER NOT NULL,
                 frame INTEGER NOT NULL,
-                r INTEGER NOT NULL DEFAULT 139,
+                r INTEGER NOT NULL DEFAULT 50,
                 g INTEGER NOT NULL DEFAULT 0,
                 b INTEGER NOT NULL DEFAULT 0
             )

@@ -899,6 +899,12 @@ class SequenceTimeline(QMainWindow):
                 # that clip (selection solo), Shift = add to the selection,
                 # empty clip-area space = clear
                 press_pos = event.position().toPoint()
+                # Marker under the mouse: edit popup only (no select / drag)
+                from markers import hit_test_marker, edit_marker
+                marker_hit = hit_test_marker(self, press_pos)
+                if marker_hit is not None:
+                    edit_marker(self, marker_hit[0], marker_hit[1])
+                    return True
                 hit_clip = self._clip_at(press_pos)
                 edge_hit = self._clip_edge_at(press_pos)
                 if hit_clip is None and edge_hit is not None:
@@ -1617,7 +1623,9 @@ class SequenceTimeline(QMainWindow):
             gain_action = menu.addAction("Gain...")
             menu.addSeparator()
         slice_action = menu.addAction("Slice")
-        marker_action = menu.addAction("Add Marker")
+        marker_menu = menu.addMenu("Marker")
+        marker_click_action = marker_menu.addAction("Add To Mouse Click")
+        marker_tick_action = marker_menu.addAction("Add to Time Tick")
         # Linked: Unlink only; not linked: Link only
         clip_linked = len(clip) > 8 and clip[8] is not None
         link_action = unlink_action = None
@@ -1654,8 +1662,10 @@ class SequenceTimeline(QMainWindow):
             return
         if action is None:
             return
-        if action == marker_action:
+        if action == marker_click_action:
             self._add_marker(clip, pos)
+        elif action == marker_tick_action:
+            self._add_marker(clip, None)
         elif action == slice_action:
             self.slice_clip(clip, self._x_in_clips(pos))
         elif link_action is not None and action == link_action:
@@ -1672,7 +1682,12 @@ class SequenceTimeline(QMainWindow):
         project_db = self._project_db()
         if not project_db:
             return
-        frame = int(self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame)
+        if pos is None:
+            # Playhead, clamped to the clip's visible range
+            from markers import clamp_to_visible
+            frame = clamp_to_visible(clip, int(self.current_frame))
+        else:
+            frame = int(self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame)
         from undo import push_undo
         push_undo(project_db, "Add marker")
         from markers import add_marker

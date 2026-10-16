@@ -35,6 +35,26 @@ def ensure_sequences_table(project_db):
     return None
 
 
+def next_sequence_name(project_db):
+    # Sequence01, Sequence02, ...: lowest NN not used by a sequence name
+    used = set()
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            for (name,) in conn.execute("SELECT name FROM sequences").fetchall():
+                name = (name or "").strip()
+                if name.lower().startswith("sequence") and name[8:].isdigit():
+                    used.add(int(name[8:]))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    n = 1
+    while n in used:
+        n += 1
+    return "Sequence%02d" % n
+
+
 class SequenceAddDialog(QDialog):
     def __init__(self, parent=None, project_db=None, sequence_id=None):
         super().__init__(parent)
@@ -45,6 +65,9 @@ class SequenceAddDialog(QDialog):
         self.new_id = None
 
         self.name_edit = QLineEdit()
+        if not self.edit_mode:
+            # Prefill the next free SequenceNN (editable)
+            self.name_edit.setText(next_sequence_name(self.project_db))
 
         self.width_edit = QLineEdit("1920")
         self.height_edit = QLineEdit("1080")
