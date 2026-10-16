@@ -286,12 +286,43 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None):
     if code != 0 or not os.path.isfile(out) or os.path.getsize(out) <= 0:
         _remove_partial(out)
         tail = "\n".join(err.strip().splitlines()[-15:])
-        return False, "ffmpeg failed (exit %s):\n%s" % (code, tail)
+        return False, "ffmpeg failed (exit code %s)\n\nCommand:\n%s\n\nstderr (last 15 lines):\n%s" % (
+            code, subprocess.list2cmdline(cmd), tail)
     try:
         save_proxy_row(db_path, footage_id, out, percentage)
     except Exception as e:
         return False, "Proxy file written but the row could not be saved: %s" % e
     return True, out
+
+
+def show_message(parent, title, text):
+    # Error / info dialog: selectable monospace text, Copy and Close
+    from PySide6.QtWidgets import (
+        QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QPushButton,
+        QApplication,
+    )
+    from PySide6.QtGui import QFontDatabase
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setSizeGripEnabled(True)
+    dlg.resize(720, 360)
+    layout = QVBoxLayout(dlg)
+    edit = QPlainTextEdit()
+    edit.setReadOnly(True)
+    edit.setPlainText(text or "")
+    edit.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+    layout.addWidget(edit, 1)
+    row = QHBoxLayout()
+    row.addStretch(1)
+    copy_btn = QPushButton("Copy")
+    copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(edit.toPlainText()))
+    row.addWidget(copy_btn)
+    close_btn = QPushButton("Close")
+    close_btn.setDefault(True)
+    close_btn.clicked.connect(dlg.accept)
+    row.addWidget(close_btn)
+    layout.addLayout(row)
+    dlg.exec()
 
 
 _open_windows = []   # keeps windows alive (no garbage collection)
@@ -300,7 +331,7 @@ _open_windows = []   # keeps windows alive (no garbage collection)
 def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None):
     from PySide6.QtWidgets import (
         QMainWindow, QTableWidget, QTableWidgetItem, QHeaderView, QWidget,
-        QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QMessageBox,
+        QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
     )
 
     src, fname = footage_source(db_path, footage_id)
@@ -353,7 +384,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             if pct is None:
                 return
             if not proxies_table_exists(db_path):
-                QMessageBox.information(
+                show_message(
                     self, "Proxy Manager",
                     "Proxies are not available in this project because it was "
                     "created with an older version. Create a new project to use "
@@ -367,7 +398,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 try:
                     add_proxy_row(db_path, footage_id, int(pct))
                 except Exception as e:
-                    QMessageBox.warning(self, "Proxy Manager",
+                    show_message(self, "Proxy Manager",
                                         "Could not add proxy: %s" % e)
                     return
             self._reload()
@@ -396,7 +427,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 self.combo.setEnabled(True)
                 self._update_button()
             if not ok:
-                QMessageBox.warning(self, "Proxy Manager", msg)
+                show_message(self, "Proxy Manager", msg)
 
         def closeEvent(self, event):
             try:
