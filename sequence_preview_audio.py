@@ -56,7 +56,7 @@ def _load_mix_rows(project_db, sequence_id):
             "COALESCE(t.enabled, 1), COALESCE(t.solo, 0), "
             "c.footage_id, c.start_frame, c.length_frames, "
             "COALESCE(c.in_frame, 0), COALESCE(c.enabled, 1), "
-            "COALESCE(c.solo, 0), f.original_path, f.filename "
+            "COALESCE(c.solo, 0), f.original_path, f.filename, c.link_id "
             "FROM clips c "
             "JOIN tracks t ON t.id = c.track_id "
             "LEFT JOIN footage f ON f.id = c.footage_id "
@@ -72,7 +72,7 @@ def _load_mix_rows(project_db, sequence_id):
     out = []
     for (track_id, track_type, track_en, track_solo, footage_id,
          start_frame, length_frames, in_frame, clip_en, clip_solo,
-         original_path, filename) in rows:
+         original_path, filename, link_id) in rows:
         if not int(track_en) or not int(clip_en):
             continue
         if any_solo and not int(track_solo):
@@ -85,14 +85,129 @@ def _load_mix_rows(project_db, sequence_id):
             "length_frames": max(0, int(length_frames or 0)),
             "in_frame": max(0, int(in_frame or 0)),
             "basename": _basename_for_row(original_path, filename),
+            "link_id": link_id,
         })
     return out
+
+
+def _track_order(project_db, sequence_id):
+    # track_id -> row index in the timeline (ORDER BY sort_order, id, the
+    # same order the timeline table uses; 0 = top)
+    conn = sqlite3.connect(project_db)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id",
+            (int(sequence_id),)).fetchall()
+    finally:
+        conn.close()
+    return {int(r[0]): i for i, r in enumerate(rows)}
+
+
+def _load_volume_clips(project_db, sequence_id, track_order):
+    # Linked 'volume' keyframe clips: [(link_id, in, out, [(frame, value)],
+    # order)], keys sorted by frame and clamped 0..100. Missing tables = [].
+    conn = sqlite3.connect(project_db)
+    try:
+        try:
+            clips = conn.execute(
+                "SELECT id, track_id, link_id, in_frame, out_frame FROM keyframe_clips "
+                "WHERE sequence_id = ? AND type = 'volume' AND link_id IS NOT NULL "
+                "ORDER BY id", (int(sequence_id),)).fetchall()
+            keys = conn.execute(
+                "SELECT k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
+                "JOIN keyframe_clips c ON c.id = k.keyframe_clip_id "
+                "WHERE c.sequence_id = ? AND c.type = 'volume' "
+                "ORDER BY k.frame, k.id", (int(sequence_id),)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    finally:
+        conn.close()
+    by_id = {}
+    for kid, frame, value in keys:
+        v = max(0.0, min(100.0, float(value)))
+        by_id.setdefault(int(kid), []).append((int(frame), v))
+    out = []
+    for db_id, track_id, link_id, in_f, out_f in clips:
+        order = track_order.get(int(track_id))
+        if order is None:
+            continue
+        out.append((link_id, int(in_f), int(out_f), by_id.get(int(db_id), []),
+                    int(order)))
+    return out
+
+
+def _interp(points, f):
+    # Same rule as keyframe.evaluate_keyframes, for a float frame
+    if len(points) == 1 or f <= points[0][0]:
+        return points[0][1]
+    if f >= points[-1][0]:
+        return points[-1][1]
+    for i in range(len(points) - 1):
+        f0, v0 = points[i]
+        f1, v1 = points[i + 1]
+        if f0 <= f <= f1:
+            if f1 == f0:
+                return v1
+            return v0 + (v1 - v0) * (f - f0) / float(f1 - f0)
+    return points[-1][1]
+
+
+def volume_gain(vol_clips, link_id, clip_order, dst0, count, fps):
+    # Per-sample gain (value/100) for count samples starting at sequence
+    # sample dst0, or None when no linked volume clip above applies. Rule
+    # as scale / position: same link_id, keyframe track above the clip
+    # (smaller order), covering the frame; nearest above wins. Keys are
+    # interpolated per sample (fractional frame), held flat outside them.
+    # A frame not covered by any volume clip keeps gain 1.
+    if link_id is None or clip_order is None or count <= 0 or not vol_clips:
+        return None
+    cands = [v for v in vol_clips
+             if v[0] == link_id and v[4] < int(clip_order) and v[3]]
+    if not cands:
+        return None
+    if not fps or fps <= 0:
+        fps = 29.97
+    per = float(fps) / float(SAMPLE_RATE)
+    # Farthest above first, so the nearest above is applied last and wins
+    cands.sort(key=lambda v: v[4])
+    if _HAS_NP:
+        frame_f = (np.arange(dst0, dst0 + count, dtype=np.float64)) * per
+        frame_i = np.floor(frame_f + 1e-9)
+        gain = np.ones(count, dtype=np.float64)
+        hit = False
+        for _link, in_f, out_f, pts, _order in cands:
+            mask = (frame_i >= in_f) & (frame_i < out_f)
+            if not mask.any():
+                continue
+            hit = True
+            xs = np.array([p[0] for p in pts], dtype=np.float64)
+            ys = np.array([p[1] for p in pts], dtype=np.float64)
+            gain[mask] = np.interp(frame_f[mask], xs, ys) / 100.0
+        return gain if hit else None
+    gain = [1.0] * count
+    hit = False
+    for i in range(count):
+        f = (dst0 + i) * per
+        fi = int(f + 1e-9)
+        for _link, in_f, out_f, pts, _order in cands:
+            if in_f <= fi < out_f:
+                gain[i] = _interp(pts, f) / 100.0
+                hit = True
+    return gain if hit else None
 
 
 def audio_timeline_signature(project_db, sequence_id, fps, total_frames):
     # Stable text signature of the mix inputs; hashed for the .sig file.
     rows = _load_mix_rows(project_db, sequence_id)
     parts = ["fps=%s" % repr(float(fps)), "frames=%d" % int(total_frames)]
+    order = _track_order(project_db, sequence_id)
+    for r in rows:
+        parts.append("link=%s order=%s" % (r.get("link_id"), order.get(r["track_id"])))
+    for link_id, in_f, out_f, pts, kf_order in _load_volume_clips(
+            project_db, sequence_id, order):
+        parts.append("vol link=%s in=%d out=%d order=%d keys=%s" % (
+            link_id, in_f, out_f, kf_order,
+            ",".join("%d:%r" % (f, v) for f, v in pts)))
     for r in rows:
         parts.append(
             "t=%d:%s f=%d start=%d in=%d len=%d name=%s" % (
@@ -118,11 +233,14 @@ def _write_sig(path, sig):
         f.write(sig + "\n")
 
 
-def _mix_pcm(project_db, rows, fps, total_frames):
+def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=None):
     # Return mono s16le bytes for the full sequence length (silence where empty).
+    # vol_clips / track_order: linked volume keyframe gain (volume_gain).
     n = max(0, _frame_to_sample(total_frames, fps))
     if n <= 0:
         return b""
+    vol_clips = vol_clips or []
+    track_order = track_order or {}
     if _HAS_NP:
         acc = np.zeros(n, dtype=np.float64)
         for r in rows:
@@ -146,7 +264,12 @@ def _mix_pcm(project_db, rows, fps, total_frames):
             if dst0 >= n or dst1 <= dst0:
                 continue
             use = dst1 - dst0
-            acc[dst0:dst1] += src[src0:src0 + use]
+            gain = volume_gain(vol_clips, r.get("link_id"),
+                               track_order.get(r["track_id"]), dst0, use, fps)
+            if gain is None:
+                acc[dst0:dst1] += src[src0:src0 + use]
+            else:
+                acc[dst0:dst1] += src[src0:src0 + use] * gain
         acc = np.clip(acc, -32768, 32767).astype("<i2")
         return acc.tobytes()
     # array-module fallback
@@ -167,11 +290,14 @@ def _mix_pcm(project_db, rows, fps, total_frames):
         if count <= 0 or src0 >= len(src):
             continue
         take = min(count, len(src) - src0)
+        gain = volume_gain(vol_clips, r.get("link_id"),
+                           track_order.get(r["track_id"]), dst0, take, fps)
         for i in range(take):
             d = dst0 + i
             if d >= n:
                 break
-            acc[d] += float(src[src0 + i])
+            g = 1.0 if gain is None else gain[i]
+            acc[d] += float(src[src0 + i]) * g
     out = array.array("h")
     for v in acc:
         if v > 32767:
@@ -199,7 +325,9 @@ def build_preview_audio_wav(project_db, sequence_id, fps, total_frames):
         if not project_db or sequence_id is None:
             return None
         rows = _load_mix_rows(project_db, sequence_id)
-        pcm = _mix_pcm(project_db, rows, fps, total_frames)
+        order = _track_order(project_db, sequence_id)
+        vols = _load_volume_clips(project_db, sequence_id, order)
+        pcm = _mix_pcm(project_db, rows, fps, total_frames, vols, order)
         wav_path = preview_audio_wav_path(project_db, sequence_id)
         sig_path = preview_audio_sig_path(project_db, sequence_id)
         _write_wav(wav_path, pcm)

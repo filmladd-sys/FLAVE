@@ -11,14 +11,27 @@ from PySide6.QtWidgets import (
 )
 
 # Stored on keyframe_clips.type. Not enforced beyond storing the string.
-KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale")
+KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
     ("X", "position X"),
     ("Y", "position Y"),
     ("Scale", "scale"),
+    ("Volume", "volume"),
 )
+
+# Value range per stored type (others unbounded). Volume is percent 0..100.
+KEY_VALUE_RANGES = {"volume": (0.0, 100.0)}
+
+
+def clamp_key_value(stored_type, value):
+    # Clamp a key value to its type's range (no-op for unbounded types)
+    rng = KEY_VALUE_RANGES.get(stored_type or "")
+    value = float(value)
+    if rng is None:
+        return value
+    return max(rng[0], min(rng[1], value))
 
 # In-memory clip ids: -(KEYFRAME_ID_BASE + db_id) so they never collide
 # with caption negatives (-captions.id) or positive clips.id.
@@ -121,7 +134,7 @@ def load_keyframe_clips(cur, sequence_id, clips):
 
 
 def format_key_value(value, stored_type):
-    # Position X/Y and scale: two decimal places
+    # Position X/Y, scale and volume: two decimal places
     return "%.2f" % float(value)
 
 
@@ -267,6 +280,9 @@ def collect_position_y_clips(clips_by_track, track_order=None):
 def mark_keyframe_clip_preview_dirty(timeline, clip):
     # Dirty the preview cache over the keyframe clip's [in, out).
     if clip is None or timeline is None:
+        return
+    if len(clip) > 10 and clip[10] == "volume":
+        # Volume changes only the audio mix (its .sig), not video frames
         return
     in_f = max(0, int(clip[2]))
     length = max(1, int(clip[3]))
@@ -492,7 +508,8 @@ def add_keyframe_clip(timeline, track_id, click_frame):
 
 class AddKeyDialog(QDialog):
     # One numeric value labeled with the clip type (X / Y / Scale)
-    def __init__(self, parent, type_label, initial=None, title="Add Key"):
+    def __init__(self, parent, type_label, initial=None, title="Add Key",
+                 stored_type=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
@@ -500,7 +517,10 @@ class AddKeyDialog(QDialog):
         row.addWidget(QLabel("%s:" % (type_label or "Value")))
         self.spin = QDoubleSpinBox()
         self.spin.setDecimals(2)
-        self.spin.setRange(-1000000000.0, 1000000000.0)
+        lo, hi = KEY_VALUE_RANGES.get(stored_type or "",
+                                      (-1000000000.0, 1000000000.0))
+        self.spin.setRange(lo, hi)
+        self.stored_type = stored_type
         self.spin.setSingleStep(0.1)
         if initial is not None:
             self.spin.setValue(float(initial))
@@ -511,7 +531,7 @@ class AddKeyDialog(QDialog):
         layout.addWidget(ok_btn)
 
     def value(self):
-        return float(self.spin.value())
+        return clamp_key_value(self.stored_type, self.spin.value())
 
 
 def clip_type_from_db(cur, db_id):
@@ -533,6 +553,8 @@ def default_key_value(timeline, stored_type):
         _w, h = timeline._sequence_size()
         return float(h) / 2.0
     if stored_type == "scale":
+        return 100.0
+    if stored_type == "volume":
         return 100.0
     return 0.0
 
@@ -559,10 +581,11 @@ def add_key(timeline, clip, click_frame):
         QMessageBox.warning(timeline, "Add Key", "Could not read clip: %s" % e)
         return
     initial = default_key_value(timeline, stored_type)
-    dlg = AddKeyDialog(timeline, type_label, initial=initial)
+    dlg = AddKeyDialog(timeline, type_label, initial=initial,
+                       stored_type=stored_type)
     if dlg.exec() != QDialog.Accepted:
         return
-    value = dlg.value()
+    value = clamp_key_value(stored_type, dlg.value())
     from undo import push_undo
     push_undo(project_db, "Add key")
     try:
@@ -613,10 +636,12 @@ def edit_key(timeline, clip, key_id, frame, value):
                 conn.close()
             except Exception:
                 pass
-    dlg = AddKeyDialog(timeline, type_label, initial=value, title="Edit Key")
+    dlg = AddKeyDialog(timeline, type_label,
+                       initial=clamp_key_value(stored_type, value),
+                       title="Edit Key", stored_type=stored_type)
     if dlg.exec() != QDialog.Accepted:
         return
-    new_val = dlg.value()
+    new_val = clamp_key_value(stored_type, dlg.value())
     project_db = timeline._project_db()
     if not project_db:
         return
