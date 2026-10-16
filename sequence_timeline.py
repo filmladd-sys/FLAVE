@@ -441,6 +441,7 @@ class SequenceTimeline(QMainWindow):
         self.table.viewport().setMouseTracking(True)
         self._edge_drag = None
         self._key_drag = None
+        self._snap_frame = None   # white snap line frame, None = hidden
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -1113,9 +1114,10 @@ class SequenceTimeline(QMainWindow):
         snap_px = drag.get("snap_px", 0)
         ppf = float(self.pixels_per_frame or 0)
         if snap_px <= 0 or ppf <= 0:
+            self._set_snap_frame(None)
             return delta
         try:
-            from clip_snap import snap_delta, snap_targets
+            from clip_snap import snap_delta_target, snap_targets
             x = self._x_in_clips(pos)
             frame_f = max(0.0, self.view_start_frame + x / ppf)
             start, length = drag["orig_start"], drag["orig_length"]
@@ -1131,13 +1133,27 @@ class SequenceTimeline(QMainWindow):
                 edges = [start + length]
             ids = {m["clip"][0] for m in group}
             ids.add(drag["clip"][0])
-            snapped = snap_delta(raw, edges,
-                                 snap_targets(self.clips_by_track, ids),
-                                 ppf, snap_px)
+            snapped, target = snap_delta_target(
+                raw, edges, snap_targets(self.clips_by_track, ids),
+                ppf, snap_px)
         except Exception as e:
             # print(f"Snap failed: {e}")
+            self._set_snap_frame(None)
             return delta
+        self._set_snap_frame(target)
         return delta if snapped is None else snapped
+
+    def _set_snap_frame(self, frame):
+        # White snap line frame (None = hidden); repaint ruler and tracks
+        # only when it changes
+        if getattr(self, "_snap_frame", None) == frame:
+            return
+        self._snap_frame = frame
+        try:
+            self.ruler.viewport().update()
+            self.playhead_overlay.update()
+        except Exception:
+            pass
 
     def _group_delta_range(self, group, edge):
         # Allowed (lo, hi) frame delta for all members at once
@@ -1243,6 +1259,7 @@ class SequenceTimeline(QMainWindow):
     def _cross_track_preview(self, drag, target):
         # Track move only: the clicked clip changes row, start_frame stays
         # at drag["orig_start"]. Partners stay put. Mouse x is ignored.
+        self._set_snap_frame(None)
         clip = drag["clip"]
         for m in drag.get("group") or []:
             c = m["clip"]
@@ -1270,6 +1287,7 @@ class SequenceTimeline(QMainWindow):
     def _move_drag_release(self):
         drag = self._edge_drag
         self._edge_drag = None
+        self._set_snap_frame(None)
         clip = drag["clip"]
         target = drag.get("target_track")
         if target is not None:
@@ -1622,6 +1640,7 @@ class SequenceTimeline(QMainWindow):
     def _edge_drag_release(self):
         drag = self._edge_drag
         self._edge_drag = None
+        self._set_snap_frame(None)
         clip = drag["clip"]
         # print(f"ICON: edge-drag release clip_id={clip[0]} in_frame={clip[7]} "
               # f"edge={drag['edge']} (icon requested at row height on next paint, generate=True)")

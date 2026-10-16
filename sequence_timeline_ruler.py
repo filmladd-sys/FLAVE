@@ -138,6 +138,12 @@ class RulerHeader(QHeaderView):
             painter.fillRect(sx, top, 1, rect.height(), red)
             painter.fillRect(sx - 1, top, 1, outer_h, red)
             painter.fillRect(sx + 1, top, 1, outer_h, red)
+        # Snap line (white, playhead center-line style) while a drag snaps
+        snap = getattr(tl, "_snap_frame", None)
+        if snap is not None:
+            wx = int(left + (snap - start) * ppf)
+            if rect.left() <= wx <= rect.right():
+                painter.fillRect(wx, rect.top(), 1, rect.height(), QColor(255, 255, 255))
         painter.restore()
 
     def _frame_at(self, x):
@@ -229,3 +235,11 @@ class PlayheadOverlay(QWidget):
             painter = QPainter(self)
             painter.fillRect(sx, 0, 1, self.height(), QColor(255, 80, 80))
             painter.end()
+        # Snap line (white) through every track while a drag snaps
+        snap = getattr(tl, "_snap_frame", None)
+        if snap is not None:
+            wx = int(left + (snap - tl.view_start_frame) * tl.pixels_per_frame)
+            if left <= wx <= right and 0 <= wx < self.width():
+                painter = QPainter(self)
+                painter.fillRect(wx, 0, 1, self.height(), QColor(255, 255, 255))
+                painter.end()
