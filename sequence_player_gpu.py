@@ -468,6 +468,7 @@ GL_QUADS = 0x0007
 # placement shifts (nearest). 3 bpp opaque; 4 uses source alpha.
 # inv_scale is x; inv_scale_y is y (they differ slightly for a proxy whose
 # even-rounded size is not an exact fraction of the original).
+# opacity (0..1) multiplies the layer alpha (opacity keyframes).
 # Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
 # inv_scale 1, and a scaled proxy frames to the same pixels as the original.
 PTX = b"""
@@ -479,13 +480,13 @@ PTX = b"""
     .param .u32 sw, .param .u32 sh, .param .u32 sstride, .param .u32 bpp,
     .param .u32 dw, .param .u32 dh, .param .s32 ox, .param .s32 oy,
     .param .f32 inv_scale, .param .s32 pos_dx, .param .s32 pos_dy,
-    .param .f32 inv_scale_y)
+    .param .f32 inv_scale_y, .param .f32 opacity)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
     .reg .u32 usx, usy, off32, r, g, b, a, dr, dg, db, inv, c255;
     .reg .s32 oxv, oyv, sx, sy, pdx, pdy;
-    .reg .f32 invs, invsy, fx, fy, fcx, fcy, fox, foy, fdx, fdy;
+    .reg .f32 invs, invsy, fx, fy, fcx, fcy, fox, foy, fdx, fdy, fop, fa;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -558,6 +559,11 @@ PTX = b"""
     @p bra BLEND;
     ld.global.u8 a, [addr+3];
 BLEND:
+    ld.param.f32 fop, [opacity];
+    cvt.rn.f32.u32 fa, a;
+    mul.f32 fa, fa, fop;
+    cvt.rni.u32.f32 a, fa;
+    min.u32 a, a, 255;
     mov.u32 c255, 255;
     sub.u32 inv, c255, a;
     mul.lo.u32 off32, idx, 3;

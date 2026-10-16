@@ -247,8 +247,10 @@ def timeline_snapshot(tl, use_proxies=True):
     except Exception:
         project_db = None
     proxies = resolve_proxies(project_db, [r[0] for r in rows], use_proxies)
+    from keyframe import collect_opacity_clips
+    opacity_clips = collect_opacity_clips(tl.clips_by_track, track_order)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
-            proxies)
+            proxies, opacity_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -570,6 +572,8 @@ class SequencePlayer(QWindow):
         track_order = snapshot[4] if len(snapshot) >= 5 else {}
         pos_y_clips = snapshot[5] if len(snapshot) >= 6 else []
         proxies = snapshot[6] if len(snapshot) >= 7 else {}
+        opacity_clips = snapshot[7] if len(snapshot) >= 8 else []
+        from keyframe import opacity_for_link
         from keyframe import scale_percent_for_link, position_x_offset
         from keyframe import position_y_offset
         any_solo = any(solo for _tid, _en, solo, _k in rows)
@@ -597,8 +601,10 @@ class SequencePlayer(QWindow):
                         pos_x_clips, link_id, frame, clip_order, self.seq_w)
                     pos_dy = position_y_offset(
                         pos_y_clips, link_id, frame, clip_order, self.seq_h)
+                    opacity = opacity_for_link(
+                        opacity_clips, link_id, frame, clip_order)
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
-                                   pos_dy, (clip[0], path), orig_size))
+                                   pos_dy, (clip[0], path), orig_size, opacity))
                 break
         return layers
 
@@ -691,7 +697,7 @@ class SequencePlayer(QWindow):
 
 
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
-               pos_dx=None, pos_dy=None, orig_size=None):
+               pos_dx=None, pos_dy=None, orig_size=None, opacity=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -714,6 +720,12 @@ class SequencePlayer(QWindow):
             fy_ = factor * float(orig_size[1]) / float(sh)
         inv_scale = ctypes.c_float(1.0 / fx_)
         inv_scale_y = ctypes.c_float(1.0 / fy_)
+        # Opacity keyframe: alpha multiplier on the GPU (None = 1.0)
+        try:
+            op = 1.0 if opacity is None else max(0.0, min(1.0, float(opacity)))
+        except (TypeError, ValueError):
+            op = 1.0
+        opacity_f = ctypes.c_float(op)
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -732,7 +744,8 @@ class SequencePlayer(QWindow):
         cx = (sw - self.seq_w) // 2 if sw > self.seq_w else 0
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
         vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
-                 ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y]
+                 ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y,
+                 opacity_f]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -1097,12 +1110,13 @@ class SequencePlayer(QWindow):
             pos_dx = layer[4] if len(layer) > 4 else None
             pos_dy = layer[5] if len(layer) > 5 else None
             orig_size = layer[7] if len(layer) > 7 else None
+            opacity = layer[8] if len(layer) > 8 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
                                 scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
-                                orig_size=orig_size)
+                                orig_size=orig_size, opacity=opacity)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -1113,7 +1127,7 @@ class SequencePlayer(QWindow):
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
                             scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
-                            orig_size=orig_size)
+                            orig_size=orig_size, opacity=opacity)
                 continue
             dec = self._decoder(dkey, frame)
             # Seek only when the asked frame is not the next one THIS clip's
@@ -1136,7 +1150,7 @@ class SequencePlayer(QWindow):
             # The kernel reads the decoder frame directly
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
                         scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
-                        orig_size=orig_size)
+                        orig_size=orig_size, opacity=opacity)
         self._sync()
         self._target = None
         if target is self.dst:

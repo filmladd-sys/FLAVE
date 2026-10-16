@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 # Stored on keyframe_clips.type. Not enforced beyond storing the string.
-KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume")
+KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -19,10 +19,12 @@ KEYFRAME_TYPE_CHOICES = (
     ("Y", "position Y"),
     ("Scale", "scale"),
     ("Volume", "volume"),
+    ("Opacity", "opacity"),
 )
 
-# Value range per stored type (others unbounded). Volume is percent 0..100.
-KEY_VALUE_RANGES = {"volume": (0.0, 100.0)}
+# Value range per stored type (others unbounded). Volume and opacity are
+# percent 0..100.
+KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0)}
 
 
 def clamp_key_value(stored_type, value):
@@ -222,6 +224,18 @@ def position_y_offset(pos_y_clips, clip_link_id, frame, clip_order, seq_h):
     return float(value) - float(seq_h) / 2.0
 
 
+def opacity_for_link(opacity_clips, clip_link_id, frame, clip_order):
+    # Linked type-opacity keyframe above this clip (same link_id, covers
+    # frame): alpha multiplier value/100 clamped 0..1, or None (= 1.0).
+    keys = _pick_above_keyframe(opacity_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    return max(0.0, min(100.0, float(value))) / 100.0
+
+
 def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
     # Once per snapshot: (link_id, in_frame, out_frame, keys, order) for
     # linked keyframe clips of stored_type. order is table row index
@@ -261,6 +275,11 @@ def collect_position_x_clips(clips_by_track, track_order=None):
 def collect_position_y_clips(clips_by_track, track_order=None):
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "position Y")
+
+
+def collect_opacity_clips(clips_by_track, track_order=None):
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "opacity")
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
@@ -541,6 +560,8 @@ def default_key_value(timeline, stored_type):
     if stored_type == "scale":
         return 100.0
     if stored_type == "volume":
+        return 100.0
+    if stored_type == "opacity":
         return 100.0
     return 0.0
 
