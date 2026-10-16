@@ -463,9 +463,9 @@ GL_QUADS = 0x0007
 # One layer: src (sw x sh, stride, 3 or 4 bytes per pixel) copied 1:1, no
 # scaling, centered in the dw x dh buffer and alpha-blended onto dst (RGB8,
 # 3 bytes per pixel; overlay alpha is consumed, not stored).
-# With inv_scale=1: source = dest + (ox, oy); outside the source is left
-# as is (center-crop / letterbox). inv_scale=1/scale scales about the dest
-# center (nearest). 3 bpp (NVDEC RGB) is opaque; 4 uses source alpha.
+# With inv_scale=1 and pos_dx=pos_dy=0: source = dest + (ox, oy).
+# inv_scale=1/scale scales about the dest center; pos_dx/pos_dy are free
+# placement shifts (nearest). 3 bpp opaque; 4 uses source alpha.
 PTX = b"""
 .version 7.0
 .target sm_75
@@ -474,13 +474,13 @@ PTX = b"""
     .param .u64 src, .param .u64 dst,
     .param .u32 sw, .param .u32 sh, .param .u32 sstride, .param .u32 bpp,
     .param .u32 dw, .param .u32 dh, .param .s32 ox, .param .s32 oy,
-    .param .f32 inv_scale)
+    .param .f32 inv_scale, .param .s32 pos_dx, .param .s32 pos_dy)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
     .reg .u32 usx, usy, off32, r, g, b, a, dr, dg, db, inv, c255;
-    .reg .s32 oxv, oyv, sx, sy;
-    .reg .f32 invs, fx, fy, fcx, fcy, fox, foy;
+    .reg .s32 oxv, oyv, sx, sy, pdx, pdy;
+    .reg .f32 invs, fx, fy, fcx, fcy, fox, foy, fdx, fdy;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -501,16 +501,22 @@ PTX = b"""
     ld.param.s32 oxv, [ox];
     ld.param.s32 oyv, [oy];
     ld.param.f32 invs, [inv_scale];
+    ld.param.s32 pdx, [pos_dx];
+    ld.param.s32 pdy, [pos_dy];
     cvt.rn.f32.u32 fx, x;
     cvt.rn.f32.u32 fy, y;
     cvt.rn.f32.u32 fcx, dwv;
     cvt.rn.f32.u32 fcy, dhv;
     mul.f32 fcx, fcx, 0f3F000000;
     mul.f32 fcy, fcy, 0f3F000000;
+    cvt.rn.f32.s32 fdx, pdx;
+    cvt.rn.f32.s32 fdy, pdy;
     sub.f32 fx, fx, fcx;
+    sub.f32 fx, fx, fdx;
     mul.f32 fx, fx, invs;
     add.f32 fx, fx, fcx;
     sub.f32 fy, fy, fcy;
+    sub.f32 fy, fy, fdy;
     mul.f32 fy, fy, invs;
     add.f32 fy, fy, fcy;
     cvt.rn.f32.s32 fox, oxv;

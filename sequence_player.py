@@ -157,23 +157,29 @@ class PreviewReader(object):
 def timeline_snapshot(tl):
     # GUI thread only: copy of the track rows and clips the composite reads,
     # so the preview worker never touches Qt widgets. Also copies linked
-    # type-scale keyframe clips once per snapshot for per-frame scale.
+    # scale / position X keyframe clips once per snapshot. track_order maps
+    # track_id -> table row (0 = top = smaller sort_order; higher row =
+    # below on the timeline).
     rows = []
+    track_order = {}
     for r in range(tl.table.rowCount()):
         item = tl.table.item(r, 0)
         if item is None:
             continue
+        tid = item.data(Qt.UserRole)
+        track_order[tid] = r
         kind = (item.data(Qt.UserRole + 4) or "").lower()
         if kind not in ("video", "image"):
             continue
-        rows.append((item.data(Qt.UserRole), bool(item.data(Qt.UserRole + 1)),
+        rows.append((tid, bool(item.data(Qt.UserRole + 1)),
                      bool(item.data(Qt.UserRole + 2)), kind))
     clips = {}
     for track_id, _en, _solo, _kind in rows:
         clips[track_id] = [list(c) for c in tl.clips_by_track.get(track_id, [])]
-    from keyframe import collect_scale_clips
-    scale_clips = collect_scale_clips(tl.clips_by_track)
-    return rows, clips, scale_clips
+    from keyframe import collect_scale_clips, collect_position_x_clips
+    scale_clips = collect_scale_clips(tl.clips_by_track, track_order)
+    pos_x_clips = collect_position_x_clips(tl.clips_by_track, track_order)
+    return rows, clips, scale_clips, pos_x_clips, track_order
 
 
 # ---------------------------------------------------------------- window
@@ -475,23 +481,24 @@ class SequencePlayer(QWindow):
         return path
 
     def _layer_items(self, frame, snapshot=None):
-        # (kind, path, source_frame, scale_percent_or_None) bottom first.
-        # scale_percent_or_None is the linked type-scale keyframe result
-        # (percent), or None for no effect. Video/image base scale is 100
-        # (clips table has no scale column).
+        # (kind, path, source_frame, scale_percent_or_None, pos_dx) bottom
+        # first. Scale / position X apply only from a linked keyframe clip
+        # whose track sits above this clip on the timeline (smaller table
+        # row / sort_order). Video/image base scale is 100.
         if snapshot is None:
             snapshot = timeline_snapshot(self.timeline)
-        if len(snapshot) >= 3:
-            rows, clips_by_track, scale_clips = snapshot[0], snapshot[1], snapshot[2]
-        else:
-            rows, clips_by_track = snapshot[0], snapshot[1]
-            scale_clips = []
-        from keyframe import scale_percent_for_link
+        rows = snapshot[0]
+        clips_by_track = snapshot[1]
+        scale_clips = snapshot[2] if len(snapshot) >= 3 else []
+        pos_x_clips = snapshot[3] if len(snapshot) >= 4 else []
+        track_order = snapshot[4] if len(snapshot) >= 5 else {}
+        from keyframe import scale_percent_for_link, position_x_offset
         any_solo = any(solo for _tid, _en, solo, _k in rows)
         layers = []
         for track_id, enabled, solo, kind in reversed(rows):
             if not enabled or (any_solo and not solo):
                 continue
+            clip_order = track_order.get(track_id)
             for clip in clips_by_track.get(track_id, []):
                 start, length = clip[2], clip[3]
                 if not clip[5] or not (start <= frame < start + length):
@@ -501,14 +508,17 @@ class SequencePlayer(QWindow):
                     src = (clip[7] + frame - start) if kind == "video" else 0
                     link_id = clip[8] if len(clip) > 8 else None
                     scale = scale_percent_for_link(
-                        scale_clips, link_id, frame, base_scale=100.0)
-                    layers.append((kind, path, max(0, int(src)), scale))
+                        scale_clips, link_id, frame, clip_order,
+                        base_scale=100.0)
+                    pos_dx = position_x_offset(
+                        pos_x_clips, link_id, frame, clip_order, self.seq_w)
+                    layers.append((kind, path, max(0, int(src)), scale, pos_dx))
                 break
         return layers
 
     def _layers(self, frame, snapshot=None):
-        # (kind, path, source_frame) for prefetch / callers that ignore scale.
-        return [(k, p, s) for k, p, s, _sc in self._layer_items(frame, snapshot)]
+        # (kind, path, source_frame) for prefetch / callers that ignore xforms.
+        return [(k, p, s) for k, p, s, _sc, _dx in self._layer_items(frame, snapshot)]
 
     # ---- sources
 
@@ -544,10 +554,11 @@ class SequencePlayer(QWindow):
         return item
 
 
-    def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None):
+    def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
+               pos_dx=None, pos_dy=None):
         # scale: percent from linked keyframes (None = 100). Factor =
-        # scale/100 (clips have no scale column; base is 100). Pass
-        # inv_scale=1/factor into blend_layer; resampling is on the GPU.
+        # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
+        # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
         cudart, nvcuda, _gl = _libs()
         factor = 1.0
         if scale is not None:
@@ -558,17 +569,25 @@ class SequencePlayer(QWindow):
         if factor <= 0.0:
             return
         inv_scale = ctypes.c_float(1.0 / factor)
+        try:
+            pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
+        except (TypeError, ValueError):
+            pdx = 0
+        try:
+            pdy = int(round(float(pos_dy))) if pos_dy is not None else 0
+        except (TypeError, ValueError):
+            pdy = 0
         src = ctypes.c_uint64(int(src_ptr))
         target = self._target if self._target is not None else self.dst
         dst = ctypes.c_uint64(int(target.value))
         vals = [ctypes.c_uint32(v) for v in (sw, sh, stride, bpp, self.seq_w, self.seq_h)]
-        # Centering: dest offset when the source is smaller, center-crop
-        # offset when it is larger; with inv_scale=1, sx = x + ox
+        # Centering ox/oy; with inv_scale=1 and pos_dx=0, sx = x + ox
         dx = (self.seq_w - sw) // 2 if self.seq_w > sw else 0
         dy = (self.seq_h - sh) // 2 if self.seq_h > sh else 0
         cx = (sw - self.seq_w) // 2 if sw > self.seq_w else 0
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
-        vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale]
+        vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
+                 ctypes.c_int32(pdx), ctypes.c_int32(pdy)]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -925,11 +944,12 @@ class SequencePlayer(QWindow):
         for layer in self._layer_items(frame, snapshot):
             kind, path, src_frame = layer[0], layer[1], layer[2]
             scale = layer[3] if len(layer) > 3 else None
+            pos_dx = layer[4] if len(layer) > 4 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
-                                scale=scale)
+                                scale=scale, pos_dx=pos_dx)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -939,7 +959,7 @@ class SequencePlayer(QWindow):
                 sh, sw = shape[0], shape[1]
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
-                            scale=scale)
+                            scale=scale, pos_dx=pos_dx)
                 continue
             dec = self._decoder(path)
             # Seek only when the asked frame is not the next one this decoder
@@ -961,7 +981,7 @@ class SequencePlayer(QWindow):
             stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
             # The kernel reads the decoder frame directly
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
-                        scale=scale)
+                        scale=scale, pos_dx=pos_dx)
         self._sync()
         self._target = None
         if target is self.dst:

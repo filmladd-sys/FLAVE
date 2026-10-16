@@ -163,36 +163,69 @@ def evaluate_scale(keys, frame):
     return evaluate_keyframes(keys, frame)
 
 
-def scale_percent_for_link(scale_clips, clip_link_id, frame, base_scale=100.0):
-    # Linked type-scale keyframe clip whose [in_frame, out_frame) covers
-    # frame. base_scale is the clip's existing scale percent (video/image
-    # clips have no scale column; callers pass 100). Returns final percent
-    # = base * value/100, or None when there is no effect.
-    if clip_link_id is None or not scale_clips:
+def _pick_above_keyframe(clips, clip_link_id, frame, clip_order):
+    # Among linked keyframe clips covering frame whose track sits above
+    # clip_order (smaller table-row / sort_order index = higher on the
+    # timeline), pick the nearest above. clips entries end with order.
+    if clip_link_id is None or not clips or clip_order is None:
         return None
-    for link_id, in_f, out_f, keys in scale_clips:
+    best_keys = None
+    best_order = None
+    for link_id, in_f, out_f, keys, kf_order in clips:
         if link_id is None or link_id != clip_link_id:
+            continue
+        if kf_order is None or int(kf_order) >= int(clip_order):
             continue
         if not (int(in_f) <= int(frame) < int(out_f)):
             continue
-        value = evaluate_scale(keys, frame)
-        if value is None:
-            continue
-        return float(base_scale) * float(value) / 100.0
-    return None
+        if best_order is None or int(kf_order) > int(best_order):
+            best_order = int(kf_order)
+            best_keys = keys
+    return best_keys
 
 
-def collect_scale_clips(clips_by_track):
-    # Once per snapshot/pass: (link_id, in_frame, out_frame, keys) for every
-    # type-scale keyframe clip with a non-null link_id.
+def scale_percent_for_link(scale_clips, clip_link_id, frame, clip_order,
+                           base_scale=100.0):
+    # Linked type-scale keyframe above this clip (same link_id, covers
+    # frame). base_scale is the clip's existing scale percent (video/image
+    # have no scale column; callers pass 100). Returns final percent =
+    # base * value/100, or None when there is no effect.
+    keys = _pick_above_keyframe(scale_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_scale(keys, frame)
+    if value is None:
+        return None
+    return float(base_scale) * float(value) / 100.0
+
+
+def position_x_offset(pos_x_clips, clip_link_id, frame, clip_order, seq_w):
+    # Absolute center X in sequence pixels; offset = value - seq_w/2.
+    # Default Add Key (seq_w/2) means no shift. None when no effect.
+    keys = _pick_above_keyframe(pos_x_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    return float(value) - float(seq_w) / 2.0
+
+
+def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
+    # Once per snapshot: (link_id, in_frame, out_frame, keys, order) for
+    # linked keyframe clips of stored_type. order is table row index
+    # (0 = top of timeline = smaller sort_order).
     out = []
     if not clips_by_track:
         return out
-    for track_clips in clips_by_track.values():
+    for track_id, track_clips in clips_by_track.items():
+        order = None if track_order is None else track_order.get(track_id)
+        if order is None:
+            continue
         for c in track_clips:
             if not is_keyframe_clip_id(c[0]):
                 continue
-            if len(c) <= 10 or c[10] != "scale":
+            if len(c) <= 10 or c[10] != stored_type:
                 continue
             link_id = c[8] if len(c) > 8 else None
             if link_id is None:
@@ -200,8 +233,18 @@ def collect_scale_clips(clips_by_track):
             in_f = max(0, int(c[2]))
             out_f = in_f + max(1, int(c[3]))
             keys = list(c[9]) if len(c) > 9 and c[9] else []
-            out.append((link_id, in_f, out_f, keys))
+            out.append((link_id, in_f, out_f, keys, int(order)))
     return out
+
+
+def collect_scale_clips(clips_by_track, track_order=None):
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "scale")
+
+
+def collect_position_x_clips(clips_by_track, track_order=None):
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "position X")
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
