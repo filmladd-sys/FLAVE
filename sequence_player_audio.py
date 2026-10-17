@@ -5,6 +5,7 @@
 # ASCII only.
 
 import os
+import time
 import wave
 
 
@@ -269,6 +270,9 @@ class PreviewAudioPlayer(object):
 # play sink, the play clock or the preview video path.
 
 BURST_RAMP_SAMPLES = 32     # short linear fade in / out against clicks
+BURST_POLL_MS = 5           # BUILD 113: burst-done check interval
+BURST_DONE_MARGIN_S = 0.03  # drained buffer + this = done (output latency)
+BURST_HARD_CAP_S = 0.25     # done regardless, never stuck waiting
 
 
 def burst_slice_bounds(frame, fps, n_bytes, sample_rate=SAMPLE_RATE,
@@ -319,12 +323,7 @@ def ramp_pcm16(data, channels=CHANNELS, ramp=BURST_RAMP_SAMPLES):
 class ScrubBurst(object):
     # BUILD 112: ONE long-lived QAudioSink and ONE QBuffer (internal data,
     # set with setData, so no external QByteArray to outlive), both
-    # parented to a QObject owner created on the GUI thread and reused. A
-    # new burst: stop() the sink (never delete it), close the buffer,
-    # setData, open, start. Requests are coalesced through a single-shot
-    # QTimer (owner-parented) so a fast drag starts only the latest burst
-    # per event-loop pass and nothing runs inside a mouse handler or a sink
-    # signal. No stateChanged handler; the sink just goes idle at the end.
+    # parented to a QObject owner created on the GUI thread and reused.
     # release() stops everything and deleteLater()s the owner.
     #
     # BUILD 111 created a new QByteArray and QBuffer per burst and dropped
@@ -332,6 +331,17 @@ class ScrubBurst(object):
     # parent), and the old QByteArray was freed while the old QBuffer still
     # pointed at it. A sink backend still holding the old pull device can
     # then touch freed memory.
+    #
+    # BUILD 113: a playing burst is never cut off. A scrub that arrives
+    # while one plays only stores the latest frame (overwriting any older
+    # pending one; intermediate frames are dropped). When the burst is
+    # done the pending frame plays, then is cleared. "Done" is checked
+    # from an owner-parented polling QTimer (queued, GUI thread, no
+    # deletion): sink IdleState/StoppedState, or the buffer fully pulled
+    # and the burst duration plus a margin elapsed (some backends stay
+    # ActiveState after draining), or a hard cap. No stateChanged slot:
+    # in PySide6 6.12 the QAudio::State argument fails to convert
+    # ("Cannot call meta function"), so the sink signal is not used.
 
     def __init__(self):
         self.path = None
@@ -344,11 +354,16 @@ class ScrubBurst(object):
         self._sink = None
         self._sink_fmt = None
         self._buf = None
-        self._timer = None
-        self._pending = None
+        self._timer = None              # single-shot 0: start when free
+        self._poll = None               # BURST_POLL_MS: done check
+        self._pending = None            # (frame, data) latest request only
+        self._playing = False
+        self._t_start = 0.0
+        self._dur = 0.0
         self._released = False
         self.last_frame = None
         self.started = 0                # bursts actually started (tests)
+        self.frames = []                # started frames, kept short (tests)
 
     def load(self, wav_path, shared=None):
         # Cached PCM, reloaded only when path / size / mtime change (BUILD
@@ -396,10 +411,14 @@ class ScrubBurst(object):
             self._timer.setSingleShot(True)
             self._timer.setInterval(0)
             self._timer.timeout.connect(self._start_pending)
+            self._poll = QTimer(self._owner)
+            self._poll.setInterval(BURST_POLL_MS)
+            self._poll.timeout.connect(self._check_done)
         fmt_key = (int(self._rate), int(self._ch))
         if self._sink is not None and self._sink_fmt != fmt_key:
             old = self._sink
             self._sink = None
+            self._playing = False
             try:
                 old.stop()
                 old.deleteLater()
@@ -416,7 +435,8 @@ class ScrubBurst(object):
         return True
 
     def play(self, frame, fps):
-        # Queue the latest burst; started from the timer (coalesced)
+        # Store the latest request; it starts at once (next event-loop
+        # pass) when nothing plays, else when the current burst is done
         if self._released:
             return False
         data = self.slice_for(frame, fps)
@@ -424,18 +444,21 @@ class ScrubBurst(object):
             return False
         self._ensure_objects()
         self._pending = (int(frame), data)
-        if not self._timer.isActive():
+        if not self._playing and not self._timer.isActive():
             self._timer.start()
         return True
 
     def _start_pending(self):
-        if self._released or self._pending is None or self._sink is None:
+        # Timer slot only. Never called while a burst is still playing.
+        if self._released or self._playing:
+            return
+        if self._pending is None or self._sink is None:
             return
         frame, data = self._pending
         self._pending = None
         _qb, _qa, QIODevice, _qf, _qs = _qt_audio()
         try:
-            self._sink.stop()              # cut off the previous burst
+            self._sink.stop()              # previous burst already done
         except Exception:
             pass
         if self._buf.isOpen():
@@ -445,20 +468,62 @@ class ScrubBurst(object):
             return
         self._buf.seek(0)
         try:
-            self._sink.start(self._buf)    # goes idle by itself at the end
-            self.last_frame = frame
-            self.started += 1
-            # print("SCRUB: burst frame=%d bytes=%d" % (frame, len(data)))
+            self._sink.start(self._buf)
         except Exception:
-            pass
+            return
+        self._playing = True
+        self._t_start = time.monotonic()
+        bps = float(self._rate) * self._ch * self._width
+        self._dur = (len(data) / bps) if bps > 0 else 0.0
+        self.last_frame = frame
+        self.started += 1
+        self.frames.append(frame)
+        if len(self.frames) > 1000:
+            del self.frames[:500]
+        self._poll.start()
+        # print("SCRUB: burst frame=%d bytes=%d" % (frame, len(data)))
+
+    def _burst_done(self):
+        _qb, _qa, _qi, _qf, _qs = _qt_audio()
+        from PySide6.QtMultimedia import QAudio
+        try:
+            st = self._sink.state()
+        except Exception:
+            return True
+        if st in (QAudio.State.IdleState, QAudio.State.StoppedState):
+            return True
+        el = time.monotonic() - self._t_start
+        if el >= self._dur + BURST_HARD_CAP_S:
+            return True
+        try:
+            drained = self._buf.atEnd()
+        except Exception:
+            drained = True
+        return drained and el >= self._dur + BURST_DONE_MARGIN_S
+
+    def _check_done(self):
+        # Poll-timer slot (queued, GUI thread). No deletion here.
+        if self._released or not self._playing or self._sink is None:
+            if self._poll is not None:
+                self._poll.stop()
+            return
+        if not self._burst_done():
+            return
+        self._poll.stop()
+        self._playing = False
+        if self._pending is not None:
+            self._start_pending()          # latest stored frame, then cleared
 
     def stop(self):
+        # Play start / player close: drop any pending frame, silence now
         self._pending = None
-        if self._timer is not None:
-            try:
-                self._timer.stop()
-            except Exception:
-                pass
+        self._playing = False
+        for t in (self._timer, self._poll):
+            if t is not None:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
         if self._sink is not None:
             try:
                 self._sink.stop()
@@ -467,7 +532,7 @@ class ScrubBurst(object):
 
     def release(self):
         # Player close: stop first, then deleteLater the owner (sink,
-        # buffer and timer are its children)
+        # buffer and timers are its children)
         self.stop()
         self._released = True
         if self._buf is not None:
@@ -485,6 +550,7 @@ class ScrubBurst(object):
         self._sink = None
         self._buf = None
         self._timer = None
+        self._poll = None
 
 
 def release_scrub_burst(player):
