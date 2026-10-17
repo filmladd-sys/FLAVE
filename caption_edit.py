@@ -30,7 +30,9 @@ class CaptionEditDialog(QDialog):
         form.addRow("Text:", self.text_edit)
         self.font_edit = QLineEdit(values.get("font_family") or DEFAULT_FONT_FAMILY)
         form.addRow("Font family:", self.font_edit)
-        self.size_edit = QLineEdit(str(self._pick(values, "font_size", DEFAULT_FONT_SIZE)))
+        # BUILD 104: NULL font size stays blank (player default size)
+        self.size_edit = QLineEdit(self._blank(values.get("font_size")))
+        self.size_edit.setPlaceholderText("default")
         form.addRow("Font size:", self.size_edit)
         # BUILD 103: NULL position stays blank (player default); clear a
         # field to return that axis to default
@@ -68,8 +70,8 @@ class CaptionEditDialog(QDialog):
         if self.values() is None:
             QMessageBox.warning(
                 self, self.windowTitle(),
-                "Text is required. Font size must be a whole number; X and Y "
-                "must be whole numbers or blank (default); "
+                "Text is required. Font size, X and Y must be whole numbers or "
+                "blank (default); "
                 "scale must be a number greater than 0.")
             return
         self.accept()
@@ -80,13 +82,13 @@ class CaptionEditDialog(QDialog):
         if not text.strip():
             return None
         try:
-            font_size = int(self.size_edit.text().strip())
+            font_size = self._opt_int(self.size_edit.text())
             pos_x = self._opt_int(self.x_edit.text())
             pos_y = self._opt_int(self.y_edit.text())
             scale = float(self.scale_edit.text().strip())
         except ValueError:
             return None
-        if font_size <= 0 or scale <= 0:
+        if (font_size is not None and font_size <= 0) or scale <= 0:
             return None
         return {
             "text": text,

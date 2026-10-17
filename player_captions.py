@@ -159,3 +159,22 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
                          str(c[3]).replace("\r\n", "\n"))
     painter.restore()
     return len(laid)
+
+
+def caption_image(snap, frame, pw, ph, seq_w, seq_h):
+    # BUILD 104: captions for the frame painted on the CPU into a
+    # transparent premultiplied image the size of the displayed picture
+    # (device pixels). The player uploads it as an overlay texture.
+    from PySide6.QtGui import QImage, QPainter
+    img = QImage(max(1, int(pw)), max(1, int(ph)),
+                 QImage.Format_ARGB32_Premultiplied)
+    img.fill(0)
+    p = QPainter(img)
+    try:
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        paint_captions(p, snap, frame, 0, 0, img.width(), img.height(),
+                       seq_w, seq_h)
+    finally:
+        p.end()
+    return img

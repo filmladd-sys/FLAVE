@@ -536,6 +536,9 @@ class SequencePlayer(QWindow):
                     cudart.cudaFree(b)
             self.gen_bufs = []
             gl.glDeleteTextures(1, ctypes.byref(self.tex))
+            if getattr(self, "_cap_tex", None) is not None:
+                gl.glDeleteTextures(1, ctypes.byref(self._cap_tex))
+                self._cap_tex = None
             self.ctx.doneCurrent()
         except Exception as e:
             print(f"Sequence Player release failed: {e}")
@@ -1204,8 +1207,8 @@ class SequencePlayer(QWindow):
             gl.glEnd()
             gl.glBindTexture(GL_TEXTURE_2D, 0)
             gl.glDisable(GL_TEXTURE_2D)
-            # BUILD 102: soft captions on top of the presented picture
-            # (QPainter overlay, never in the composite or preview cache)
+            # BUILD 102/104: soft captions on top of the presented picture
+            # (CPU-painted overlay texture, never in the composite or cache)
             try:
                 self._paint_captions(vw, vh, win_w, win_h, ratio)
             except Exception as e:
@@ -1223,40 +1226,69 @@ class SequencePlayer(QWindow):
         return snap
 
     def _paint_captions(self, vw, vh, win_w, win_h, ratio):
-        from player_captions import captions_at, paint_captions
+        # BUILD 104: captions are painted on the CPU into a transparent
+        # premultiplied QImage the size of the displayed picture, uploaded
+        # to their own GL texture and drawn as one blended quad. No QPainter
+        # on the GL surface (its glyph-cache uploads inherited our
+        # GL_UNPACK_ALIGNMENT=1 and fixed-function state and came out as
+        # garbage). Display overlay only: not in the composite or cache.
+        from player_captions import captions_at, caption_image
         snap = self._caption_snap()
         frame = int(self.timeline.current_frame)
-        if not captions_at(snap, frame):
+        caps = captions_at(snap, frame)
+        if not caps:
             return
-        from PySide6.QtGui import QPainter
-        from PySide6.QtOpenGL import QOpenGLPaintDevice
-        from PySide6.QtCore import QSize
+        pw = max(1, int(round(vw * win_w)))     # picture rect, device px
+        ph = max(1, int(round(vh * win_h)))
+        key = (tuple(caps), pw, ph)
+        gl = _libs()[2]
         f = self.ctx.functions()
-        f.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)   # glyph uploads from memory
-        dev = getattr(self, "_cap_dev", None)
-        if dev is None:
-            dev = QOpenGLPaintDevice()
-            self._cap_dev = dev
-        dev.setSize(QSize(win_w, win_h))
-        dev.setDevicePixelRatio(ratio)
-        lw, lh = win_w / ratio, win_h / ratio
-        pw, ph = vw * lw, vh * lh
-        painter = QPainter(dev)
-        try:
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setRenderHint(QPainter.TextAntialiasing)
-            paint_captions(painter, snap, frame, (lw - pw) / 2.0,
-                           (lh - ph) / 2.0, pw, ph, self.seq_w, self.seq_h)
-        finally:
-            painter.end()
-        # Back to the fixed-function state the textured quad expects
-        f.glUseProgram(0)
-        f.glBindBuffer(0x8892, 0)        # GL_ARRAY_BUFFER
-        f.glActiveTexture(0x84C0)        # GL_TEXTURE0
-        f.glDisable(0x0BE2)              # GL_BLEND
-        f.glDisable(0x0C11)              # GL_SCISSOR_TEST
-        f.glDisable(0x0B90)              # GL_STENCIL_TEST
-        f.glDisable(0x0B71)              # GL_DEPTH_TEST
+        if getattr(self, "_cap_tex", None) is None:
+            self._cap_tex = ctypes.c_uint(0)
+            gl.glGenTextures(1, ctypes.byref(self._cap_tex))
+            self._cap_key = None
+        gl.glBindTexture(GL_TEXTURE_2D, self._cap_tex.value)
+        if key != self._cap_key:
+            img = caption_image(snap, frame, pw, ph, self.seq_w, self.seq_h)
+            raw = bytes(img.constBits())[: img.sizeInBytes()]
+            buf = ctypes.create_string_buffer(raw, len(raw))
+            # Clean unpack state: no PBO, tight default rows (ARGB32 rows
+            # are 4-byte multiples, so alignment 4 is exact)
+            if self._glb is not None:
+                self._glb[1](GL_PIXEL_UNPACK_BUFFER, 0)
+            gl.glPixelStorei(0x0CF2, 0)          # GL_UNPACK_ROW_LENGTH
+            gl.glPixelStorei(0x0CF3, 0)          # GL_UNPACK_SKIP_ROWS
+            gl.glPixelStorei(0x0CF4, 0)          # GL_UNPACK_SKIP_PIXELS
+            gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 4)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            # QImage ARGB32 is B,G,R,A bytes in memory: upload as GL_BGRA
+            gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pw, ph, 0,
+                            0x80E1, GL_UNSIGNED_BYTE, buf)
+            self._cap_key = key
+            # print(f"PLAY: caption texture rebuilt {pw}x{ph} n={len(caps)}")
+        # Premultiplied alpha over the picture, same quad as the picture
+        gl.glColor4f.argtypes = [ctypes.c_float] * 4
+        gl.glColor4f(1.0, 1.0, 1.0, 1.0)
+        gl.glEnable(GL_TEXTURE_2D)
+        f.glEnable(0x0BE2)                       # GL_BLEND
+        f.glBlendFunc(1, 0x0303)                 # GL_ONE, GL_ONE_MINUS_SRC_ALPHA
+        gl.glBegin(GL_QUADS)
+        gl.glTexCoord2f(0, 1)
+        gl.glVertex2f(-vw, -vh)
+        gl.glTexCoord2f(1, 1)
+        gl.glVertex2f(vw, -vh)
+        gl.glTexCoord2f(1, 0)
+        gl.glVertex2f(vw, vh)
+        gl.glTexCoord2f(0, 0)
+        gl.glVertex2f(-vw, vh)
+        gl.glEnd()
+        # State the next picture draw expects: blend off, no texture
+        f.glDisable(0x0BE2)
+        gl.glBindTexture(GL_TEXTURE_2D, 0)
+        gl.glDisable(GL_TEXTURE_2D)
 
 
 
