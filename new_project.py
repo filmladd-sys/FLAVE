@@ -153,7 +153,7 @@ class NewProjectWindow(QMainWindow):
             CREATE TABLE IF NOT EXISTS clips (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 track_id INTEGER NOT NULL,
-                footage_id INTEGER NOT NULL,
+                footage_id INTEGER,
                 start_frame INTEGER NOT NULL,
                 length_frames INTEGER NOT NULL,
                 in_frame INTEGER NOT NULL DEFAULT 0,
@@ -161,7 +161,10 @@ class NewProjectWindow(QMainWindow):
                 solo INTEGER DEFAULT 0,
                 link_id INTEGER,
                 gain_db REAL DEFAULT 0,
-                proxy_percent INTEGER NOT NULL DEFAULT 0
+                proxy_percent INTEGER NOT NULL DEFAULT 0,
+                -- BUILD 105: sequence clip = sequences.id of the nested child
+                -- (footage_id is NULL then); NULL for footage clips
+                sequence_id_ref INTEGER
             )
         """)
 

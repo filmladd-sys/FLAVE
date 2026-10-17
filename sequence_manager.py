@@ -67,6 +67,9 @@ def _ensure_children_table(project_db):
     return None
 
 
+SEQUENCE_MIME = "application/x-ladd-sequence-id"
+
+
 class SequenceTable(QTableWidget):
     # Drop a row onto another row to nest it. Never reorders rows.
     def __init__(self, manager):
@@ -79,6 +82,19 @@ class SequenceTable(QTableWidget):
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setDefaultDropAction(Qt.MoveAction)
         self.setDragDropOverwriteMode(False)
+
+    def mimeData(self, items):
+        # BUILD 105: default row data (internal nesting drop) plus the
+        # sequence id for a drop onto a Sequence Timeline
+        mime = super().mimeData(items)
+        try:
+            sid = self._row_id(self.currentRow())
+            if mime is not None and sid is not None:
+                from PySide6.QtCore import QByteArray
+                mime.setData(SEQUENCE_MIME, QByteArray(str(int(sid)).encode("ascii")))
+        except Exception:
+            pass
+        return mime
 
     def _row_id(self, row):
         if row < 0:
@@ -128,17 +144,24 @@ def sequence_stats(cur):
     def get(sid):
         return out.setdefault(int(sid), {"frames": 0, "video": 0, "image": 0,
                                          "audio": 0, "caption": 0})
-    try:
-        for sid, ttype, n, end in cur.execute(
-                "SELECT t.sequence_id, LOWER(COALESCE(t.track_type, '')), COUNT(c.id), "
-                "MAX(c.start_frame + c.length_frames) FROM clips c "
-                "JOIN tracks t ON t.id = c.track_id GROUP BY t.sequence_id, 2").fetchall():
-            st = get(sid)
-            if ttype in CLIP_COUNT_TYPES:
-                st[ttype] += int(n)
-            st["frames"] = max(st["frames"], int(end or 0))
-    except sqlite3.OperationalError:
-        pass
+    # BUILD 105: sequence clips (sequence_id_ref set) count toward length
+    # but not toward Video / Image / Audio; Sequences is sequence_children
+    _q = ("SELECT t.sequence_id, LOWER(COALESCE(t.track_type, '')), "
+          "SUM(CASE WHEN %s THEN 0 ELSE 1 END), "
+          "MAX(c.start_frame + c.length_frames) FROM clips c "
+          "JOIN tracks t ON t.id = c.track_id GROUP BY t.sequence_id, 2")
+    rows = None
+    for cond in ("c.sequence_id_ref IS NOT NULL", "0"):
+        try:
+            rows = cur.execute(_q % cond).fetchall()
+            break
+        except sqlite3.OperationalError:
+            rows = None
+    for sid, ttype, n, end in (rows or []):
+        st = get(sid)
+        if ttype in CLIP_COUNT_TYPES:
+            st[ttype] += int(n or 0)
+        st["frames"] = max(st["frames"], int(end or 0))
     try:
         for sid, n, end in cur.execute(
                 "SELECT sequence_id, COUNT(*), MAX(start_frame + length_frames) "

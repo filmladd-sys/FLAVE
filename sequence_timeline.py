@@ -36,6 +36,7 @@ from sequence_timeline_sql import (
     _load_sequence_duration, _latest_clip_end, sequence_length_seconds, _load_sequence_fps,
     _add_track, refresh, _save_track_display, _move_track,
     _toggle_track_flag, drop_footage, _range_overlaps, delete_selected_clip,
+    drop_sequence, sequence_id_from_mime,
     slice_clip, ripple_delete, _toggle_clip_flag,
 )
 from PySide6.QtWidgets import (
@@ -110,9 +111,26 @@ class ClipDelegate(QStyledItemDelegate):
             else:
                 painter.fillRect(clip_rect, QColor(70, 90, 130))
             text_rect = QRect(clip_rect)
+            seq_ref = (getattr(tl, "_seq_refs", None) or {}).get(clip_id)
             if track_type == "caption":
                 # Caption: plain bar with the text, no icon, no waveform
                 pass
+            elif seq_ref is not None:
+                # BUILD 105: sequence clip, left / right sequence icons and
+                # the child name (no footage icon, waveform or peaks)
+                painter.fillRect(clip_rect, QColor(80, 60, 120))
+                ih = rect.height()
+                lpix = sequence_clip_icon(ih, False)
+                rpix = sequence_clip_icon(ih, True)
+                iw = lpix.width() if lpix is not None else 0
+                if iw and 2 * iw <= w:
+                    painter.drawPixmap(x, rect.top(), lpix)
+                    painter.drawPixmap(x + w - iw, rect.top(), rpix)
+                    text_rect.setLeft(x + iw)
+                    text_rect.setRight(x + w - iw - 1)
+                elif iw:
+                    painter.drawPixmap(x, rect.top(), lpix, 0, 0, min(iw, w), ih)
+                    text_rect.setLeft(x + min(iw, w))
             elif track_type == "audio":
                 # Audio clips: waveform from stored peaks, no icons
                 self._draw_waveform(painter, tl, clip_rect, footage_id,
@@ -185,6 +203,55 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.drawText(text_rect, Qt.AlignCenter, label)
             painter.setOpacity(1.0)
         painter.restore()
+
+
+_SEQ_ICON_CACHE = {}
+
+
+def sequence_clip_icon(height, right):
+    # BUILD 105: square in / out icon for sequence clips, drawn once per
+    # height: a stack of three frames with 'SEQ'; the right icon is the
+    # mirror image (like the video in / out icons at the clip edges)
+    height = int(height)
+    if height <= 0:
+        return None
+    key = (height, bool(right))
+    if key in _SEQ_ICON_CACHE:
+        return _SEQ_ICON_CACHE[key]
+    from PySide6.QtGui import QPixmap, QPainter, QFont, QTransform
+    pix = QPixmap(height, height)
+    pix.fill(QColor(40, 28, 70))
+    p = QPainter(pix)
+    try:
+        p.setRenderHint(QPainter.Antialiasing)
+        m = max(2, height // 8)
+        step = max(2, height // 10)
+        box = height - 2 * m - 2 * step
+        for i in range(3):
+            off = m + (2 - i) * step
+            r = QRect(off, m + i * step, max(2, box), max(2, box))
+            p.fillRect(r, QColor(120, 95, 180) if i < 2 else QColor(170, 140, 230))
+            p.setPen(QColor(20, 12, 40))
+            p.drawRect(r)
+    finally:
+        p.end()
+    if right:
+        # Mirror the frame stack only; the label stays readable
+        pix = pix.transformed(QTransform().scale(-1, 1))
+    p = QPainter(pix)
+    try:
+        f = QFont()
+        f.setPixelSize(max(6, box // 3))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(30, 18, 55))
+        lx = (height - m - box) if right else m
+        p.drawText(QRect(lx, m + 2 * step, max(2, box), max(2, box)),
+                   Qt.AlignCenter, "SEQ")
+    finally:
+        p.end()
+    _SEQ_ICON_CACHE[key] = pix
+    return pix
 
 
 class TrackDisplayDialog(QDialog):
@@ -326,6 +393,7 @@ class SequenceTimeline(QMainWindow):
     _move_track = _move_track
     _toggle_track_flag = _toggle_track_flag
     drop_footage = drop_footage
+    drop_sequence = drop_sequence
     _range_overlaps = _range_overlaps
     delete_selected_clip = delete_selected_clip
     slice_clip = slice_clip
@@ -712,13 +780,21 @@ class SequenceTimeline(QMainWindow):
         return int(value) if value.isdigit() else None
 
     def _handle_drop(self, event):
+        pos = event.position().toPoint()
+        row = self.table.rowAt(pos.y())
+        x_in_clips = pos.x() - self.ruler.sectionViewportPosition(CLIPS_COL)
+        # BUILD 105: sequence from the Sequence Manager. Copy action so the
+        # manager's row is never removed by a Move drop.
+        child_id = sequence_id_from_mime(event.mimeData())
+        if child_id is not None:
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            self.drop_sequence(child_id, row, x_in_clips)
+            return
         footage_id = self._footage_id_from_mime(event.mimeData())
         if footage_id is None:
             event.ignore()
             return
-        pos = event.position().toPoint()
-        row = self.table.rowAt(pos.y())
-        x_in_clips = pos.x() - self.ruler.sectionViewportPosition(CLIPS_COL)
         if self.drop_footage(footage_id, row, x_in_clips):
             event.acceptProposedAction()
         else:
@@ -883,7 +959,10 @@ class SequenceTimeline(QMainWindow):
                 self.wheel_pan(event)
                 return True
             if etype in (QEvent.DragEnter, QEvent.DragMove):
-                if self._footage_id_from_mime(event.mimeData()) is not None:
+                if sequence_id_from_mime(event.mimeData()) is not None:
+                    event.setDropAction(Qt.CopyAction)
+                    event.accept()
+                elif self._footage_id_from_mime(event.mimeData()) is not None:
                     event.acceptProposedAction()
                 else:
                     event.ignore()
@@ -1647,7 +1726,9 @@ class SequenceTimeline(QMainWindow):
         # Gain... on audio-track clips only (the only rows the preview audio
         # mixes); right-clicked clip only, like Enable / Solo
         gain_action = None
-        if self._track_type(self._clip_track_id(clip)) == "audio":
+        # BUILD 105: sequence clips have no footage: no Gain / Proxy
+        is_seq_clip = clip[0] in (getattr(self, "_seq_refs", None) or {})
+        if self._track_type(self._clip_track_id(clip)) == "audio" and not is_seq_clip:
             gain_action = menu.addAction("Gain...")
             menu.addSeparator()
         slice_action = menu.addAction("Slice")
@@ -1669,7 +1750,8 @@ class SequenceTimeline(QMainWindow):
         solo_action.setChecked(bool(clip[6]))
         # Proxy submenu on video / image clips only (not audio)
         proxy_actions = {}
-        if self._track_type(self._clip_track_id(clip)) in ("video", "image"):
+        if (self._track_type(self._clip_track_id(clip)) in ("video", "image")
+                and not is_seq_clip):
             from clip_proxy import add_clip_proxy_submenu
             proxy_actions = add_clip_proxy_submenu(self, menu, clip)
         menu.addSeparator()
