@@ -3,7 +3,7 @@
 # for clips (timeline 'Proxy' submenu). Values: 0 = None, else a percent
 # that has a Proxies row for the footage. Columns footage.proxy_percent and
 # clips.proxy_percent exist only in projects made by new_project.py BUILD 89+;
-# older DBs read 0 and writes are refused. The preview does not use proxies.
+# older DBs read 0 and writes are refused.
 # ASCII only.
 
 import os
@@ -11,15 +11,49 @@ import sqlite3
 import subprocess
 import sys
 
-PROXY_PERCENTS = (75, 50, 25, 10)
+PROXY_PERCENTS = (100, 75, 50, 25, 10)   # BUILD 120: 100 (MKV proxies only)
+
+# BUILD 120: several proxies may share a percent (Normal / Deinterlace /
+# double rate / IVTC). The percent stays the choice; the composite uses the
+# first mode of this order (same as sequence_player.PROXY_MODE_PREFERENCE)
+# and the menus name it, e.g. '50% (deint)'.
+MODE_PREFERENCE = ("deint", "ivtc", "deint2x", "normal")
+MODE_TAGS = {"deint": "deint", "ivtc": "IVTC", "deint2x": "deint 2x"}
 
 
-def proxy_label(pct):
-    return "None" if not pct else "%d%%" % int(pct)
+def proxy_label(pct, kind=None):
+    if not pct:
+        return "None"
+    tag = MODE_TAGS.get(kind or "normal")
+    return "%d%% (%s)" % (int(pct), tag) if tag else "%d%%" % int(pct)
+
+
+def proxy_kinds(project_db, footage_id):
+    # {pct: mode the composite uses at that percent}; {} on older tables
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
+            if "proxy_mode" not in cols:
+                return {}
+            rows = conn.execute(
+                "SELECT percentage, COALESCE(proxy_mode, 'normal') FROM Proxies "
+                "WHERE footage_id = ?", (int(footage_id),)).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    out = {}
+    for pct, mode in rows:
+        rank = MODE_PREFERENCE.index(mode) if mode in MODE_PREFERENCE else 99
+        cur = out.get(int(pct))
+        if cur is None or rank < (MODE_PREFERENCE.index(cur) if cur in MODE_PREFERENCE else 99):
+            out[int(pct)] = mode
+    return out
 
 
 def proxy_options(project_db, footage_id):
-    # [0] + percents (75/50/25/10 order) with a Proxies row for footage_id
+    # [0] + percents (100/75/50/25/10 order) with a Proxies row for footage_id
     have = set()
     try:
         conn = sqlite3.connect(project_db)
@@ -97,11 +131,11 @@ def set_clip_proxy_percent(project_db, clip_id, pct):
     return _write_percent(project_db, "clips", clip_id, pct, "Clip proxy")
 
 
-def build_proxy_menu(menu, options, current):
-    # Checkable actions on menu; returns {action: pct}
+def build_proxy_menu(menu, options, current, kinds=None):
+    # Checkable actions on menu; returns {action: pct}. kinds: proxy_kinds
     out = {}
     for pct in options:
-        act = menu.addAction(proxy_label(pct))
+        act = menu.addAction(proxy_label(pct, (kinds or {}).get(int(pct))))
         act.setCheckable(True)
         act.setChecked(int(pct) == int(current or 0))
         out[act] = int(pct)
@@ -113,7 +147,8 @@ def add_clip_proxy_submenu(timeline, menu, clip):
     db = timeline._project_db()
     sub = menu.addMenu("Proxy")
     return build_proxy_menu(sub, proxy_options(db, clip[1]),
-                            clip_proxy_percent(db, clip[0]))
+                            clip_proxy_percent(db, clip[0]),
+                            proxy_kinds(db, clip[1]))
 
 
 def apply_clip_proxy(timeline, clip, pct):

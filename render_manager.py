@@ -11,6 +11,11 @@
 # to yuv420p. Captions are not burned in.
 # Audio: the preview mix code (audio tracks, gain_db, volume keyframes)
 # rendered fresh into a temp WAV, mono or stereo (duplicated).
+# BUILD 120: 'MKV: Use 100% deinterlaced proxies' (auto-checked when the
+# sequence has an MKV clip with a 100% deinterlace / IVTC proxy file):
+# those clips decode that proxy (timeline_snapshot(tl, use_proxies=False,
+# render_deint=True)); every other clip and percent stays the original.
+# Scale math stays based on the original size.
 # ASCII only.
 
 import os
@@ -324,6 +329,23 @@ def load_render_captions(project_db, sequence_id):
     return caps, langs
 
 
+def sequence_deint_proxies(project_db, sequence_id):
+    # {clip_id: proxy} of the sequence's MKV clips that have a 100%
+    # deinterlaced (or IVTC) proxy file (the render override's choice)
+    try:
+        import sqlite3
+        conn = sqlite3.connect(project_db)
+        try:
+            tids = [r[0] for r in conn.execute(
+                "SELECT id FROM tracks WHERE sequence_id = ?", (int(sequence_id),))]
+        finally:
+            conn.close()
+        from sequence_player import resolve_proxies
+        return resolve_proxies(project_db, tids, use_proxies=False, render_deint=True)
+    except Exception:
+        return {}
+
+
 def mix_mono_pcm(project_db, sequence_id, fps, total_frames):
     # (pcm, has_audio): the preview mix for the whole range, fresh
     from sequence_preview_audio import (_load_mix_rows, _track_order,
@@ -350,6 +372,7 @@ class _RenderGpu(object):
         self.decoders = {}
         self.dec_next = {}
         self.dec_used = {}
+        self.dec_last = {}      # BUILD 120: repeat-frame reuse (frame-mapped proxies)
         self.bufs = []
 
     def _acquire(self):
@@ -363,14 +386,16 @@ class _RenderGpu(object):
 
     def _swap(self):
         p = self.player
-        saved = (p.decoders, p.dec_next, p.dec_used)
+        saved = (p.decoders, p.dec_next, p.dec_used, getattr(p, "dec_last", {}))
         p.decoders, p.dec_next, p.dec_used = self.decoders, self.dec_next, self.dec_used
+        p.dec_last = self.dec_last
         return saved
 
     def _unswap(self, saved):
         p = self.player
         self.decoders, self.dec_next, self.dec_used = p.decoders, p.dec_next, p.dec_used
-        p.decoders, p.dec_next, p.dec_used = saved
+        self.dec_last = p.dec_last
+        p.decoders, p.dec_next, p.dec_used, p.dec_last = saved
         p._target = None
 
     def frames_rgb(self, frames, snapshot):
@@ -423,6 +448,7 @@ class _RenderGpu(object):
                 self.decoders.pop(key, None)
             self.dec_next.clear()
             self.dec_used.clear()
+            self.dec_last.clear()
             try:
                 cudart = _libs()[0]
                 for b in self.bufs:
@@ -682,6 +708,13 @@ def _make_window_class():
             form.addRow("Audio", audio_row)
             self.caps_check = QCheckBox("Include captions")
             form.addRow("", self.caps_check)
+            self.deint_check = QCheckBox("MKV: Use 100% deinterlaced proxies")
+            self.deint_check.setToolTip(
+                "MKV clips with a 100% deinterlaced (or inverse telecine) proxy "
+                "render from that proxy; all other clips use the originals.")
+            self.deint_check.setChecked(
+                bool(sequence_deint_proxies(project_db, self.sequence_id)))
+            form.addRow("", self.deint_check)
             outer.addLayout(form)
             row = QHBoxLayout()
             row.addStretch(1)
@@ -695,7 +728,7 @@ def _make_window_class():
             outer.addWidget(self.status)
             outer.addStretch(1)
             self.setCentralWidget(central)
-            self.resize(520, 300)
+            self.resize(520, 330)
 
         # ---- render start (GUI thread)
 
@@ -748,7 +781,8 @@ def _make_window_class():
                 caps, langs = ([], [])
                 if self.caps_check.isChecked():
                     caps, langs = load_render_captions(project_db, self.sequence_id)
-                snapshot = timeline_snapshot(tl, use_proxies=False)
+                snapshot = timeline_snapshot(
+                    tl, use_proxies=False, render_deint=self.deint_check.isChecked())
                 try:
                     from sequence_preview_worker import _setting_int
                     chunk = _setting_int("previewGpuBatchFrames", 8, 1, 30)

@@ -336,8 +336,9 @@ class FootageManager(QMainWindow):
         if fid is None:
             return item
         try:
-            from clip_proxy import footage_proxy_percent, proxy_label
-            item.setText(proxy_label(footage_proxy_percent(self.project_db, fid)))
+            from clip_proxy import footage_proxy_percent, proxy_label, proxy_kinds
+            pct = footage_proxy_percent(self.project_db, fid)
+            item.setText(proxy_label(pct, proxy_kinds(self.project_db, fid).get(pct)))
         except Exception:
             item.setText("None")
         item.setData(Qt.UserRole + 1, fid)
@@ -353,10 +354,12 @@ class FootageManager(QMainWindow):
         if fid is None:
             return
         from clip_proxy import (proxy_options, footage_proxy_percent,
-                                build_proxy_menu, set_footage_proxy_percent)
+                                build_proxy_menu, set_footage_proxy_percent,
+                                proxy_kinds)
         menu = QMenu(self)
         actions = build_proxy_menu(menu, proxy_options(self.project_db, fid),
-                                   footage_proxy_percent(self.project_db, fid))
+                                   footage_proxy_percent(self.project_db, fid),
+                                   proxy_kinds(self.project_db, fid))
         rect = self.table.visualItemRect(item)
         chosen = menu.exec(self.table.viewport().mapToGlobal(rect.bottomLeft()))
         if chosen is None or chosen not in actions:
