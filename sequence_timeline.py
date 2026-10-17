@@ -216,6 +216,33 @@ class ClipDelegate(QStyledItemDelegate):
 _SEQ_ICON_CACHE = {}
 
 
+def moving_marker_frames(markers, group, drag_clip):
+    # BUILD 110: timeline frames, at delta 0, of the visible markers on the
+    # clips of a move drag (group entries {"clip", "start", ...}; the
+    # dragged clip itself if the group lacks it). Positive clip ids only
+    # (video / image / audio), like marker drawing.
+    from markers import visible_offset
+    out = []
+    if not markers:
+        return out
+    members = [(m["clip"], int(m.get("start", m["clip"][2]))) for m in (group or [])]
+    if drag_clip is not None and all(c[0] != drag_clip[0] for c, _s in members):
+        members.append((drag_clip, int(drag_clip[2])))
+    for c, start0 in members:
+        try:
+            if int(c[0]) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        for _mid, mframe, _rgb, _name in markers.get(c[0], ()):
+            off = visible_offset(c, mframe)
+            if off is not None:
+                f = start0 + int(off)
+                if f not in out:
+                    out.append(f)
+    return out
+
+
 def sequence_clip_icon(height, right):
     # BUILD 105: square in / out icon for sequence clips, drawn once per
     # height: a stack of three frames with 'SEQ'; the right icon is the
@@ -1311,6 +1338,11 @@ class SequenceTimeline(QMainWindow):
             if edge == "move":
                 raw = (frame_f - drag["grab_offset"]) - start
                 edges = [start, start + length]
+                # BUILD 110: visible markers of every clip moving together
+                # are snap sources too, at their drag-start (delta 0)
+                # frames. Listed after the edges so an edge wins a tie.
+                edges += moving_marker_frames(
+                    getattr(self, "_markers", None), group, drag["clip"])
             elif edge == "left":
                 raw = frame_f - start
                 edges = [start]
