@@ -20,7 +20,7 @@ def _draw_waveform(self, painter, tl, clip_rect, footage_id, in_frame, length_fr
     top, h = clip_rect.top(), clip_rect.height()
     mid = top + h // 2
     half = max(1, h // 2 - 2)
-    painter.setPen(QColor(200, 230, 200))
+    painter.setPen(QColor(240, 240, 240))   # BUILD 108 waveform color
     painter.drawLine(clip_rect.left(), mid, clip_rect.right(), mid)
     # Only the visible part of the clip
     view = painter.clipBoundingRect().toRect() if painter.hasClipping() else clip_rect

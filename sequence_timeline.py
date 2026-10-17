@@ -51,6 +51,10 @@ from PySide6.QtGui import (
 )
 
 
+# BUILD 108: clip backgrounds
+VIDEO_CLIP_BG = QColor(70, 90, 130)
+AUDIO_CLIP_BG = QColor(80, 80, 80)
+
 class ClipDelegate(QStyledItemDelegate):
     # Waveform drawing lives in sequence_timeline_audio.py
     _draw_waveform = _draw_waveform
@@ -109,7 +113,9 @@ class ClipDelegate(QStyledItemDelegate):
             if track_type == "caption":
                 paint_caption_bar(painter, clip_rect)
             else:
-                painter.fillRect(clip_rect, QColor(70, 90, 130))
+                # BUILD 108: audio clips gray; video / image keep (70, 90, 130)
+                painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
+                                 else VIDEO_CLIP_BG)
             text_rect = QRect(clip_rect)
             seq_ref = (getattr(tl, "_seq_refs", None) or {}).get(clip_id)
             if track_type == "caption":
@@ -118,7 +124,9 @@ class ClipDelegate(QStyledItemDelegate):
             elif seq_ref is not None:
                 # BUILD 105: sequence clip, left / right sequence icons and
                 # the child name (no footage icon, waveform or peaks)
-                painter.fillRect(clip_rect, QColor(80, 60, 120))
+                # BUILD 108: track colors (video blue / audio gray)
+                painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
+                                 else VIDEO_CLIP_BG)
                 ih = rect.height()
                 lpix = sequence_clip_icon(ih, False)
                 rpix = sequence_clip_icon(ih, True)
