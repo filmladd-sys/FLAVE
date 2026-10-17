@@ -542,19 +542,25 @@ def drop_footage(self, footage_id, row, x_in_clips):
         # also add a linked audio clip on the first audio track, both
         # sized from the peaks duration
         audio_track_id = None
+        audio_full = False
         if track_type == "video":
             peak_seconds = self._peaks_seconds(cur, footage_id)
-            audio_track_id = self._first_audio_track_id(cur) if peak_seconds > 0 else None
-            if audio_track_id is not None:
+            if peak_seconds > 0 and self._first_audio_track_id(cur) is not None:
                 length_frames = max(1, int(round(peak_seconds * self.fps)))
+                # BUILD 109: nearest audio track below the video with room,
+                # else nearest above (video over audio); none with room
+                # refuses the drop as before
+                audio_track_id = _nearest_free_track(
+                    self, cur, track_id, ("audio",), start_frame, length_frames,
+                    prefer_below=True)
+                audio_full = audio_track_id is None
         # Refuse the drop (insert nothing) if the video clip or its linked
         # audio clip would overlap a clip already on its track
         if track_type == "video":
             refused = None
             if self._range_overlaps(cur, track_id, start_frame, length_frames):
                 refused = "video"
-            elif (audio_track_id is not None and
-                  self._range_overlaps(cur, audio_track_id, start_frame, length_frames)):
+            elif audio_full:
                 refused = "audio"
             if refused:
                 conn.close()
@@ -928,6 +934,30 @@ def _first_free_track(self, cur, kinds, start, length):
     return None
 
 
+def _nearest_free_track(self, cur, target_id, kinds, start, length, prefer_below):
+    # BUILD 109: on-screen stack order is ORDER BY sort_order, id (table
+    # row 0 = top = smallest sort_order). Nearest track of kinds with no
+    # clip in [start, start + length): scanning down from the target first
+    # if prefer_below, else up first; then the other direction. None if
+    # every track of that kind is busy (or there is none).
+    rows = cur.execute(
+        "SELECT id, LOWER(COALESCE(track_type, '')) FROM tracks "
+        "WHERE sequence_id = ? ORDER BY sort_order, id",
+        (self.sequence_id,)).fetchall()
+    order = [int(r[0]) for r in rows]
+    kind_of = {int(r[0]): r[1] for r in rows}
+    if int(target_id) not in order:
+        return None
+    i = order.index(int(target_id))
+    below = order[i + 1:]
+    above = list(reversed(order[:i]))
+    for group in ((below, above) if prefer_below else (above, below)):
+        for tid in group:
+            if kind_of[tid] in kinds and not self._range_overlaps(cur, tid, start, length):
+                return tid
+    return None
+
+
 def _seq_refuse(self, text):
     self.status_bar.showMessage(text, 5000)
     QMessageBox.information(self, "Add Sequence Clip", text)
@@ -1000,7 +1030,11 @@ def drop_sequence(self, child_id, row, x_in_clips):
                                              "%s and this sequence has no %s track"
                                        % (kind, kind))
                 continue        # no track of that kind: skip, like footage
-            tid = _first_free_track(self, cur, kinds_of[kind], start_frame, length)
+            # BUILD 109: linked audio goes below a video target (else
+            # above); linked video goes above an audio target (else below)
+            tid = _nearest_free_track(self, cur, track_id, kinds_of[kind],
+                                      start_frame, length,
+                                      prefer_below=(kind == "audio"))
             if tid is None:
                 conn.close()
                 return _seq_refuse(self, "Drop refused: no %s track has room at "
