@@ -156,15 +156,25 @@ class RulerHeader(QHeaderView):
         x = int(event.position().x())
         if self.logicalIndexAt(x) == CLIPS_COL and event.button() == Qt.LeftButton:
             self._dragging = True
-            self.timeline.set_current_frame(self._frame_at(x))
+            self._scrub_to(self._frame_at(x))
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._dragging:
-            self.timeline.set_current_frame(self._frame_at(int(event.position().x())))
+            self._scrub_to(self._frame_at(int(event.position().x())))
             return
         super().mouseMoveEvent(event)
+
+    def _scrub_to(self, frame):
+        # BUILD 111: move the playhead; if the frame changed (and not
+        # playing), a one-frame audio burst from the preview mix WAV
+        tl = self.timeline
+        before = tl.current_frame
+        tl.set_current_frame(frame)
+        if tl.current_frame != before:
+            from sequence_player_audio import scrub_burst
+            scrub_burst(tl)
 
     def wheelEvent(self, event):
         self.timeline.wheel_pan(event)

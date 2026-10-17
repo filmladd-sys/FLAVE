@@ -260,3 +260,173 @@ class PreviewAudioPlayer(object):
     def resync_if_drift(self, frame, threshold_ms=80):
         # Neutralized: audio is the play-clock master. Kept as a no-op.
         return
+
+
+# ---------------------------------------------------------------- BUILD 111
+# Scrub audio burst: about one frame of the existing preview mix WAV at the
+# new playhead when the ruler is clicked / dragged while stopped. Never
+# builds the mix (no .sig check: a stale WAV is fine), never touches the
+# play sink, the play clock or the preview video path.
+
+BURST_RAMP_SAMPLES = 32     # short linear fade in / out against clicks
+
+
+def burst_slice_bounds(frame, fps, n_bytes, sample_rate=SAMPLE_RATE,
+                       channels=CHANNELS, width=SAMPLE_WIDTH):
+    # (start_byte, end_byte) of one frame of audio (round(rate / fps)
+    # samples) at sequence frame, block aligned and clipped to n_bytes.
+    # (0, 0) or an empty range when the frame is past the end.
+    try:
+        fps = float(fps)
+    except Exception:
+        fps = 29.97
+    if fps <= 0:
+        fps = 29.97
+    block = max(1, int(width) * int(channels))
+    start = byte_offset_for_frame(frame, fps, sample_rate, width, channels)
+    start -= start % block
+    count = max(1, int(round(float(sample_rate) / fps)))
+    end = start + count * block
+    limit = int(n_bytes) - (int(n_bytes) % block)
+    start = max(0, min(start, limit))
+    end = max(start, min(end, limit))
+    return start, end
+
+
+def ramp_pcm16(data, channels=CHANNELS, ramp=BURST_RAMP_SAMPLES):
+    # Linear fade in over the first ramp sample frames and out over the
+    # last ramp, Int16 little-endian interleaved. Returns new bytes.
+    import array
+    import sys
+    a = array.array("h")
+    a.frombytes(bytes(data))
+    if sys.byteorder != "little":
+        a.byteswap()
+    ch = max(1, int(channels))
+    frames = len(a) // ch
+    r = min(int(ramp), frames // 2)
+    for i in range(r):
+        g = float(i) / float(r)
+        for c in range(ch):
+            a[i * ch + c] = int(a[i * ch + c] * g)
+            j = (frames - 1 - i) * ch + c
+            a[j] = int(a[j] * g)
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a.tobytes()
+
+
+class ScrubBurst(object):
+    # Own QAudioSink and buffer; a new burst stops and replaces the last
+    # one (coalescing during a fast drag). start() returns at once: Qt
+    # pulls the small buffer on its audio thread, so the UI never blocks.
+
+    def __init__(self):
+        self.path = None
+        self._stamp = None
+        self._pcm = b""
+        self._rate = SAMPLE_RATE
+        self._ch = CHANNELS
+        self._width = SAMPLE_WIDTH
+        self._sink = None
+        self._sink_fmt = None
+        self._qba = None
+        self._buf = None
+        self.last_frame = None
+
+    def load(self, wav_path, shared=None):
+        # Cached PCM, reloaded only when path / size / mtime change (BUILD
+        # 79 rule). shared: a PreviewAudioPlayer whose PCM can be reused.
+        path = os.path.abspath(wav_path) if wav_path else None
+        if not path or not os.path.isfile(path):
+            return False
+        try:
+            st = os.stat(path)
+            stamp = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            return False
+        if path == self.path and stamp == self._stamp and self._pcm:
+            return True
+        if (shared is not None and getattr(shared, "wav_path", None) == path
+                and getattr(shared, "_wav_stamp", None) == stamp
+                and getattr(shared, "_pcm", b"")):
+            self._pcm = shared._pcm
+            self._rate, self._ch, self._width = (
+                shared._sample_rate, shared._channels, shared._width)
+        else:
+            loaded = _read_wav_pcm(path)
+            if not loaded:
+                return False
+            self._pcm, self._rate, self._ch, self._width = loaded
+        self.path = path
+        self._stamp = stamp
+        return True
+
+    def slice_for(self, frame, fps):
+        s, e = burst_slice_bounds(frame, fps, len(self._pcm), self._rate,
+                                  self._ch, self._width)
+        if e <= s:
+            return b""
+        return ramp_pcm16(self._pcm[s:e], self._ch)
+
+    def play(self, frame, fps):
+        data = self.slice_for(frame, fps)
+        if not data:
+            return False
+        QBuffer, QByteArray, QIODevice, QAudioFormat, QAudioSink = _qt_audio()
+        fmt_key = (self._rate, self._ch)
+        if self._sink is not None and self._sink_fmt != fmt_key:
+            self.stop()
+            self._sink = None
+        if self._sink is None:
+            fmt = QAudioFormat()
+            fmt.setSampleRate(int(self._rate))
+            fmt.setChannelCount(int(self._ch))
+            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            self._sink = QAudioSink(fmt)
+            self._sink_fmt = fmt_key
+        try:
+            self._sink.stop()          # replaces a burst still playing
+        except Exception:
+            pass
+        self._qba = QByteArray(data)
+        self._buf = QBuffer(self._qba)
+        if not self._buf.open(QIODevice.OpenModeFlag.ReadOnly):
+            return False
+        self._sink.start(self._buf)    # stops by itself at buffer end
+        self.last_frame = int(frame)
+        return True
+
+    def stop(self):
+        if self._sink is not None:
+            try:
+                self._sink.stop()
+            except Exception:
+                pass
+
+
+def scrub_burst(timeline):
+    # Ruler click / drag hook: one frame of mix audio at the playhead when
+    # stopped and this sequence's player is open. Missing WAV: no-op.
+    try:
+        if getattr(timeline, "_playing", False) or getattr(timeline, "_play_filling", False):
+            return False
+        player = getattr(timeline, "_player", None)
+        if player is None or getattr(player, "closed", True):
+            return False
+        frame = int(timeline.current_frame)
+        from sequence_preview_audio import preview_audio_wav_path
+        wav = preview_audio_wav_path(timeline._project_db(), timeline.sequence_id)
+        if not wav or not os.path.isfile(wav):
+            return False
+        burst = getattr(player, "_scrub_burst", None)
+        if burst is None:
+            burst = ScrubBurst()
+            player._scrub_burst = burst
+        if not burst.load(wav, getattr(player, "_preview_audio", None)):
+            return False
+        fps = float(getattr(timeline, "fps", 30) or 30)
+        return burst.play(frame, fps)
+    except Exception as e:
+        # print("scrub burst failed: %s" % e)
+        return False
