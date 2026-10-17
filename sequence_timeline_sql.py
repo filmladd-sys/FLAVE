@@ -1073,3 +1073,82 @@ def prune_sequence_children(cur, pairs):
                         "AND child_id = ?", (parent, child))
             removed += cur.rowcount
     return removed
+
+
+# ---------------------------------------------------------------- BUILD 107
+# Delete Track (track header menu): the tracks row and everything on it, in
+# the caller's transaction / one undo snapshot.
+
+def delete_track_rows(cur, track_id):
+    # Deletes clips (+ their markers and BUILD 106 sequence_children
+    # pruning), keyframe clips (+ their keys), captions and the track row.
+    # Returns [(first, last)] frame ranges of what was removed (for preview
+    # dirty marking). Linked partners on other tracks are not touched.
+    tid = int(track_id)
+    ranges = []
+
+    def _try(sql, args=()):
+        try:
+            return cur.execute(sql, args).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    clip_rows = _try("SELECT id, start_frame, length_frames FROM clips "
+                     "WHERE track_id = ?", (tid,))
+    clip_ids = [int(r[0]) for r in clip_rows]
+    ranges += [(int(s), int(s) + max(1, int(n)) - 1) for _i, s, n in clip_rows]
+    if clip_ids:
+        pairs = sequence_pairs_for(cur, clip_ids)
+        cur.execute("DELETE FROM clips WHERE track_id = ?", (tid,))
+        prune_sequence_children(cur, pairs)
+        from markers import delete_markers
+        delete_markers(cur, clip_ids)
+    kf_rows = _try("SELECT id, in_frame, out_frame FROM keyframe_clips "
+                   "WHERE track_id = ?", (tid,))
+    if kf_rows:
+        marks = ",".join("?" for _ in kf_rows)
+        cur.execute("DELETE FROM keyframes WHERE keyframe_clip_id IN (%s)" % marks,
+                    [int(r[0]) for r in kf_rows])
+        cur.execute("DELETE FROM keyframe_clips WHERE track_id = ?", (tid,))
+        ranges += [(int(a), max(int(a), int(b) - 1)) for _i, a, b in kf_rows]
+    cap_rows = _try("SELECT start_frame, length_frames FROM captions "
+                    "WHERE track_id = ?", (tid,))
+    if cap_rows:
+        cur.execute("DELETE FROM captions WHERE track_id = ?", (tid,))
+    cur.execute("DELETE FROM tracks WHERE id = ?", (tid,))
+    return ranges
+
+
+def delete_track(self, track_id):
+    # Header menu Delete Track: confirm (default No), then one undo snapshot
+    project_db = self._project_db()
+    if not project_db:
+        return
+    answer = QMessageBox.question(
+        self, "Delete Track", "Are you sure?",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    if answer != QMessageBox.Yes:
+        return
+    from undo import push_undo
+    push_undo(project_db, "Delete track")
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            ranges = delete_track_rows(conn.cursor(), track_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Delete Track", f"Could not delete track: {e}")
+        return
+    self._selected_clip_ids = set()
+    self._selection_order = []
+    self._selection_solo = False
+    if ranges:
+        # Picture under the removed clips changes (audio re-mixes on Play
+        # by its signature)
+        self._mark_preview_dirty(ranges)
+    # Reload: timeline, player, preview worker, Sequence Manager counts
+    self._after_clip_change("Deleted track")

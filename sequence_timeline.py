@@ -36,7 +36,7 @@ from sequence_timeline_sql import (
     _load_sequence_duration, _latest_clip_end, sequence_length_seconds, _load_sequence_fps,
     _add_track, refresh, _save_track_display, _move_track,
     _toggle_track_flag, drop_footage, _range_overlaps, delete_selected_clip,
-    drop_sequence, sequence_id_from_mime,
+    drop_sequence, sequence_id_from_mime, delete_track,
     slice_clip, ripple_delete, _toggle_clip_flag,
 )
 from PySide6.QtWidgets import (
@@ -394,6 +394,7 @@ class SequenceTimeline(QMainWindow):
     _toggle_track_flag = _toggle_track_flag
     drop_footage = drop_footage
     drop_sequence = drop_sequence
+    delete_track = delete_track
     _range_overlaps = _range_overlaps
     delete_selected_clip = delete_selected_clip
     slice_clip = slice_clip
@@ -663,6 +664,8 @@ class SequenceTimeline(QMainWindow):
         solo_action.setCheckable(True)
         solo_action.setChecked(bool(name_item.data(Qt.UserRole + 2)))
         display_action = menu.addAction("Track Display Properties")
+        menu.addSeparator()
+        delete_track_action = menu.addAction("Delete Track")
         ripple_action = None
         add_caption_action = None
         add_keyframe_action = None
@@ -699,6 +702,8 @@ class SequenceTimeline(QMainWindow):
             self._toggle_track_flag(track_id, "solo")
         elif action == display_action:
             self._track_display_properties(track_id)
+        elif action == delete_track_action:
+            self.delete_track(track_id)
 
     def _track_display_properties(self, track_id):
         project_db = self._project_db()
