@@ -2363,6 +2363,16 @@ class SequenceTimeline(QMainWindow):
             if force or snap is None:
                 snap = timeline_snapshot(self)
                 self._preview_snapshot = snap
+                # BUILD 102: player caption overlay data, same refresh
+                old_caps = getattr(self, "_caption_snapshot", None)
+                try:
+                    from player_captions import caption_snapshot
+                    self._caption_snapshot = caption_snapshot(self)
+                except Exception:
+                    self._caption_snapshot = None
+                if (self._caption_snapshot or []) != (old_caps or []):
+                    # Redraw the shown frame so a caption edit appears now
+                    self._update_player()
             get_worker().retarget(self._project_db(), self.sequence_id, frame,
                                   self.total_frames(), snap,
                                   getattr(self, "fps", None))

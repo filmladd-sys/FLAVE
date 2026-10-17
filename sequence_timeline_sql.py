@@ -360,6 +360,8 @@ def refresh(self):
         for track_clips in clips.values():
             track_clips.sort(key=lambda c: (c[2], c[0]))
         self.clips_by_track = clips
+        # BUILD 102: player caption overlay rebuilds from the new rows
+        self._caption_snapshot = None
         conn.close()
     except Exception as e:
         self.status_bar.showMessage(f"DB error: {e}")

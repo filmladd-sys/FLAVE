@@ -1202,7 +1202,61 @@ class SequencePlayer(QWindow):
             gl.glTexCoord2f(0, 0)
             gl.glVertex2f(-vw, vh)
             gl.glEnd()
+            gl.glBindTexture(GL_TEXTURE_2D, 0)
+            gl.glDisable(GL_TEXTURE_2D)
+            # BUILD 102: soft captions on top of the presented picture
+            # (QPainter overlay, never in the composite or preview cache)
+            try:
+                self._paint_captions(vw, vh, win_w, win_h, ratio)
+            except Exception as e:
+                print(f"Sequence Player caption overlay failed: {e}")
         self.ctx.swapBuffers(self)
+
+    def _caption_snap(self):
+        # Per timeline snapshot (refreshed with _preview_snapshot)
+        tl = self.timeline
+        snap = getattr(tl, "_caption_snapshot", None)
+        if snap is None:
+            from player_captions import caption_snapshot
+            snap = caption_snapshot(tl)
+            tl._caption_snapshot = snap
+        return snap
+
+    def _paint_captions(self, vw, vh, win_w, win_h, ratio):
+        from player_captions import captions_at, paint_captions
+        snap = self._caption_snap()
+        frame = int(self.timeline.current_frame)
+        if not captions_at(snap, frame):
+            return
+        from PySide6.QtGui import QPainter
+        from PySide6.QtOpenGL import QOpenGLPaintDevice
+        from PySide6.QtCore import QSize
+        f = self.ctx.functions()
+        f.glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)   # glyph uploads from memory
+        dev = getattr(self, "_cap_dev", None)
+        if dev is None:
+            dev = QOpenGLPaintDevice()
+            self._cap_dev = dev
+        dev.setSize(QSize(win_w, win_h))
+        dev.setDevicePixelRatio(ratio)
+        lw, lh = win_w / ratio, win_h / ratio
+        pw, ph = vw * lw, vh * lh
+        painter = QPainter(dev)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.TextAntialiasing)
+            paint_captions(painter, snap, frame, (lw - pw) / 2.0,
+                           (lh - ph) / 2.0, pw, ph, self.seq_w, self.seq_h)
+        finally:
+            painter.end()
+        # Back to the fixed-function state the textured quad expects
+        f.glUseProgram(0)
+        f.glBindBuffer(0x8892, 0)        # GL_ARRAY_BUFFER
+        f.glActiveTexture(0x84C0)        # GL_TEXTURE0
+        f.glDisable(0x0BE2)              # GL_BLEND
+        f.glDisable(0x0C11)              # GL_SCISSOR_TEST
+        f.glDisable(0x0B90)              # GL_STENCIL_TEST
+        f.glDisable(0x0B71)              # GL_DEPTH_TEST
 
 
 
