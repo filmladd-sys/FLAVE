@@ -168,6 +168,26 @@ def paste(tl, anchor, make_room):
             else:
                 st["deleted"] = True
             state[c[0]] = st
+    # BUILD 106: sequence clips in the paste must pass the self / cycle
+    # check against this sequence, else the whole paste is refused
+    children = set()
+    for it in ok:
+        if it["table"] == "clips" and it["row"].get("sequence_id_ref") is not None:
+            children.add(int(it["row"]["sequence_id_ref"]))
+    if children:
+        from sequence_timeline_sql import sequence_contains
+        conn = sqlite3.connect(project)
+        try:
+            bad = [ch for ch in children
+                   if sequence_contains(conn.cursor(), ch, int(tl.sequence_id))]
+        finally:
+            conn.close()
+        if bad:
+            text = ("Paste refused: a pasted sequence clip would put this "
+                    "sequence inside itself (directly or through nesting).")
+            tl.status_bar.showMessage(text, 5000)
+            QMessageBox.information(tl, "Paste", text)
+            return
     from undo import push_undo
     push_undo(project, "Paste clips")
     ranges = []
@@ -177,6 +197,10 @@ def paste(tl, anchor, make_room):
         conn = sqlite3.connect(project)
         cur = conn.cursor()
         trimmed = deleted = 0
+        # BUILD 106: pairs of sequence clips the overwrite deletes
+        from sequence_timeline_sql import sequence_pairs_for, prune_sequence_children
+        seq_pairs = sequence_pairs_for(
+            cur, [m for m, st in state.items() if st["deleted"]])
         for mem_id, st in state.items():
             table, row_id = clip_table_and_id(mem_id)
             ranges.append((st["orig_cs"], st["orig_ce"] - 1))
@@ -250,6 +274,12 @@ def paste(tl, anchor, make_room):
             if it["link_id"] is not None:
                 groups.setdefault(it["link_id"], []).append((table, new_id, mem))
             ranges.append((s, s + it["length"] - 1))
+        # BUILD 106: pasted sequence clips get their sequence_children row;
+        # then drop rows the overwrite left without a referencing clip
+        for ch in children:
+            cur.execute("INSERT OR IGNORE INTO sequence_children (parent_id, "
+                        "child_id) VALUES (?, ?)", (int(tl.sequence_id), ch))
+        prune_sequence_children(cur, seq_pairs)
         # New link_id per original group (first pasted member's in-memory
         # id, as Link does); a lone pasted member stays unlinked
         for members in groups.values():

@@ -71,20 +71,21 @@ SEQUENCE_MIME = "application/x-ladd-sequence-id"
 
 
 class SequenceTable(QTableWidget):
-    # Drop a row onto another row to nest it. Never reorders rows.
+    # BUILD 106: drag source only (drop a sequence on a Sequence Timeline).
+    # Accepts no drops; the old row-on-row nesting drop is removed.
     def __init__(self, manager):
         super().__init__()
         self.manager = manager
         self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.viewport().setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.setDefaultDropAction(Qt.MoveAction)
+        self.setAcceptDrops(False)
+        self.viewport().setAcceptDrops(False)
+        self.setDropIndicatorShown(False)
+        self.setDragDropMode(QAbstractItemView.DragOnly)
+        self.setDefaultDropAction(Qt.CopyAction)
         self.setDragDropOverwriteMode(False)
 
     def mimeData(self, items):
-        # BUILD 105: default row data (internal nesting drop) plus the
+        # BUILD 105: default row data plus the
         # sequence id for a drop onto a Sequence Timeline
         mime = super().mimeData(items)
         try:
@@ -101,35 +102,6 @@ class SequenceTable(QTableWidget):
             return None
         item = self.item(row, 0)
         return item.data(Qt.UserRole) if item is not None else None
-
-    def dragEnterEvent(self, event):
-        if event.source() is self:
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.source() is self:
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        # Custom handler: read source and target ids, insert, never move rows
-        if event.source() is not self:
-            event.ignore()
-            return
-        source_id = self._row_id(self.currentRow())
-        target_row = self.rowAt(event.position().toPoint().y())
-        target_id = self._row_id(target_row)
-        event.setDropAction(Qt.IgnoreAction)
-        event.accept()
-        if source_id is None or target_id is None:
-            return
-        if source_id == target_id:
-            self.manager.status_bar.showMessage("Cannot nest a sequence in itself")
-            return
-        self.manager.nest_sequence(target_id, source_id)
 
 
 CLIP_COUNT_TYPES = ("video", "image", "audio")
@@ -443,29 +415,6 @@ class SequenceManager(QMainWindow):
         header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-
-    def nest_sequence(self, parent_id, child_id):
-        if parent_id == child_id:
-            return
-        try:
-            _ensure_children_table(self.project_db)
-            conn = sqlite3.connect(self.project_db)
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT OR IGNORE INTO sequence_children (parent_id, child_id) VALUES (?, ?)",
-                (parent_id, child_id)
-            )
-            added = cur.rowcount
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            QMessageBox.warning(self, "Nest Sequence", f"Could not nest sequence: {e}")
-            return
-        self.refresh()
-        if added:
-            self.status_bar.showMessage("Sequence nested")
-        else:
-            self.status_bar.showMessage("Already nested")
 
     def _restore_geometry(self):
         try:

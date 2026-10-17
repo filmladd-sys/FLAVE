@@ -11,7 +11,8 @@ import sqlite3
 import time
 
 SNAP_TABLES = ("clips", "keyframe_clips", "keyframes", "tracks", "footage",
-               "sequences", "captions", "Marker")
+               "sequences", "captions", "Marker",
+               "sequence_children")   # BUILD 106: follows sequence clips
 DEFAULT_STACK_MAX = 50
 WHOLE_RANGE = (0, 2 ** 40)
 

@@ -633,9 +633,12 @@ def delete_selected_clip(self):
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
+        # BUILD 106: (parent, child) of deleted sequence clips, read first
+        seq_pairs = sequence_pairs_for(cur, ids)
         for cid in ids:
             table, row_id = clip_table_and_id(cid)
             cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        prune_sequence_children(cur, seq_pairs)
         # Their markers go too (same undo snapshot)
         from markers import delete_markers
         delete_markers(cur, ids)
@@ -1033,3 +1036,40 @@ def drop_sequence(self, child_id, row, x_in_clips):
         f"Added sequence clip at frame {start_frame} ({main_kind}"
         + (" + linked clip" if len(placements) > 1 else "") + ")", 3000)
     return True
+
+
+# ---------------------------------------------------------------- BUILD 106
+# sequence_children follows the sequence clips: a delete removes the
+# (parent, child) row once no sequence clip in parent still references child.
+
+def sequence_pairs_for(cur, mem_ids):
+    # {(parent_sequence_id, child_sequence_id)} for the sequence clips among
+    # mem_ids (positive clips ids only). Call BEFORE deleting the rows.
+    ids = [int(i) for i in mem_ids if i is not None and int(i) > 0]
+    if not ids:
+        return set()
+    marks = ",".join("?" for _ in ids)
+    try:
+        rows = cur.execute(
+            "SELECT t.sequence_id, c.sequence_id_ref FROM clips c "
+            "JOIN tracks t ON t.id = c.track_id "
+            "WHERE c.sequence_id_ref IS NOT NULL AND c.id IN (%s)" % marks,
+            ids).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {(int(p), int(ch)) for p, ch in rows}
+
+
+def prune_sequence_children(cur, pairs):
+    # Delete each (parent, child) row with no remaining referencing clip
+    removed = 0
+    for parent, child in pairs:
+        left = cur.execute(
+            "SELECT 1 FROM clips c JOIN tracks t ON t.id = c.track_id "
+            "WHERE t.sequence_id = ? AND c.sequence_id_ref = ? LIMIT 1",
+            (parent, child)).fetchone()
+        if left is None:
+            cur.execute("DELETE FROM sequence_children WHERE parent_id = ? "
+                        "AND child_id = ?", (parent, child))
+            removed += cur.rowcount
+    return removed
