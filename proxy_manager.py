@@ -191,9 +191,10 @@ def nvenc_available(encoder=PROXY_ENCODER, w=None, h=None):
 
 def probe_size(src):
     # (width, height) of the first video stream via ffprobe, or None
+    # (BUILD 118: V:0 skips attached pictures / cover art)
     try:
         code, out, _err = _run([
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "ffprobe", "-v", "error", "-select_streams", "V:0",
             "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", src])
     except OSError:
         return None
@@ -227,8 +228,11 @@ def build_proxy_cmd(src, out, w, h):
     # so MP4 players recognise the HEVC track. No CPU filter; the 8-bit
     # conversion is scale_cuda format=yuv420p (no -pix_fmt: it would force a
     # software auto_scale from CUDA frames and fail).
+    # BUILD 118: first real video stream only (0:V:0 skips cover art); no
+    # audio, subtitle, data or attachment streams (MKV safe).
     return ["ffmpeg", "-y", "-hide_banner", "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda", "-i", src, "-map", "0:v:0", "-an",
+            "-hwaccel_output_format", "cuda", "-i", src, "-map", "0:V:0", "-an",
+            "-sn", "-dn",
             "-vf", "scale_cuda=%d:%d:format=yuv420p" % (int(w), int(h)),
             "-c:v", PROXY_ENCODER, "-preset", "p4",
             "-g", "15", "-tag:v", "hvc1", out]

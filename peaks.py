@@ -149,7 +149,11 @@ def _bucket_peaks(samples, out):
 def extract_mono_pcm(path):
     # Shared import/backfill FFmpeg pass: mono 48 kHz s16le PCM bytes, or None
     # if ffmpeg fails or the file has no audio stream. Never raises.
-    cmd = ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1",
+    # BUILD 118: first audio stream only (-map 0:a:0); ffmpeg's default
+    # pick is the "best" stream (most channels), e.g. a second MKV track.
+    # No video / subtitle / data streams are read.
+    cmd = ["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0",
+           "-vn", "-sn", "-dn", "-ac", "1",
            "-ar", str(PEAKS_SAMPLE_RATE), "-f", "s16le", "-"]
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # no console window
     try:

@@ -131,11 +131,12 @@ def apply_clip_proxy(timeline, clip, pct):
 
 
 def probe_video_info(path):
-    # (width, height, codec_name) of stream v:0 via ffprobe, or None
+    # (width, height, codec_name) of stream V:0 via ffprobe, or None.
+    # BUILD 118: V (not v) skips attached pictures / cover art
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # CREATE_NO_WINDOW
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            ["ffprobe", "-v", "error", "-select_streams", "V:0",
              "-show_entries", "stream=width,height,codec_name",
              "-of", "default=noprint_wrappers=1", path],
             capture_output=True, text=True, timeout=20, creationflags=flags)
