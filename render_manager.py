@@ -1,6 +1,8 @@
 # render_manager.py
 # BUILD 116: Render Manager, first version. MP4 only (H.264 High + AAC,
 # optional mov_text captions). Whole sequence, no progress bar, no in/out.
+# BUILD 117: Codec choice H.264 (h264_nvenc / libx264, High) or H.265
+# (hevc_nvenc / libx265, Main, -tag:v hvc1); default output is a full path.
 # One window per sequence, opened from the Sequence Timeline 'Render' menu.
 # Video: the preview composite (timeline_snapshot(tl, use_proxies=False),
 # same CUDA blend_layer, scale / position / opacity keyframes) run on the
@@ -30,7 +32,9 @@ DEFAULT_TARGET_MBPS = 5.0
 DEFAULT_BURST_MBPS = 10.0
 
 _open_windows = {}          # sequence_id -> RenderManagerWindow
-_encoder_cache = {}         # "h264" -> encoder name chosen this session
+_nvenc_ok = {}              # BUILD 117: NVENC encoder name -> test encode ok
+# BUILD 117: codec choice -> (NVENC encoder, CPU fallback)
+CODECS = (("H.264", "h264_nvenc", "libx264"), ("H.265", "hevc_nvenc", "libx265"))
 
 # 2-letter -> ISO 639-2 for the MP4 language tag (3-letter kept as is)
 _LANG3 = {"en": "eng", "fr": "fra", "es": "spa", "de": "deu", "it": "ita",
@@ -83,6 +87,17 @@ def _sanitize(name):
 
 def default_output_name(sequence_name):
     return "%s_v01.mp4" % _sanitize(sequence_name)
+
+
+def default_output_path(sequence_name, project_db):
+    # BUILD 117: project folder + '<name>_v01.mp4', shown with forward
+    # slashes (P:/PythonVidTest/Sequence01_v01.mp4); Windows and ffmpeg
+    # accept them. Bare name if there is no project path.
+    name = default_output_name(sequence_name)
+    if not project_db:
+        return name
+    folder = os.path.dirname(os.path.abspath(project_db))
+    return os.path.join(folder, name).replace("\\", "/")
 
 
 def resolve_output_path(text, project_db):
@@ -199,6 +214,14 @@ def build_ffmpeg_cmd(out_path, width, height, fps, encoder, gop, target_mbps,
     if encoder == "h264_nvenc":
         cmd += ["-c:v", "h264_nvenc", "-profile:v", "high", "-rc", "vbr",
                 "-b:v", t, "-maxrate", b, "-bufsize", b, "-g", str(int(gop))]
+    elif encoder == "hevc_nvenc":
+        cmd += ["-c:v", "hevc_nvenc", "-profile:v", "main", "-rc", "vbr",
+                "-b:v", t, "-maxrate", b, "-bufsize", b, "-g", str(int(gop)),
+                "-tag:v", "hvc1"]
+    elif encoder == "libx265":
+        cmd += ["-c:v", "libx265", "-profile:v", "main",
+                "-b:v", t, "-maxrate", b, "-bufsize", b, "-g", str(int(gop)),
+                "-tag:v", "hvc1"]
     else:
         cmd += ["-c:v", "libx264", "-profile:v", "high",
                 "-b:v", t, "-maxrate", b, "-bufsize", b, "-g", str(int(gop))]
@@ -216,30 +239,52 @@ def build_ffmpeg_cmd(out_path, width, height, fps, encoder, gop, target_mbps,
     return cmd
 
 
-def pick_encoder(ffmpeg="ffmpeg"):
-    # h264_nvenc if listed by -encoders AND a tiny test encode works (a
-    # listed NVENC can still fail with no NVIDIA GPU / driver), else
-    # libx264. Cached per session. Raises OSError if ffmpeg is missing.
-    if "h264" in _encoder_cache:
-        return _encoder_cache["h264"]
-    proc = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          creationflags=_no_window_flags())
-    listed = proc.stdout.decode("ascii", "replace")
-    enc = "libx264"
-    if " h264_nvenc " in listed:
+def codec_encoders(codec):
+    # (nvenc, fallback) for 'H.264' / 'H.265'; H.264 if unknown
+    for name, nv, cpu in CODECS:
+        if name == codec:
+            return nv, cpu
+    return CODECS[0][1], CODECS[0][2]
+
+
+def nvenc_works(encoder, ffmpeg="ffmpeg", listed=None):
+    # Listed by -encoders AND a tiny test encode works (a listed NVENC can
+    # still fail with no NVIDIA GPU / driver). Cached per encoder.
+    if encoder in _nvenc_ok:
+        return _nvenc_ok[encoder]
+    if listed is None:
+        listed = _list_encoders(ffmpeg)
+    ok = False
+    if (" %s " % encoder) in listed:
         test = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-             "-i", "color=c=black:s=256x144:r=30:d=0.2", "-c:v", "h264_nvenc",
+             "-i", "color=c=black:s=256x144:r=30:d=0.2", "-c:v", encoder,
              "-f", "null", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=_no_window_flags())
-        if test.returncode == 0:
-            enc = "h264_nvenc"
-    elif " libx264 " not in listed:
-        raise OSError("ffmpeg has neither h264_nvenc nor libx264")
-    _encoder_cache["h264"] = enc
-    return enc
+        ok = test.returncode == 0
+    _nvenc_ok[encoder] = ok
+    return ok
+
+
+def _list_encoders(ffmpeg="ffmpeg"):
+    proc = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          creationflags=_no_window_flags())
+    return proc.stdout.decode("ascii", "replace")
+
+
+def pick_encoder(codec="H.264", ffmpeg="ffmpeg"):
+    # NVENC encoder of the codec if its test encode works, else the CPU
+    # encoder (libx264 / libx265). Raises OSError if ffmpeg is missing or
+    # has neither.
+    nv, cpu = codec_encoders(codec)
+    listed = _list_encoders(ffmpeg)
+    if nvenc_works(nv, ffmpeg, listed):
+        return nv
+    if (" %s " % cpu) not in listed:
+        raise OSError("ffmpeg has neither %s nor %s" % (nv, cpu))
+    return cpu
 
 
 # ---------------------------------------------------------------- DB reads
@@ -469,7 +514,8 @@ class RenderJob(object):
                     lang = language_tag(p.get("languages", []))
             if self.cancelled:
                 return False, "Render cancelled."
-            enc = p.get("encoder") or pick_encoder(p.get("ffmpeg", "ffmpeg"))
+            enc = p.get("encoder") or pick_encoder(p.get("codec", "H.264"),
+                                                   p.get("ffmpeg", "ffmpeg"))
             cmd = build_ffmpeg_cmd(out_path, p["width"], p["height"], p["fps"],
                                    enc, p["gop"], p["target_mbps"], p["burst_mbps"],
                                    p["faststart"], wav, p["stereo"], srt, lang,
@@ -572,7 +618,7 @@ def _make_window_class():
     from PySide6.QtWidgets import (
         QMainWindow, QWidget, QFormLayout, QVBoxLayout, QHBoxLayout,
         QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QRadioButton,
-        QButtonGroup, QPushButton, QLabel,
+        QButtonGroup, QPushButton, QLabel, QComboBox,
     )
 
     class _Bridge(QObject):
@@ -594,10 +640,19 @@ def _make_window_class():
             central = QWidget()
             outer = QVBoxLayout(central)
             form = QFormLayout()
-            self.out_edit = QLineEdit(default_output_name(self.seq_name))
+            try:
+                project_db = timeline._project_db()
+            except Exception:
+                project_db = ""
+            self.out_edit = QLineEdit(default_output_path(self.seq_name, project_db))
             self.out_edit.setToolTip("A bare name or relative path is saved in the "
                                      "project folder; an absolute path is used as is.")
             form.addRow("Output", self.out_edit)
+            self.codec_combo = QComboBox()
+            for name, _nv, _cpu in CODECS:
+                self.codec_combo.addItem(name)
+            self.codec_combo.setCurrentIndex(0)
+            form.addRow("Codec", self.codec_combo)
             self.gop_spin = QSpinBox()
             self.gop_spin.setRange(1, 10000)
             self.gop_spin.setValue(DEFAULT_GOP)
@@ -704,6 +759,7 @@ def _make_window_class():
                     "out_path": resolve_output_path(self.out_edit.text(), project_db),
                     "width": player.seq_w, "height": player.seq_h, "fps": tl.fps,
                     "total_frames": total, "gop": self.gop_spin.value(),
+                    "codec": self.codec_combo.currentText(),
                     "target_mbps": self.target_spin.value(),
                     "burst_mbps": self.burst_spin.value(),
                     "faststart": self.fast_check.isChecked(),
