@@ -520,6 +520,13 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setApplicationName("LaddVideoEditor")
+    # BUILD 114: camera button over every top-level window's title bar
+    try:
+        from window_snapshot import install_window_snapshots
+        install_window_snapshots(app)
+    except Exception as e:
+        # print("window snapshot install failed: %s" % e)
+        pass
     window = ProjectManager()
     window.show()
     sys.exit(app.exec())
