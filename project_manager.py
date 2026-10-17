@@ -348,6 +348,13 @@ class ProjectManager(QMainWindow):
                     # Underlying Qt object already deleted
                     pass
                 setattr(self, attr, None)
+        # BUILD 116: Render Manager windows belong to the project too (closed before
+        # the timelines, so a running render is cancelled, not failed)
+        try:
+            import render_manager
+            render_manager.close_all_render_managers()
+        except ImportError:
+            pass
         try:
             import sequence_timeline
             for timeline in list(sequence_timeline._open_windows.values()):

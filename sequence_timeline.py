@@ -617,6 +617,11 @@ class SequenceTimeline(QMainWindow):
         player_action.triggered.connect(lambda checked=False: self.open_player())
         menubar.addAction(player_action)
 
+        # BUILD 116: Render (one Render Manager per sequence)
+        render_action = QAction("Render", self)
+        render_action.triggered.connect(lambda checked=False: self.open_render_manager())
+        menubar.addAction(render_action)
+
     def _project_db(self):
         return _get_global_setting("current_project", "")
 
@@ -2401,6 +2406,14 @@ class SequenceTimeline(QMainWindow):
             open_player_for(self)
         except Exception as e:
             QMessageBox.warning(self, "Player", f"Could not open the player: {e}")
+
+    def open_render_manager(self):
+        # Render menu: this sequence's Render Manager, raised if open
+        try:
+            from render_manager import open_render_manager
+            open_render_manager(self)
+        except Exception as e:
+            QMessageBox.warning(self, "Render", f"Could not open the Render Manager: {e}")
 
     def _play_rate_text(self):
         # Clock rate is frames the playhead advanced per wall second.
