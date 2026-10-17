@@ -527,6 +527,13 @@ def main():
     except Exception as e:
         # print("window snapshot install failed: %s" % e)
         pass
+    # BUILD 115: immersive dark title bars on Windows in dark mode
+    try:
+        from dark_titlebar import install_dark_titlebars
+        install_dark_titlebars(app)
+    except Exception as e:
+        # print("dark title bar install failed: %s" % e)
+        pass
     window = ProjectManager()
     window.show()
     sys.exit(app.exec())

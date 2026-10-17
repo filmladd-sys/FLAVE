@@ -124,6 +124,12 @@ def apply_dark_mode(enabled):
         app.setStyleSheet(style)
     else:
         app.setStyleSheet("")
+    # BUILD 115: Windows title bars follow the theme (no-op elsewhere)
+    try:
+        from dark_titlebar import set_dark_titlebars
+        set_dark_titlebars(bool(enabled))
+    except Exception:
+        pass
 
 
 class GlobalSettingsWindow(QMainWindow):
