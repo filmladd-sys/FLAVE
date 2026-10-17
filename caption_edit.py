@@ -32,9 +32,13 @@ class CaptionEditDialog(QDialog):
         form.addRow("Font family:", self.font_edit)
         self.size_edit = QLineEdit(str(self._pick(values, "font_size", DEFAULT_FONT_SIZE)))
         form.addRow("Font size:", self.size_edit)
-        self.x_edit = QLineEdit(str(self._pick(values, "pos_x", seq_width // 2)))
+        # BUILD 103: NULL position stays blank (player default); clear a
+        # field to return that axis to default
+        self.x_edit = QLineEdit(self._blank(values.get("pos_x")))
+        self.x_edit.setPlaceholderText("default (center)")
         form.addRow("Position X:", self.x_edit)
-        self.y_edit = QLineEdit(str(self._pick(values, "pos_y", seq_height // 2)))
+        self.y_edit = QLineEdit(self._blank(values.get("pos_y")))
+        self.y_edit.setPlaceholderText("default (bottom)")
         form.addRow("Position Y:", self.y_edit)
         self.scale_edit = QLineEdit(str(self._pick(values, "scale", DEFAULT_SCALE)))
         form.addRow("Scale:", self.scale_edit)
@@ -46,6 +50,16 @@ class CaptionEditDialog(QDialog):
         self.resize(420, 320)
 
     @staticmethod
+    def _blank(v):
+        return "" if v is None else str(v)
+
+    @staticmethod
+    def _opt_int(text):
+        # Blank -> None (NULL); otherwise int (ValueError if invalid)
+        text = (text or "").strip()
+        return None if not text else int(text)
+
+    @staticmethod
     def _pick(values, key, default):
         v = values.get(key)
         return default if v is None else v
@@ -54,7 +68,8 @@ class CaptionEditDialog(QDialog):
         if self.values() is None:
             QMessageBox.warning(
                 self, self.windowTitle(),
-                "Text is required. Font size, X and Y must be whole numbers; "
+                "Text is required. Font size must be a whole number; X and Y "
+                "must be whole numbers or blank (default); "
                 "scale must be a number greater than 0.")
             return
         self.accept()
@@ -66,8 +81,8 @@ class CaptionEditDialog(QDialog):
             return None
         try:
             font_size = int(self.size_edit.text().strip())
-            pos_x = int(self.x_edit.text().strip())
-            pos_y = int(self.y_edit.text().strip())
+            pos_x = self._opt_int(self.x_edit.text())
+            pos_y = self._opt_int(self.y_edit.text())
             scale = float(self.scale_edit.text().strip())
         except ValueError:
             return None

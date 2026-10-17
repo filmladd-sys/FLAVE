@@ -11,8 +11,9 @@
 # scale (all exist in new_project._init_db). NULL font/size/pos/scale
 # means the default style: bottom-centered white text on a dark
 # translucent box. pos_x/pos_y are sequence pixels (the caption edit
-# window's default is the sequence center); a caption with both set is
-# centered on that point. font_size is in sequence pixels, times scale.
+# window leaves them NULL unless set). Per axis (BUILD 103): a set X
+# centers the box on that X, blank X is horizontal center; a set Y centers
+# the box on that Y, blank Y uses the default bottom stack. font_size is in sequence pixels, times scale.
 
 import sqlite3
 
@@ -125,7 +126,7 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
                              str(text).replace("\r\n", "\n"))
         pad = max(2.0, fpx * 0.25)
         bw, bh = br.width() + 2 * pad, br.height() + 2 * pad
-        custom = px is not None and py is not None
+        custom = py is not None      # Y set: placed, not stacked
         laid.append([c, font, pad, bw, bh, custom, px, py])
     defaults = [l for l in laid if not l[5]]
     slots = default_slots(len(defaults))
@@ -142,11 +143,13 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
     painter.save()
     for l in laid:
         c, font, pad, bw, bh, custom, px, py = l
-        if custom:
+        if px is not None:
             cx = pic_x + float(px) * k
-            top = pic_y + float(py) * k - bh / 2.0
         else:
             cx = pic_x + pic_w / 2.0
+        if custom:
+            top = pic_y + float(py) * k - bh / 2.0
+        else:
             top = pos[id(l)]
         r = QRectF(cx - bw / 2.0, top, bw, bh)
         painter.fillRect(r, box)
