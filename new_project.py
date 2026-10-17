@@ -133,7 +133,11 @@ class NewProjectWindow(QMainWindow):
                 size_bytes INTEGER,
                 file_type TEXT,
                 proxy_percent INTEGER NOT NULL DEFAULT 0,
-                codec TEXT
+                codec TEXT,
+                -- BUILD 119: MKV import probe (footage_importer.py):
+                -- 'progressive' / 'interlaced' / 'telecine' / 'unknown';
+                -- NULL = not probed (every non-MKV file)
+                field_order TEXT
             )
         """)
 
@@ -219,13 +223,25 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
-        # Proxies of footage (path to the proxy file, size percentage)
+        # Proxies of footage (path to the proxy file, size percentage).
+        # BUILD 119: proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc';
+        # deinterlace 1 = deinterlaced or inverse-telecined. proxy_fps /
+        # proxy_frames: the proxy file's rate and frame count; source_fps:
+        # the original's rate when the proxy was made. Clip edit points
+        # (in_frame, out) are always SOURCE frames; a proxy whose rate
+        # differs (deint2x, ivtc) is read at proxy index =
+        # floor(source index / source_fps * proxy_fps + eps).
         cur.execute("""
             CREATE TABLE IF NOT EXISTS Proxies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 footage_id INTEGER NOT NULL,
                 path TEXT NOT NULL,
-                percentage INTEGER NOT NULL
+                percentage INTEGER NOT NULL,
+                deinterlace INTEGER NOT NULL DEFAULT 0,
+                proxy_mode TEXT NOT NULL DEFAULT 'normal',
+                proxy_fps REAL,
+                proxy_frames INTEGER,
+                source_fps REAL
             )
         """)
 

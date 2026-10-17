@@ -13,6 +13,7 @@
 # The JPEG preview path lives in sequence_player_preview.py.
 
 import ctypes
+import math
 import os
 # import time
 import sqlite3
@@ -22,6 +23,7 @@ import threading
 # and keep at most DEC_MAX open (each may hold an NVDEC session).
 DEC_IDLE_FRAMES = 300
 DEC_MAX = 8
+DEC_SKIP_MAX = 4      # BUILD 119: decode through gaps up to this, else seek
 
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QImage, QWindow, QOpenGLContext
@@ -180,40 +182,101 @@ def _original_size(path, w, h):
     return size
 
 
-def resolve_proxies(project_db, track_ids, use_proxies=True):
-    # {clip_id: (proxy_path, (orig_w, orig_h))} for clips whose proxy_percent
-    # has a Proxies row with an existing file. Anything else (0, no row, no
-    # file, old DB, unknown original size, use_proxies False) is absent and
-    # the clip decodes its original.
-    if not use_proxies or not project_db or not track_ids:
+# BUILD 119: when several proxies share a percent (Normal and Deinterlace
+# 50%, ...), the composite uses the first of this order: an in-place
+# deinterlace keeps the source frame count; IVTC and double rate are
+# frame-mapped by time; a combed Normal proxy is used last.
+PROXY_MODE_PREFERENCE = ("deint", "ivtc", "deint2x", "normal")
+FRAME_MAP_EPS = 1e-6
+
+
+def proxy_frame_ratio(source_fps, proxy_fps):
+    # proxy_fps / source_fps when the proxy's frame count differs (double
+    # rate, IVTC), else None (indices used as is)
+    try:
+        s_f, p_f = float(source_fps or 0), float(proxy_fps or 0)
+    except (TypeError, ValueError):
+        return None
+    if s_f <= 0 or p_f <= 0 or abs(p_f / s_f - 1.0) < 0.005:
+        return None
+    return p_f / s_f
+
+
+def map_source_frame(src_idx, ratio, proxy_frames=None):
+    # Clip edit points (in_frame, out) are SOURCE frames. A rate-changing
+    # proxy is read at floor(src / src_fps * proxy_fps + eps), clamped to
+    # its last frame.
+    if not ratio:
+        return int(src_idx)
+    idx = int(math.floor(float(src_idx) * ratio + FRAME_MAP_EPS))
+    if proxy_frames:
+        idx = min(idx, int(proxy_frames) - 1)
+    return max(0, idx)
+
+
+def _pick_proxy(rows):
+    # rows: [(mode, ...)] for one clip; the PROXY_MODE_PREFERENCE winner
+    def rank(r):
+        m = r[0] or "normal"
+        return PROXY_MODE_PREFERENCE.index(m) if m in PROXY_MODE_PREFERENCE else 99
+    return sorted(rows, key=rank)[0] if rows else None
+
+
+def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False):
+    # {clip_id: (proxy_path, (orig_w, orig_h), ratio, proxy_frames)}.
+    # use_proxies: clips whose proxy_percent has a Proxies row with an
+    # existing file (PROXY_MODE_PREFERENCE at that percent). render_deint
+    # (BUILD 119, final render with use_proxies False): MKV clips whose
+    # footage has a 100% deinterlaced / IVTC proxy decode it, nothing else
+    # (never another percent). Anything else (0, no row, no file, old DB,
+    # unknown original size) is absent and the clip decodes its original.
+    # ratio: proxy_frame_ratio (None = same frame count).
+    if not project_db or not track_ids or not (use_proxies or render_deint):
         return {}
     try:
         conn = sqlite3.connect(project_db)
         try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
+            modes = all(c in cols for c in ("deinterlace", "proxy_mode", "proxy_fps",
+                                            "proxy_frames", "source_fps"))
+            if render_deint and not use_proxies and not modes:
+                return {}
+            extra = ("COALESCE(p.proxy_mode, 'normal'), p.proxy_fps, p.proxy_frames, "
+                     "p.source_fps" if modes else "'normal', NULL, NULL, NULL")
             marks = ",".join("?" for _ in track_ids)
+            if use_proxies:
+                cond = ("p.percentage = c.proxy_percent "
+                        "WHERE COALESCE(c.proxy_percent, 0) > 0 ")
+            else:
+                cond = ("p.percentage = 100 AND COALESCE(p.deinterlace, 0) = 1 "
+                        "WHERE LOWER(COALESCE(f.original_path, '')) LIKE '%.mkv' ")
             rows = conn.execute(
-                "SELECT c.id, p.path, f.original_path, f.width, f.height "
-                "FROM clips c JOIN footage f ON f.id = c.footage_id "
-                "JOIN Proxies p ON p.footage_id = c.footage_id "
-                "AND p.percentage = c.proxy_percent "
-                "WHERE COALESCE(c.proxy_percent, 0) > 0 AND c.track_id IN (%s) "
-                "ORDER BY p.id" % marks, [int(t) for t in track_ids]).fetchall()
+                "SELECT c.id, " + extra + ", p.path, f.original_path, f.width, "
+                "f.height FROM clips c JOIN footage f ON f.id = c.footage_id "
+                "JOIN Proxies p ON p.footage_id = c.footage_id AND " + cond +
+                "AND c.track_id IN (%s) ORDER BY p.id" % marks,
+                [int(t) for t in track_ids]).fetchall()
         finally:
             conn.close()
     except Exception:
         return {}
-    out = {}
-    for clip_id, ppath, opath, w, h in rows:
-        if clip_id in out or not ppath or not os.path.isfile(ppath):
+    by_clip = {}
+    for clip_id, mode, pfps, pframes, sfps, ppath, opath, w, h in rows:
+        if not ppath or not os.path.isfile(ppath):
             continue
+        by_clip.setdefault(int(clip_id), []).append(
+            (mode, pfps, pframes, sfps, ppath, opath, w, h))
+    out = {}
+    for clip_id, cands in by_clip.items():
+        mode, pfps, pframes, sfps, ppath, opath, w, h = _pick_proxy(cands)
         size = _original_size(opath, w, h)
         if size is None:
             continue
-        out[int(clip_id)] = (ppath, size)
+        out[clip_id] = (ppath, size, proxy_frame_ratio(sfps, pfps), pframes)
     return out
 
 
-def timeline_snapshot(tl, use_proxies=True):
+def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # GUI thread only: copy of the track rows and clips the composite reads,
     # so the preview worker never touches Qt widgets. Also copies linked
     # scale / position X keyframe clips once per snapshot. track_order maps
@@ -246,7 +309,9 @@ def timeline_snapshot(tl, use_proxies=True):
         project_db = tl._project_db()
     except Exception:
         project_db = None
-    proxies = resolve_proxies(project_db, [r[0] for r in rows], use_proxies)
+    # render_deint (BUILD 119): final render override, MKV 100% deint only
+    proxies = resolve_proxies(project_db, [r[0] for r in rows], use_proxies,
+                              render_deint)
     from keyframe import collect_opacity_clips
     opacity_clips = collect_opacity_clips(tl.clips_by_track, track_order)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
@@ -297,6 +362,9 @@ class SequencePlayer(QWindow):
         self.decoders = {}               # (clip_id, path) -> SimpleDecoder
         self.dec_next = {}               # (clip_id, path) -> next index it yields
         self.dec_used = {}               # (clip_id, path) -> last sequence frame used
+        # BUILD 119: (clip_id, path) -> (index, frame, decoder) of the last
+        # single decode, reused when a frame-mapped proxy repeats an index
+        self.dec_last = {}
         self.images = {}                 # path -> (ptr, w, h, stride) or None
         self.paths = {}                  # footage_id -> original_path
         self._restoring = True
@@ -594,11 +662,18 @@ class SequencePlayer(QWindow):
                     continue
                 path = self._footage_path(clip[1])
                 orig_size = None
+                ratio = pframes = None
                 if path and clip[0] in proxies:
-                    # Proxy: same frame count / timing, so same source frame
-                    path, orig_size = proxies[clip[0]]
+                    # Proxy: same source frame, or (double rate / IVTC,
+                    # BUILD 119) the source frame mapped by time
+                    pr = proxies[clip[0]]
+                    path, orig_size = pr[0], pr[1]
+                    if len(pr) > 3:
+                        ratio, pframes = pr[2], pr[3]
                 if path:
                     src = (clip[7] + frame - start) if kind == "video" else 0
+                    if kind == "video" and ratio:
+                        src = map_source_frame(max(0, int(src)), ratio, pframes)
                     link_id = clip[8] if len(clip) > 8 else None
                     scale = scale_percent_for_link(
                         scale_clips, link_id, frame, clip_order,
@@ -625,6 +700,7 @@ class SequencePlayer(QWindow):
         dec = self.decoders.pop(key, None)
         self.dec_next.pop(key, None)
         self.dec_used.pop(key, None)
+        self.dec_last.pop(key, None)
         if dec is not None:
             # print(f"DECODER close {key}")
             del dec
@@ -634,6 +710,7 @@ class SequencePlayer(QWindow):
             self._close_decoder(key)
         self.dec_next.clear()
         self.dec_used.clear()
+        self.dec_last.clear()
 
     def _prune_decoders(self, frame, snapshot):
         # Close decoders of clips that are gone or whose footage path changed
@@ -1127,6 +1204,7 @@ class SequencePlayer(QWindow):
             if not os.path.isfile(path):
                 continue
             if prefetched is not None and (dkey, src_frame) in prefetched:
+                self.dec_last.pop(dkey, None)    # prefetch decoded on this key
                 f = prefetched[(dkey, src_frame)]
                 shape = [int(v) for v in f.shape]
                 sh, sw = shape[0], shape[1]
@@ -1136,20 +1214,41 @@ class SequencePlayer(QWindow):
                             orig_size=orig_size, opacity=opacity)
                 continue
             dec = self._decoder(dkey, frame)
-            # Seek only when the asked frame is not the next one THIS clip's
-            # decoder yields; a run in order continues decoding (HEVC GOP 15)
-            if self.dec_next.get(dkey) != src_frame:
-                dec.seek_to_index(src_frame)
-            try:
-                batch = dec.get_batch_frames(1)
-            except Exception:
-                self.dec_next.pop(dkey, None)
-                raise
-            if not batch:
-                self.dec_next.pop(dkey, None)
-                continue
-            self.dec_next[dkey] = src_frame + 1
-            f = batch[0]
+            nxt = self.dec_next.get(dkey)
+            last = self.dec_last.get(dkey)
+            if (last is not None and last[0] == src_frame and last[2] is dec
+                    and nxt == src_frame + 1):
+                # BUILD 119: frame-mapped proxy repeats the index (IVTC);
+                # nothing decoded on this decoder since, reuse the frame
+                f = last[1]
+            else:
+                # Seek only when the asked frame is not the next one THIS
+                # clip's decoder yields; a run in order continues decoding
+                # (HEVC GOP 15). A short skip ahead (double-rate proxy:
+                # every other frame) decodes through instead of seeking.
+                skip = (src_frame - nxt) if nxt is not None else -1
+                count = 1
+                if 0 < skip <= DEC_SKIP_MAX:
+                    count = skip + 1
+                elif nxt != src_frame:
+                    dec.seek_to_index(src_frame)
+                try:
+                    batch = dec.get_batch_frames(count)
+                except Exception:
+                    self.dec_next.pop(dkey, None)
+                    self.dec_last.pop(dkey, None)
+                    raise
+                if not batch:
+                    self.dec_next.pop(dkey, None)
+                    self.dec_last.pop(dkey, None)
+                    continue
+                if len(batch) < count:
+                    self.dec_next.pop(dkey, None)
+                    self.dec_last.pop(dkey, None)
+                    continue
+                self.dec_next[dkey] = src_frame + 1
+                f = batch[-1]
+                self.dec_last[dkey] = (src_frame, f, dec)
             shape = [int(v) for v in f.shape]
             sh, sw = shape[0], shape[1]
             stride = [int(v) for v in f.strides][0] if f.strides else sw * 3

@@ -67,6 +67,101 @@ def proxy_rows(db_path, footage_id):
 
 
 PROXY_PERCENTAGES = (75, 50, 25, 10)
+MKV_PROXY_PERCENTAGES = (100, 75, 50, 25, 10)   # BUILD 119: 100% for MKV only
+
+# BUILD 119: proxy modes. 'deint' keeps the source frame count; 'deint2x'
+# (one frame per field) and 'ivtc' (3:2 pulldown removed, 24000/1001)
+# change it, so the composite maps source frames to proxy frames by time.
+PROXY_MODES = ("normal", "deint", "deint2x", "ivtc")
+MODE_LABELS = {"normal": "Normal", "deint": "Deinterlace",
+               "deint2x": "Deinterlace (double rate)",
+               "ivtc": "Inverse telecine"}
+MODE_SHORT = {"normal": "normal", "deint": "deint", "deint2x": "deint 2x",
+              "ivtc": "IVTC"}
+_MODE_COLS = ("deinterlace", "proxy_mode", "proxy_fps", "proxy_frames", "source_fps")
+
+
+def proxies_have_modes(db_path):
+    # Proxies table made by BUILD 119+ _init_db (mode columns present)
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    return all(c in cols for c in _MODE_COLS)
+
+
+def proxy_rows_full(db_path, footage_id):
+    # [(id, path, pct, mode, deinterlace, proxy_fps, proxy_frames)]; older
+    # tables read mode 'normal', deinterlace 0, fps / frames None
+    if not db_path:
+        return []
+    if not proxies_have_modes(db_path):
+        return [(r[0], r[1], r[2], "normal", 0, None, None)
+                for r in proxy_rows(db_path, footage_id)]
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            return conn.execute(
+                "SELECT id, path, percentage, COALESCE(proxy_mode, 'normal'), "
+                "COALESCE(deinterlace, 0), proxy_fps, proxy_frames FROM Proxies "
+                "WHERE footage_id = ? ORDER BY id", (int(footage_id),)).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def footage_field_order(db_path, footage_id):
+    # footage.field_order (BUILD 119 MKV probe) or None
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(footage)")]
+            if "field_order" not in cols:
+                return None
+            row = conn.execute("SELECT field_order FROM footage WHERE id = ?",
+                               (int(footage_id),)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    return row[0] if row else None
+
+
+def is_mkv_path(path):
+    return os.path.splitext(path or "")[1].lower() == ".mkv"
+
+
+def valid_modes(src_path, field_order, have_modes=True):
+    # Modes offered for a footage: Normal always; MKV interlaced adds
+    # Deinterlace and double rate; MKV telecine adds Inverse telecine.
+    # Only with the BUILD 119 Proxies columns (else mode cannot be stored).
+    out = ["normal"]
+    if have_modes and is_mkv_path(src_path):
+        if field_order == "interlaced":
+            out += ["deint", "deint2x"]
+        elif field_order == "telecine":
+            out.append("ivtc")
+    return out
+
+
+def percentages_for(src_path):
+    return MKV_PROXY_PERCENTAGES if is_mkv_path(src_path) else PROXY_PERCENTAGES
+
+
+def mode_text(mode, fps, frames):
+    # Proxy Manager list: 'deint 2x 59.94 fps 600 f'
+    t = MODE_SHORT.get(mode or "normal", mode or "normal")
+    if mode and mode != "normal":
+        if fps:
+            t += " %.2f fps" % float(fps)
+        if frames:
+            t += " %d f" % int(frames)
+    return t
 VIDEO_PROXY_EXT = "mp4"     # video footage proxies
 IMAGE_PROXY_EXT = "jpg"     # image footage proxies
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
@@ -138,14 +233,21 @@ def is_video_path(path):
     return os.path.splitext(path or "")[1].lower() in _VIDEO_EXTS
 
 
-def video_proxy_path(proxy_dir, source_path, percentage):
-    # <ProxyPath>/<source basename>.<pct>.mp4, e.g. VidTest.mov.50.mp4
+def video_proxy_path(proxy_dir, source_path, percentage, mode="normal"):
+    # <ProxyPath>/<source basename>.<pct>.mp4, e.g. VidTest.mov.50.mp4.
+    # BUILD 119: deint / ivtc -> .<pct>.deint.mp4; double rate (same
+    # percent as a deint one) -> .<pct>.deint2x.mp4
+    tail = {"deint": ".deint", "ivtc": ".deint", "deint2x": ".deint2x"}.get(mode, "")
     return os.path.join(proxy_dir, os.path.basename(source_path) + "." +
-                        str(int(percentage)) + ".mp4")
+                        str(int(percentage)) + tail + ".mp4")
 
 
 def scaled_size(width, height, percentage):
-    # Percent of each side, rounded to even, minimum 2
+    # Percent of each side, rounded to even, minimum 2. 100% = the source
+    # size cut down to even (no scale-down).
+    if int(percentage) >= 100:
+        return max(2, int(width) - int(width) % 2), max(2, int(height) - int(height) % 2)
+
     def side(v):
         s = int(round(float(v) * int(percentage) / 100.0 / 2.0)) * 2
         return max(2, s)
@@ -223,7 +325,45 @@ def footage_size(db_path, footage_id):
     return None
 
 
-def build_proxy_cmd(src, out, w, h):
+def ivtc_rate(source_fps):
+    # decimate keeps 4 of 5 frames: 29.97 -> 24000/1001
+    try:
+        f = float(source_fps or 0)
+    except (TypeError, ValueError):
+        f = 0.0
+    if f <= 0 or abs(f - 30000.0 / 1001) < 0.01:
+        return "24000/1001"
+    from fractions import Fraction
+    fr = Fraction(f * 4.0 / 5.0).limit_denominator(1001)
+    return "%d/%d" % (fr.numerator, fr.denominator)
+
+
+def build_proxy_cmd(src, out, w, h, mode="normal", source_fps=None):
+    # BUILD 119 modes (all: first real video stream, no audio / subs):
+    #   deint   / deint2x: GPU decode, yadif_cuda mode 0 / 1 (one frame per
+    #           field), scale_cuda, hevc_nvenc
+    #   ivtc:   CPU fieldmatch + yadif (leftover combed frames) + decimate,
+    #           -r 24000/1001, then hwupload_cuda + scale_cuda, hevc_nvenc
+    #   normal: unchanged (below)
+    tail = [ "-c:v", PROXY_ENCODER, "-preset", "p4", "-g", "15", "-tag:v", "hvc1", out]
+    scale = "scale_cuda=%d:%d:format=yuv420p" % (int(w), int(h))
+    if mode in ("deint", "deint2x"):
+        return (["ffmpeg", "-y", "-hide_banner", "-hwaccel", "cuda",
+                 "-hwaccel_output_format", "cuda", "-i", src, "-map", "0:V:0",
+                 "-an", "-sn", "-dn", "-vf",
+                 "yadif_cuda=mode=%d:deint=all,%s" % (1 if mode == "deint2x" else 0, scale)]
+                + tail)
+    if mode == "ivtc":
+        return (["ffmpeg", "-y", "-hide_banner", "-init_hw_device", "cuda=cu",
+                 "-filter_hw_device", "cu", "-i", src, "-map", "0:V:0",
+                 "-an", "-sn", "-dn", "-vf",
+                 "fieldmatch,yadif=deint=interlaced,decimate,format=nv12,"
+                 "hwupload_cuda,%s" % scale, "-r", ivtc_rate(source_fps)]
+                + tail)
+    return _build_normal_cmd(src, out, w, h)
+
+
+def _build_normal_cmd(src, out, w, h):
     # User's exact shape (GPU decode, scale_cuda, hevc_nvenc) plus -tag:v hvc1
     # so MP4 players recognise the HEVC track. No CPU filter; the 8-bit
     # conversion is scale_cuda format=yuv420p (no -pix_fmt: it would force a
@@ -238,8 +378,68 @@ def build_proxy_cmd(src, out, w, h):
             "-g", "15", "-tag:v", "hvc1", out]
 
 
-def save_proxy_row(db_path, footage_id, path, percentage):
-    # Update the path of an existing row for footage + pct, else insert
+def probe_rate_frames(path):
+    # (fps, frame count) of stream V:0 (packets counted, no decode)
+    try:
+        code, out, _err = _run([
+            "ffprobe", "-v", "error", "-select_streams", "V:0", "-count_packets",
+            "-show_entries", "stream=r_frame_rate,nb_read_packets",
+            "-of", "default=noprint_wrappers=1", path])
+    except OSError:
+        return None, None
+    vals = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            vals[k.strip()] = v.strip()
+    fps = None
+    try:
+        r = vals.get("r_frame_rate", "")
+        if "/" in r:
+            a, b = r.split("/", 1)
+            fps = float(a) / float(b) if float(b) else None
+        elif r:
+            fps = float(r)
+    except ValueError:
+        fps = None
+    try:
+        frames = int(vals.get("nb_read_packets", ""))
+    except ValueError:
+        frames = None
+    return fps, frames
+
+
+def save_proxy_row(db_path, footage_id, path, percentage, mode="normal",
+                   proxy_fps=None, proxy_frames=None, source_fps=None):
+    # Update the path of an existing row for footage + pct (+ mode with the
+    # BUILD 119 columns), else insert
+    if proxies_have_modes(db_path):
+        deint = 0 if mode == "normal" else 1
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM Proxies WHERE footage_id = ? AND percentage = ? "
+                "AND COALESCE(proxy_mode, 'normal') = ? ORDER BY id LIMIT 1",
+                (int(footage_id), int(percentage), mode)).fetchone()
+            vals = (path, deint, mode, proxy_fps, proxy_frames, source_fps)
+            if row:
+                conn.execute(
+                    "UPDATE Proxies SET path = ?, deinterlace = ?, proxy_mode = ?, "
+                    "proxy_fps = ?, proxy_frames = ?, source_fps = ? WHERE id = ?",
+                    vals + (row[0],))
+                rid = row[0]
+            else:
+                rid = conn.execute(
+                    "INSERT INTO Proxies (path, deinterlace, proxy_mode, proxy_fps, "
+                    "proxy_frames, source_fps, footage_id, percentage) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    vals + (int(footage_id), int(percentage))).lastrowid
+            conn.commit()
+            return rid
+        finally:
+            conn.close()
+    if mode != "normal":
+        raise RuntimeError("this project's Proxies table has no mode columns")
     conn = sqlite3.connect(db_path)
     try:
         row = conn.execute(
@@ -266,7 +466,7 @@ def _remove_partial(path):
         pass
 
 
-def generate_video_proxy(db_path, footage_id, percentage, wait=None):
+def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="normal"):
     # Run ffmpeg; on success save the Proxies row. Returns (ok, message).
     # wait(proc) is called while ffmpeg runs (GUI keeps processing events).
     import subprocess
@@ -277,6 +477,10 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None):
     if size is None:
         return False, "Could not read the source width and height (ffprobe)."
     w, h = scaled_size(size[0], size[1], percentage)
+    if mode != "normal" and not proxies_have_modes(db_path):
+        return False, ("Deinterlace / inverse telecine proxies need a project "
+                       "created with BUILD 119 or later.")
+    source_fps = probe_rate_frames(src)[0] if mode != "normal" else None
     ok, msg = nvenc_available(choose_encoder(w, h), w, h)
     if not ok:
         return False, msg
@@ -285,8 +489,8 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None):
         os.makedirs(proxy_dir, exist_ok=True)
     except Exception as e:
         return False, "Could not create ProxyPath %s: %s" % (proxy_dir, e)
-    out = video_proxy_path(proxy_dir, src, percentage)
-    cmd = build_proxy_cmd(src, out, w, h)
+    out = video_proxy_path(proxy_dir, src, percentage, mode)
+    cmd = build_proxy_cmd(src, out, w, h, mode, source_fps)
     # print("PROXY cmd: %s" % " ".join(cmd))
     import tempfile
     err_file = tempfile.TemporaryFile()
@@ -309,7 +513,11 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None):
         return False, "ffmpeg failed (exit code %s)\n\nCommand:\n%s\n\nstderr (last 15 lines):\n%s" % (
             code, subprocess.list2cmdline(cmd), tail)
     try:
-        save_proxy_row(db_path, footage_id, out, percentage)
+        pfps = pframes = sfps = None
+        if mode != "normal" or proxies_have_modes(db_path):
+            pfps, pframes = probe_rate_frames(out)
+            sfps = source_fps if source_fps else probe_rate_frames(src)[0]
+        save_proxy_row(db_path, footage_id, out, percentage, mode, pfps, pframes, sfps)
     except Exception as e:
         return False, "Proxy file written but the row could not be saved: %s" % e
     return True, out
@@ -361,20 +569,27 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
         def __init__(self):
             super().__init__(parent)
             self.setWindowTitle("Proxy Manager: %s" % title_name)
-            self.resize(600, 340)
+            self.resize(760, 340)
             central = QWidget()
             layout = QVBoxLayout(central)
             row = QHBoxLayout()
             row.addWidget(QLabel("Generate"))
             self.combo = QComboBox()
             row.addWidget(self.combo, 1)
+            # BUILD 119: Mode (Normal / Deinterlace / double rate / IVTC),
+            # shown only when the footage has more than Normal
+            self.mode_label = QLabel("Mode")
+            row.addWidget(self.mode_label)
+            self.mode_combo = QComboBox()
+            row.addWidget(self.mode_combo, 1)
             layout.addLayout(row)
             self.gen_btn = QPushButton("Generate")
             self.gen_btn.clicked.connect(self._generate)
             layout.addWidget(self.gen_btn)
-            self.combo.currentIndexChanged.connect(self._update_button)
-            self.table = QTableWidget(0, 3)
-            self.table.setHorizontalHeaderLabels(["id", "path", "percentage"])
+            self.combo.currentIndexChanged.connect(self._fill_modes)
+            self.mode_combo.currentIndexChanged.connect(self._update_button)
+            self.table = QTableWidget(0, 4)
+            self.table.setHorizontalHeaderLabels(["id", "path", "percentage", "mode"])
             self.table.setEditTriggers(QTableWidget.NoEditTriggers)
             self.table.setSelectionBehavior(QTableWidget.SelectRows)
             self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -383,25 +598,47 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self._reload()
 
         def _reload(self):
-            rows = proxy_rows(db_path, footage_id)
+            rows = proxy_rows_full(db_path, footage_id)
             self.table.setRowCount(len(rows))
-            for i, (pid, path, pct) in enumerate(rows):
+            for i, (pid, path, pct, mode, _deint, pfps, pframes) in enumerate(rows):
                 self.table.setItem(i, 0, QTableWidgetItem(str(pid)))
                 self.table.setItem(i, 1, QTableWidgetItem(path or ""))
                 self.table.setItem(i, 2, QTableWidgetItem(str(pct)))
+                self.table.setItem(i, 3, QTableWidgetItem(mode_text(mode, pfps, pframes)))
+            src_path, _n = footage_source(db_path, footage_id)
+            self._modes = valid_modes(src_path, footage_field_order(db_path, footage_id),
+                                      proxies_have_modes(db_path))
+            self._have = set((int(r[2]), r[3] or "normal") for r in rows)
             self.combo.blockSignals(True)
             self.combo.clear()
-            for pct in available_percentages(db_path, footage_id):
-                self.combo.addItem("%d%%" % pct, pct)
+            for pct in percentages_for(src_path):
+                if any((pct, m) not in self._have for m in self._modes):
+                    self.combo.addItem("%d%%" % pct, pct)
             self.combo.blockSignals(False)
+            show = len(self._modes) > 1
+            self.mode_label.setVisible(show)
+            self.mode_combo.setVisible(show)
+            self._fill_modes()
+
+        def _fill_modes(self, *_args):
+            pct = self.combo.currentData()
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.clear()
+            if pct is not None:
+                for m in self._modes:
+                    if (int(pct), m) not in self._have:
+                        self.mode_combo.addItem(MODE_LABELS[m], m)
+            self.mode_combo.blockSignals(False)
             self._update_button()
 
         def _update_button(self, *_args):
             self.gen_btn.setEnabled(not getattr(self, "_generating", False)
-                                    and self.combo.currentData() is not None)
+                                    and self.combo.currentData() is not None
+                                    and self.mode_combo.currentData() is not None)
 
         def _generate(self):
             pct = self.combo.currentData()
+            mode = self.mode_combo.currentData() or "normal"
             if pct is None or getattr(self, "_generating", False):
                 return
             if not proxies_table_exists(db_path):
@@ -413,7 +650,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 return
             src_path, _n = footage_source(db_path, footage_id)
             if is_video_path(src_path):
-                self._generate_video(int(pct))
+                self._generate_video(int(pct), mode)
             else:
                 # Images: BUILD 82 placeholder row only (no file written)
                 try:
@@ -429,7 +666,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 except Exception:
                     pass
 
-        def _generate_video(self, pct):
+        def _generate_video(self, pct, mode="normal"):
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import Qt
 
@@ -443,14 +680,16 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.gen_btn.setEnabled(False)
             self.gen_btn.setText("Generating")
             self.combo.setEnabled(False)
+            self.mode_combo.setEnabled(False)
             self.setCursor(Qt.WaitCursor)
             try:
-                ok, msg = generate_video_proxy(db_path, footage_id, pct, wait)
+                ok, msg = generate_video_proxy(db_path, footage_id, pct, wait, mode)
             finally:
                 self.unsetCursor()
                 self._generating = False
                 self.gen_btn.setText("Generate")
                 self.combo.setEnabled(True)
+                self.mode_combo.setEnabled(True)
                 self._update_button()
             if not ok:
                 show_message(self, "Proxy Manager", msg)
