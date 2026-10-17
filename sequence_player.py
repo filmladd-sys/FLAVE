@@ -393,6 +393,9 @@ class SequencePlayer(QWindow):
         self._clear_wait()
         self._reader.stop_reader()
         self.stop_preview_audio()
+        # BUILD 112: scrub burst sink stopped, then deleteLater
+        from sequence_player_audio import release_scrub_burst
+        release_scrub_burst(self)
         self._save_geometry()
         self._release_gpu()
         if getattr(self.timeline, "_player", None) is self:
@@ -1299,6 +1302,12 @@ class SequencePlayer(QWindow):
         # Build or reuse the mix WAV, seek to frame, play via QAudioSink.
         # Never raises. Re-bind CUDA on this thread after audio start so the
         # next play_fill/present still sees the shared context.
+        try:
+            # BUILD 112: no scrub burst sounding over Play
+            from sequence_player_audio import stop_scrub_burst
+            stop_scrub_burst(self)
+        except Exception:
+            pass
         try:
             from sequence_preview_audio import ensure_preview_audio_wav
             from sequence_player_audio import PreviewAudioPlayer

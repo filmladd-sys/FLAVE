@@ -317,9 +317,21 @@ def ramp_pcm16(data, channels=CHANNELS, ramp=BURST_RAMP_SAMPLES):
 
 
 class ScrubBurst(object):
-    # Own QAudioSink and buffer; a new burst stops and replaces the last
-    # one (coalescing during a fast drag). start() returns at once: Qt
-    # pulls the small buffer on its audio thread, so the UI never blocks.
+    # BUILD 112: ONE long-lived QAudioSink and ONE QBuffer (internal data,
+    # set with setData, so no external QByteArray to outlive), both
+    # parented to a QObject owner created on the GUI thread and reused. A
+    # new burst: stop() the sink (never delete it), close the buffer,
+    # setData, open, start. Requests are coalesced through a single-shot
+    # QTimer (owner-parented) so a fast drag starts only the latest burst
+    # per event-loop pass and nothing runs inside a mouse handler or a sink
+    # signal. No stateChanged handler; the sink just goes idle at the end.
+    # release() stops everything and deleteLater()s the owner.
+    #
+    # BUILD 111 created a new QByteArray and QBuffer per burst and dropped
+    # the old ones right after sink.stop(); Python freed them at once (no
+    # parent), and the old QByteArray was freed while the old QBuffer still
+    # pointed at it. A sink backend still holding the old pull device can
+    # then touch freed memory.
 
     def __init__(self):
         self.path = None
@@ -328,11 +340,15 @@ class ScrubBurst(object):
         self._rate = SAMPLE_RATE
         self._ch = CHANNELS
         self._width = SAMPLE_WIDTH
+        self._owner = None
         self._sink = None
         self._sink_fmt = None
-        self._qba = None
         self._buf = None
+        self._timer = None
+        self._pending = None
+        self._released = False
         self.last_frame = None
+        self.started = 0                # bursts actually started (tests)
 
     def load(self, wav_path, shared=None):
         # Cached PCM, reloaded only when path / size / mtime change (BUILD
@@ -369,40 +385,127 @@ class ScrubBurst(object):
             return b""
         return ramp_pcm16(self._pcm[s:e], self._ch)
 
+    def _ensure_objects(self):
+        # GUI thread, lazily; the sink is rebuilt only if the WAV format
+        # changes (old one stopped and deleteLater, never deleted here)
+        from PySide6.QtCore import QObject, QBuffer, QTimer
+        if self._owner is None:
+            self._owner = QObject()
+            self._buf = QBuffer(self._owner)
+            self._timer = QTimer(self._owner)
+            self._timer.setSingleShot(True)
+            self._timer.setInterval(0)
+            self._timer.timeout.connect(self._start_pending)
+        fmt_key = (int(self._rate), int(self._ch))
+        if self._sink is not None and self._sink_fmt != fmt_key:
+            old = self._sink
+            self._sink = None
+            try:
+                old.stop()
+                old.deleteLater()
+            except Exception:
+                pass
+        if self._sink is None:
+            _qb, _qa, _qi, QAudioFormat, QAudioSink = _qt_audio()
+            fmt = QAudioFormat()
+            fmt.setSampleRate(fmt_key[0])
+            fmt.setChannelCount(fmt_key[1])
+            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            self._sink = QAudioSink(fmt, self._owner)
+            self._sink_fmt = fmt_key
+        return True
+
     def play(self, frame, fps):
+        # Queue the latest burst; started from the timer (coalesced)
+        if self._released:
+            return False
         data = self.slice_for(frame, fps)
         if not data:
             return False
-        QBuffer, QByteArray, QIODevice, QAudioFormat, QAudioSink = _qt_audio()
-        fmt_key = (self._rate, self._ch)
-        if self._sink is not None and self._sink_fmt != fmt_key:
-            self.stop()
-            self._sink = None
-        if self._sink is None:
-            fmt = QAudioFormat()
-            fmt.setSampleRate(int(self._rate))
-            fmt.setChannelCount(int(self._ch))
-            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-            self._sink = QAudioSink(fmt)
-            self._sink_fmt = fmt_key
-        try:
-            self._sink.stop()          # replaces a burst still playing
-        except Exception:
-            pass
-        self._qba = QByteArray(data)
-        self._buf = QBuffer(self._qba)
-        if not self._buf.open(QIODevice.OpenModeFlag.ReadOnly):
-            return False
-        self._sink.start(self._buf)    # stops by itself at buffer end
-        self.last_frame = int(frame)
+        self._ensure_objects()
+        self._pending = (int(frame), data)
+        if not self._timer.isActive():
+            self._timer.start()
         return True
 
+    def _start_pending(self):
+        if self._released or self._pending is None or self._sink is None:
+            return
+        frame, data = self._pending
+        self._pending = None
+        _qb, _qa, QIODevice, _qf, _qs = _qt_audio()
+        try:
+            self._sink.stop()              # cut off the previous burst
+        except Exception:
+            pass
+        if self._buf.isOpen():
+            self._buf.close()
+        self._buf.setData(data)            # QBuffer keeps its own copy
+        if not self._buf.open(QIODevice.OpenModeFlag.ReadOnly):
+            return
+        self._buf.seek(0)
+        try:
+            self._sink.start(self._buf)    # goes idle by itself at the end
+            self.last_frame = frame
+            self.started += 1
+            # print("SCRUB: burst frame=%d bytes=%d" % (frame, len(data)))
+        except Exception:
+            pass
+
     def stop(self):
+        self._pending = None
+        if self._timer is not None:
+            try:
+                self._timer.stop()
+            except Exception:
+                pass
         if self._sink is not None:
             try:
                 self._sink.stop()
             except Exception:
                 pass
+
+    def release(self):
+        # Player close: stop first, then deleteLater the owner (sink,
+        # buffer and timer are its children)
+        self.stop()
+        self._released = True
+        if self._buf is not None:
+            try:
+                if self._buf.isOpen():
+                    self._buf.close()
+            except Exception:
+                pass
+        if self._owner is not None:
+            try:
+                self._owner.deleteLater()
+            except Exception:
+                pass
+        self._owner = None
+        self._sink = None
+        self._buf = None
+        self._timer = None
+
+
+def release_scrub_burst(player):
+    # BUILD 112: called when the player closes or Play starts
+    burst = getattr(player, "_scrub_burst", None)
+    if burst is None:
+        return
+    try:
+        burst.release()
+    except Exception:
+        pass
+    player._scrub_burst = None
+
+
+def stop_scrub_burst(player):
+    burst = getattr(player, "_scrub_burst", None)
+    if burst is not None:
+        try:
+            burst.stop()
+        except Exception:
+            pass
 
 
 def scrub_burst(timeline):
