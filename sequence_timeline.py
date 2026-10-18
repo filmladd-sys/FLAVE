@@ -594,22 +594,12 @@ class SequenceTimeline(QMainWindow):
         edit_menu.aboutToShow.connect(self._update_edit_actions)
         self._update_edit_actions()
 
-        # Tracks menu
+        # Tracks menu (BUILD 123: same items / handlers as the right-click
+        # menu on empty timeline space, from TRACK_ADD_ITEMS)
         tracks_menu = menubar.addMenu("Tracks")
-        for label in ["+ Video", "+ Audio", "+ Image", "+ Caption", "+ Keyframe"]:
+        for label, handler in self._track_add_items():
             action = QAction(label, self)
-            if label == "+ Image":
-                action.triggered.connect(self._add_image_track)
-            elif label == "+ Video":
-                action.triggered.connect(self._add_video_track)
-            elif label == "+ Audio":
-                action.triggered.connect(self._add_audio_track)
-            elif label == "+ Caption":
-                action.triggered.connect(self._add_caption_track)
-            elif label == "+ Keyframe":
-                action.triggered.connect(self._add_keyframe_track)
-            else:
-                action.triggered.connect(lambda checked=False, l=label: self._stub(l))
+            action.triggered.connect(handler)
             tracks_menu.addAction(action)
 
         # Player: one top-level menu item, no dropdown (stub for now)
@@ -667,6 +657,40 @@ class SequenceTimeline(QMainWindow):
         item = self.table.item(row, 0)
         return item.data(Qt.UserRole) if item is not None else None
 
+    # BUILD 123: the Tracks menu items, in order: (label, handler name).
+    # Shared by the Tracks menu bar menu and the empty-space right-click.
+    TRACK_ADD_ITEMS = (
+        ("+ Video", "_add_video_track"),
+        ("+ Audio", "_add_audio_track"),
+        ("+ Image", "_add_image_track"),
+        ("+ Caption", "_add_caption_track"),
+        ("+ Keyframe", "_add_keyframe_track"),
+    )
+
+    def _track_add_items(self):
+        # [(label, bound handler)] (handlers take no arguments)
+        out = []
+        for label, name in self.TRACK_ADD_ITEMS:
+            fn = getattr(self, name)
+            out.append((label, lambda checked=False, f=fn: f()))
+        return out
+
+    def _add_track_actions(self, menu):
+        # Add the Tracks menu items to menu; returns {action: handler}
+        acts = {}
+        for label, name in self.TRACK_ADD_ITEMS:
+            acts[menu.addAction(label)] = getattr(self, name)
+        return acts
+
+    def _empty_space_menu(self, pos):
+        # Right-click below the last track (or in a sequence with no
+        # tracks): only the Tracks menu items
+        menu = QMenu(self)
+        acts = self._add_track_actions(menu)
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action in acts:
+            acts[action]()
+
     def _track_context_menu(self, pos):
         # Key boxes first so right-click does not open the clip menu
         from keyframe import hit_test_key, key_context_menu
@@ -687,6 +711,8 @@ class SequenceTimeline(QMainWindow):
             return
         item = self.table.itemAt(pos)
         if item is None:
+            # BUILD 123: empty space below the tracks -> Tracks menu items
+            self._empty_space_menu(pos)
             return
         name_item = self.table.item(item.row(), 0)
         if name_item is None:
@@ -719,7 +745,17 @@ class SequenceTimeline(QMainWindow):
             if track_type == "caption":
                 add_caption_action = menu.addAction("Add Caption")
             ripple_action = menu.addAction("Ripple Delete")
+        # BUILD 123: empty clip area of a track row (not a clip body or
+        # edge; key boxes / markers / clips returned above) also lists the
+        # Tracks menu items. The Name / Type header cells do not.
+        add_track_acts = {}
+        if x_in_clips >= 0 and self._clip_edge_at(pos) is None:
+            menu.addSeparator()
+            add_track_acts = self._add_track_actions(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action in add_track_acts:
+            add_track_acts[action]()
+            return
         if add_keyframe_action is not None and action == add_keyframe_action:
             click_frame = self.view_start_frame + x_in_clips / self.pixels_per_frame
             self.add_keyframe_clip(track_id, click_frame)
