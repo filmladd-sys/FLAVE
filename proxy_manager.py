@@ -363,6 +363,107 @@ def build_proxy_cmd(src, out, w, h, mode="normal", source_fps=None):
     return _build_normal_cmd(src, out, w, h)
 
 
+# BUILD 121: CPU-decode fallback. Sources NVDEC cannot take (e.g. a bgra
+# PNG-in-AVI logo: GPU decode silently falls back to software frames and
+# scale_cuda then fails with 'Error reinitializing filters' / 'Function not
+# implemented') are decoded and scaled on the CPU, still encoded with
+# hevc_nvenc: same output file, same Proxies row, still HEVC + hvc1.
+NVDEC_CODECS = ("h264", "hevc", "mpeg1video", "mpeg2video", "mpeg4", "vc1",
+                "vp8", "vp9", "av1", "mjpeg")
+# Codecs NVDEC also decodes at high bit depth (4:2:0 10/12-bit; HEVC 4:4:4)
+_NVDEC_HIGH_DEPTH = ("hevc", "vp9", "av1")
+GPU_FAIL_PATTERNS = (
+    "error reinitializing filters", "function not implemented",
+    "impossible to convert between the formats", "hwaccel", "cuvid",
+    "no decoder surfaces", "scale_cuda", "yadif_cuda", "hwupload",
+    "failed to inject frame", "error while filtering", "nvdec",
+)
+
+
+def probe_codec(src):
+    # (codec_name, pix_fmt) of the first real video stream, or (None, None)
+    try:
+        code, out, _err = _run([
+            "ffprobe", "-v", "error", "-select_streams", "V:0",
+            "-show_entries", "stream=codec_name,pix_fmt",
+            "-of", "default=noprint_wrappers=1", src])
+    except OSError:
+        return None, None
+    vals = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            vals[k.strip()] = v.strip()
+    return (vals.get("codec_name") or None), (vals.get("pix_fmt") or None)
+
+
+def gpu_decodable(codec, pix_fmt):
+    # (ok, reason). Unknown codec / pix_fmt: try the GPU (the stderr retry
+    # catches a miss). Rejected: codecs NVDEC has no decoder for; 4:2:2,
+    # 4:1:1, 4:4:0, alpha / RGB / palette formats; high bit depth or 4:4:4
+    # except for HEVC / VP9 / AV1 (H.264 High 10 / 4:2:2 / 4:4:4 included).
+    if not codec:
+        return True, "codec not probed"
+    c = codec.lower()
+    if c not in NVDEC_CODECS:
+        return False, "codec %s has no NVDEC decoder" % codec
+    if not pix_fmt:
+        return True, ""
+    f = pix_fmt.lower()
+    if f in ("gray", "gray8"):
+        return True, ""
+    if (f.startswith(("rgb", "bgr", "argb", "abgr", "gbr", "pal", "ya", "yuva"))
+            or "422" in f or "411" in f or "440" in f):
+        return False, "%s %s is not NVDEC-decodable" % (codec, pix_fmt)
+    high = any(t in f for t in ("p9", "p10", "p12", "p14", "p16", "p010", "p016"))
+    if "444" in f and c != "hevc":
+        return False, "%s %s is not NVDEC-decodable" % (codec, pix_fmt)
+    if high and c not in _NVDEC_HIGH_DEPTH:
+        return False, "%s %s (high bit depth) is not NVDEC-decodable" % (codec, pix_fmt)
+    return True, ""
+
+
+def is_gpu_failure(stderr_text):
+    # stderr of a failed GPU attempt names a decode / filter / hwaccel
+    # error: the first matching pattern, else None (no retry)
+    t = (stderr_text or "").lower()
+    for pat in GPU_FAIL_PATTERNS:
+        if pat in t:
+            return pat
+    return None
+
+
+def build_proxy_cmd_cpu(src, out, w, h, mode="normal", source_fps=None):
+    # CPU decode + CPU filters (yadif / fieldmatch,decimate) + CPU scale to
+    # the same even size, encoded by hevc_nvenc. No -hwaccel, no *_cuda,
+    # no hwupload.
+    scale = "scale=%d:%d,format=yuv420p" % (int(w), int(h))
+    if mode in ("deint", "deint2x"):
+        vf = "yadif=mode=%d:deint=all,%s" % (1 if mode == "deint2x" else 0, scale)
+    elif mode == "ivtc":
+        vf = "fieldmatch,yadif=deint=interlaced,decimate," + scale
+    else:
+        vf = scale
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-i", src, "-map", "0:V:0", "-an",
+           "-sn", "-dn", "-vf", vf]
+    if mode == "ivtc":
+        cmd += ["-r", ivtc_rate(source_fps)]
+    return cmd + ["-c:v", PROXY_ENCODER, "-preset", "p4", "-g", "15",
+                  "-tag:v", "hvc1", out]
+
+
+def plan_proxy_cmds(src, out, w, h, mode="normal", source_fps=None, probe=None):
+    # (first_cmd, fallback_cmd_or_None, note). GPU first with the CPU
+    # command as the one retry; a source NVDEC cannot take goes straight
+    # to the CPU command (no retry). probe: (codec_name, pix_fmt).
+    codec, pix_fmt = probe if probe is not None else probe_codec(src)
+    ok, why = gpu_decodable(codec, pix_fmt)
+    cpu = build_proxy_cmd_cpu(src, out, w, h, mode, source_fps)
+    if not ok:
+        return cpu, None, why
+    return build_proxy_cmd(src, out, w, h, mode, source_fps), cpu, ""
+
+
 def _build_normal_cmd(src, out, w, h):
     # User's exact shape (GPU decode, scale_cuda, hevc_nvenc) plus -tag:v hvc1
     # so MP4 players recognise the HEVC track. No CPU filter; the 8-bit
@@ -466,10 +567,46 @@ def _remove_partial(path):
         pass
 
 
-def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="normal"):
-    # Run ffmpeg; on success save the Proxies row. Returns (ok, message).
+def _run_proxy_ffmpeg(cmd, wait=None):
+    # (exit code, stderr text); (None, reason) if ffmpeg could not start.
     # wait(proc) is called while ffmpeg runs (GUI keeps processing events).
     import subprocess
+    import tempfile
+    err_file = tempfile.TemporaryFile()
+    try:
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_file,
+                                    creationflags=_no_window_flags())
+        except OSError as e:
+            return None, str(e)
+        if wait is not None:
+            wait(proc)
+        code = proc.wait()
+        err_file.seek(0)
+        err = err_file.read().decode("ascii", "replace")
+    finally:
+        err_file.close()
+    return code, err
+
+
+def _proxy_ok(code, out):
+    return code == 0 and os.path.isfile(out) and os.path.getsize(out) > 0
+
+
+def _ffmpeg_error_text(code, cmd, err, title=None):
+    import subprocess
+    tail = "\n".join((err or "").strip().splitlines()[-15:])
+    head = ("%s: ffmpeg failed" % title) if title else "ffmpeg failed"
+    return "%s (exit code %s)\n\nCommand:\n%s\n\nstderr (last 15 lines):\n%s" % (
+        head, code, subprocess.list2cmdline(cmd), tail)
+
+
+def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="normal"):
+    # Run ffmpeg; on success save the Proxies row. Returns (ok, message).
+    # BUILD 121: GPU command first unless the ffprobe codec / pix_fmt is not
+    # NVDEC-decodable (then CPU decode + CPU scale only). A GPU failure whose
+    # stderr names a filter / hwaccel error is retried once on the CPU path
+    # (partial output deleted first); both failing shows both commands.
     src, _name = footage_source(db_path, footage_id)
     if not src or not os.path.isfile(src):
         return False, "Source file not found:\n%s" % src
@@ -490,28 +627,35 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="norma
     except Exception as e:
         return False, "Could not create ProxyPath %s: %s" % (proxy_dir, e)
     out = video_proxy_path(proxy_dir, src, percentage, mode)
-    cmd = build_proxy_cmd(src, out, w, h, mode, source_fps)
+    cmd, fallback, note = plan_proxy_cmds(src, out, w, h, mode, source_fps)
+    t0 = time.perf_counter()
+    if fallback is None:
+        print("WORKER proxy: %s -> CPU decode + CPU scale (%s)"
+              % (os.path.basename(src), note))
     # print("PROXY cmd: %s" % " ".join(cmd))
-    import tempfile
-    err_file = tempfile.TemporaryFile()
-    try:
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_file,
-                                    creationflags=_no_window_flags())
-        except OSError as e:
-            return False, "Could not start ffmpeg: %s" % e
-        if wait is not None:
-            wait(proc)
-        code = proc.wait()
-        err_file.seek(0)
-        err = err_file.read().decode("ascii", "replace")
-    finally:
-        err_file.close()
-    if code != 0 or not os.path.isfile(out) or os.path.getsize(out) <= 0:
+    code, err = _run_proxy_ffmpeg(cmd, wait)
+    if code is None:
+        return False, "Could not start ffmpeg: %s" % err
+    if not _proxy_ok(code, out):
         _remove_partial(out)
-        tail = "\n".join(err.strip().splitlines()[-15:])
-        return False, "ffmpeg failed (exit code %s)\n\nCommand:\n%s\n\nstderr (last 15 lines):\n%s" % (
-            code, subprocess.list2cmdline(cmd), tail)
+        pat = is_gpu_failure(err) if fallback is not None else None
+        if pat is None:
+            return False, _ffmpeg_error_text(code, cmd, err)
+        print("WORKER proxy: GPU attempt failed after %.1fs (exit %s, stderr '%s'); "
+              "retrying with CPU decode + CPU scale" % (time.perf_counter() - t0, code, pat))
+        t1 = time.perf_counter()
+        code2, err2 = _run_proxy_ffmpeg(fallback, wait)
+        if code2 is None:
+            return False, (_ffmpeg_error_text(code, cmd, err, "GPU attempt") +
+                           "\n\nCPU fallback: could not start ffmpeg: %s" % err2)
+        if not _proxy_ok(code2, out):
+            _remove_partial(out)
+            return False, (_ffmpeg_error_text(code, cmd, err, "GPU attempt") + "\n\n" +
+                           _ffmpeg_error_text(code2, fallback, err2, "CPU fallback"))
+        print("WORKER proxy: CPU fallback done in %.1fs" % (time.perf_counter() - t1))
+    else:
+        print("WORKER proxy: %s done in %.1fs" % (os.path.basename(out),
+                                                  time.perf_counter() - t0))
     try:
         pfps = pframes = sfps = None
         if mode != "normal" or proxies_have_modes(db_path):
