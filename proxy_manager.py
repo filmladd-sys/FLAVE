@@ -209,6 +209,27 @@ def available_percentages(db_path, footage_id):
     return [p for p in PROXY_PERCENTAGES if p not in have]
 
 
+def set_default_after_generate(db_path, footage_id, percentage, ok, out_path=None):
+    # BUILD 122: after a successful generate, footage.proxy_percent (the
+    # Footage Manager 'Proxy Default') = the new percent, written through
+    # clip_proxy.set_footage_proxy_percent (same path as the Proxy Default
+    # menu: undo snapshot 'Proxy default', refused on older projects).
+    # Video: ok and the proxy file exists. Image: ok (placeholder row, no
+    # file). Clips keep their own proxy_percent. Only the percent is stored;
+    # with Normal and Deinterlace at that percent the composite and the
+    # BUILD 120 label use the preferred mode (e.g. '50% (deint)').
+    # Returns True if the default was written.
+    if not ok:
+        return False
+    if out_path is not None and not os.path.isfile(out_path):
+        return False
+    try:
+        from clip_proxy import set_footage_proxy_percent
+        return bool(set_footage_proxy_percent(db_path, footage_id, int(percentage)))
+    except Exception:
+        return False
+
+
 def add_proxy_row(db_path, footage_id, percentage):
     # Insert one Proxies row (no file is written). Returns the new id.
     src, name = footage_source(db_path, footage_id)
@@ -794,7 +815,10 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 return
             src_path, _n = footage_source(db_path, footage_id)
             if is_video_path(src_path):
-                self._generate_video(int(pct), mode)
+                ok, out = self._generate_video(int(pct), mode)
+                # BUILD 122: success -> footage Proxy Default = this percent
+                set_default_after_generate(db_path, footage_id, int(pct), ok,
+                                           out if ok else None)
             else:
                 # Images: BUILD 82 placeholder row only (no file written)
                 try:
@@ -803,6 +827,8 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                     show_message(self, "Proxy Manager",
                                         "Could not add proxy: %s" % e)
                     return
+                set_default_after_generate(db_path, footage_id, int(pct), True)
+            # on_change: Footage Manager refresh (Proxy Default / #Proxies)
             self._reload()
             if on_change is not None:
                 try:
@@ -826,8 +852,12 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.combo.setEnabled(False)
             self.mode_combo.setEnabled(False)
             self.setCursor(Qt.WaitCursor)
+            ok, msg = False, ""
             try:
-                ok, msg = generate_video_proxy(db_path, footage_id, pct, wait, mode)
+                try:
+                    ok, msg = generate_video_proxy(db_path, footage_id, pct, wait, mode)
+                except Exception as e:
+                    ok, msg = False, "Proxy generation failed: %s" % e
             finally:
                 self.unsetCursor()
                 self._generating = False
@@ -837,6 +867,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 self._update_button()
             if not ok:
                 show_message(self, "Proxy Manager", msg)
+            return ok, msg
 
         def closeEvent(self, event):
             try:
