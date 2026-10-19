@@ -1567,8 +1567,14 @@ class SequenceTimeline(QMainWindow):
         from keyframe import is_keyframe_clip_id
         for c in members:
             prev_end, next_start = self._neighbor_bounds(c, c[2], c[3], ignore_ids=ids)
+            # BUILD 134: every non-moving clip on this member's track, for
+            # the jump-past-a-blocker move (clip_drag.py)
+            blocks = [(o[2], o[2] + o[3])
+                      for o in self.clips_by_track.get(self._clip_track_id(c), [])
+                      if o[0] not in ids]
             entry = {"clip": c, "start": c[2], "length": c[3], "in": c[7],
-                     "prev_end": prev_end, "next_start": next_start}
+                     "prev_end": prev_end, "next_start": next_start,
+                     "blocks": blocks}
             if is_keyframe_clip_id(c[0]) and len(c) > 9:
                 entry["keys"] = list(c[9])
             group.append(entry)
@@ -1598,14 +1604,28 @@ class SequenceTimeline(QMainWindow):
                 clip[2] = drag["orig_start"]
                 drag["target_track"] = None
                 drag["target_ok"] = True
+                drag["cur_delta"] = 0
             delta = (frame - drag["grab_offset"]) - drag["orig_start"]
         elif edge == "left":
             delta = frame - drag["orig_start"]
         else:
             delta = frame - (drag["orig_start"] + drag["orig_length"])
         delta = self._snap_drag_delta(drag, group, pos, delta)
-        lo, hi = self._group_delta_range(group, edge)
-        delta = max(lo, min(hi, delta)) if lo <= hi else 0
+        if edge == "move" and all("blocks" in m for m in group):
+            # BUILD 134: waits at a blocking clip's edge, jumps past it
+            # once the mouse is past it and the whole group fits there
+            from clip_drag import legal_components, move_delta
+            comps = drag.get("legal")
+            if comps is None:
+                comps = legal_components(
+                    [(m["start"], m["length"], m["blocks"]) for m in group])
+                drag["legal"] = comps
+            delta = move_delta(comps, drag.get("cur_delta", 0), delta,
+                               drag["grab_offset"], drag["orig_length"])
+            drag["cur_delta"] = delta
+        else:
+            lo, hi = self._group_delta_range(group, edge)
+            delta = max(lo, min(hi, delta)) if lo <= hi else 0
         for m in group:
             c = m["clip"]
             if edge == "move":
@@ -1864,6 +1884,13 @@ class SequenceTimeline(QMainWindow):
         group = drag.get("group") or [{"clip": clip}]
         new_start = max(0, int(clip[2]))
         if new_start == drag["orig_start"]:
+            return
+        # BUILD 134: drop guard -- a final position that overlaps a clip on
+        # any moved clip's track (or is below 0) is refused, nothing saved
+        from clip_drag import overlaps
+        if all("blocks" in m for m in group) and overlaps(
+                [(m["clip"][2], m["clip"][3], m["blocks"]) for m in group]):
+            self._after_clip_change("Move refused: overlaps a clip")
             return
         from undo import push_undo
         push_undo(self._project_db(), "Move clip")

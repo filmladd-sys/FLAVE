@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QRect, QEvent
 from PySide6.QtGui import QColor
 
 SLICE_LINE_COLOR = QColor(255, 255, 0)
-SLICE_CURSOR = Qt.CrossCursor
+# BUILD 134: slice mode leaves the normal arrow pointer (no cursor set)
 
 
 def slice_split_frame(clip, x_in_clips, view_start, ppf):
@@ -172,7 +172,9 @@ def enter_slice_mode(tl):
         return False
     tl._slice_mode = True
     tl._slice_lines = []
-    tl.table.viewport().setCursor(SLICE_CURSOR)
+    # Clear a clip-edge resize pointer left by the normal hover so the
+    # arrow shows; slice mode then sets no cursor of its own
+    tl.table.viewport().unsetCursor()
     return True
 
 
@@ -181,10 +183,6 @@ def exit_slice_mode(tl):
         return False
     tl._slice_mode = False
     _set_lines(tl, [])
-    try:
-        tl.table.viewport().unsetCursor()
-    except Exception:
-        pass
     return True
 
 
@@ -225,7 +223,6 @@ def _slice_event(tl, obj, event):
             return True
         return None
     if etype == QEvent.MouseMove:
-        obj.setCursor(SLICE_CURSOR)
         slice_hover(tl, event.position().toPoint())
         return True
     if etype == QEvent.Leave:
