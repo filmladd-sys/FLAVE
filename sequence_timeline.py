@@ -110,7 +110,8 @@ class ClipDelegate(QStyledItemDelegate):
                 # key boxes or markers)
                 paint_collapsed_clip(painter, clip_rect, track_type,
                                      clip_id in tl._selected_clip_ids,
-                                     (filename or "") + (" [S]" if clip_solo else ""))
+                                     (filename or "") + (" [S]" if clip_solo else ""),
+                                     visible_rect=rect)
                 painter.setOpacity(1.0)
                 continue
             if track_type == "keyframe":
@@ -120,7 +121,8 @@ class ClipDelegate(QStyledItemDelegate):
                 paint_keyframe_clip(
                     painter, clip_rect, filename or "", keys=keys,
                     clip_start=start_frame, ppf=ppf, stored_type=ktype,
-                    linked=(len(clip) > 8 and clip[8] is not None))
+                    linked=(len(clip) > 8 and clip[8] is not None),
+                    visible_rect=rect)
                 if clip_id in tl._selected_clip_ids:
                     painter.setPen(QColor(255, 255, 160))
                 else:
@@ -219,14 +221,17 @@ class ClipDelegate(QStyledItemDelegate):
             else:
                 painter.setPen(QColor(160, 180, 220))
             painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
-            if text_rect.width() > 0:
-                painter.setPen(QColor(230, 230, 230))
+            if clip_rect.width() > 0:
+                # BUILD 127: left-aligned, sticky to the visible left edge,
+                # elided at the right; drawn last. Audio names get a subtle
+                # backing (the waveform runs under them).
                 label = filename or ""
                 if clip_solo:
                     label += " [S]"
-                if track_type == "caption":
-                    label = caption_label(painter, label, text_rect)
-                painter.drawText(text_rect, Qt.AlignCenter, label)
+                draw_clip_name(painter, text_rect, rect, label,
+                               caption=(track_type == "caption"),
+                               backing=(track_type == "audio" and seq_ref is None),
+                               fallback_rect=clip_rect)
             painter.setOpacity(1.0)
         painter.restore()
 
@@ -256,23 +261,53 @@ def paint_collapse_triangle(painter, rect, collapsed):
     painter.restore()
 
 
-def paint_collapsed_clip(painter, clip_rect, track_type, selected, label):
+NAME_MIN_PX = 24   # narrower than this between the icons: draw over them
+
+
+def draw_clip_name(painter, text_rect, visible_rect, label, caption=False,
+                   backing=False, pad=4, fallback_rect=None):
+    # BUILD 127: clip name, left-aligned with padding, sticky to the
+    # visible left edge of the Clips area, elided at the clip / visible
+    # right edge; vertically centered in text_rect as before. Same font and
+    # color (230, 230, 230). backing: subtle dark box behind the text.
+    # fallback_rect (the whole clip): used, with the backing, when the
+    # visible space between the in / out icons is under NAME_MIN_PX (for
+    # example only the out icon is on screen), so the name stays readable
+    from keyframe import sticky_name_rect
+    r = sticky_name_rect(text_rect, visible_rect, pad)
+    if fallback_rect is not None and (r is None or r.width() < NAME_MIN_PX):
+        r = sticky_name_rect(fallback_rect, visible_rect, pad)
+        backing = True
+    if r is None or r.width() <= 2:
+        return
+    text = " ".join(label.split()) if caption else label
+    fm = painter.fontMetrics()
+    text = fm.elidedText(text, Qt.ElideRight, r.width())
+    if not text:
+        return
+    if backing:
+        tw = min(r.width(), fm.horizontalAdvance(text))
+        th = min(r.height(), fm.height())
+        painter.fillRect(QRect(r.left() - 2, r.center().y() - th // 2 - 1, tw + 4, th + 2),
+                         QColor(0, 0, 0, 150))
+    painter.setPen(QColor(230, 230, 230))
+    painter.drawText(r, Qt.AlignLeft | Qt.AlignVCenter, text)
+
+
+def paint_collapsed_clip(painter, clip_rect, track_type, selected, label,
+                         visible_rect=None):
     # BUILD 126: collapsed track clip: bar, outline, name in a font that
-    # fits the 16 px row (elided like caption text)
+    # fits the 16 px row, and nothing else. BUILD 127: name left-aligned
+    # and sticky like open clips (draw_clip_name).
     from PySide6.QtGui import QFont
     painter.fillRect(clip_rect, COLLAPSED_BAR_COLORS.get(track_type, VIDEO_CLIP_BG))
     painter.setPen(QColor(255, 255, 160) if selected else QColor(160, 180, 220))
     painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
-    if clip_rect.width() <= 6:
-        return
     font = QFont(painter.font())
     font.setPixelSize(max(7, min(11, clip_rect.height() - 4)))
     painter.save()
     painter.setFont(font)
-    painter.setPen(QColor(230, 230, 230))
-    text = painter.fontMetrics().elidedText(" ".join(label.split()), Qt.ElideRight,
-                                            max(0, clip_rect.width() - 6))
-    painter.drawText(clip_rect, Qt.AlignCenter, text)
+    draw_clip_name(painter, clip_rect, visible_rect, label, caption=True, pad=3)
     painter.restore()
 
 

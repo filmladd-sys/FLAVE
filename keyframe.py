@@ -369,8 +369,27 @@ def graph_points(keys, stored_type, clip_start, length, ppf, left, top, height):
     return out
 
 
+def sticky_name_rect(text_rect, visible_rect=None, pad=4):
+    # BUILD 127: clip names are left-aligned with a small padding and stick
+    # to the visible left edge of the Clips area when the clip starts off
+    # screen; the right side stops at the clip (or visible) right edge.
+    # None if no room.
+    from PySide6.QtCore import QRect
+    left = text_rect.left()
+    right = text_rect.right()
+    if visible_rect is not None:
+        left = max(left, visible_rect.left())
+        right = min(right, visible_rect.right())
+    left += pad
+    right -= 2
+    if right - left + 1 <= 0:
+        return None
+    return QRect(left, text_rect.top(), right - left + 1, text_rect.height())
+
+
 def paint_keyframe_clip(painter, clip_rect, title, keys=None,
-                        clip_start=0, ppf=1.0, stored_type="", linked=True):
+                        clip_start=0, ppf=1.0, stored_type="", linked=True,
+                        visible_rect=None):
     # Caption-like body fill, plus a 15 px title bar. Keys: full-height white
     # vertical line, then a sized white square with black border and light
     # grey value text, clipped to the clip rect.
@@ -381,11 +400,14 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
     painter.fillRect(title_rect, QColor(0, 0, 0))
     painter.setPen(QPen(QColor(255, 255, 255)))
     painter.drawRect(title_rect.adjusted(0, 0, -1, -1))
-    if title_rect.width() > 4:
+    # BUILD 127: title left-aligned in the title bar, sticky (see
+    # sticky_name_rect); same font / color, elided at the right edge
+    name_rect = sticky_name_rect(title_rect, visible_rect, 3)
+    if name_rect is not None and name_rect.width() > 2:
         text = painter.fontMetrics().elidedText(
             " ".join(title_with_link_state(title, linked).split()), Qt.ElideRight,
-            max(0, title_rect.width() - 4))
-        painter.drawText(title_rect, Qt.AlignCenter, text)
+            name_rect.width())
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, text)
     if not keys or ppf <= 0:
         return
     body_h = max(0, clip_rect.height() - h)
