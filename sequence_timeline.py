@@ -917,9 +917,40 @@ class SequenceTimeline(QMainWindow):
         from timeline_clipboard import has_clipboard
         copy_action = menu.addAction("Copy")
         cut_action = menu.addAction("Cut")
-        paste_action = menu.addAction("Paste") if has_clipboard(self) else None
+        # paste_action = menu.addAction("Paste") if has_clipboard(self) else None
+        # BUILD 160: Paste is a submenu: To Mouse, To Tick; paste_action is
+        # then the (to mouse, to tick) pair, or None when hidden
+        paste_action = self._add_paste_submenu(menu) if has_clipboard(self) else None
         menu.addSeparator()
         return copy_action, cut_action, paste_action
+
+    def _add_paste_submenu(self, menu):
+        # BUILD 160: Paste > To Mouse (the frame under the right-click) /
+        # To Tick (the playhead). Returns (to mouse, to tick) actions.
+        paste_menu = menu.addMenu("Paste")
+        return (paste_menu.addAction("To Mouse"), paste_menu.addAction("To Tick"))
+
+    def _paste_mouse_frame(self, pos):
+        # BUILD 160: frame under the right-click, the same x -> frame
+        # conversion as drop (whole frames, never below 0); a click left of
+        # the Clips column (below-tracks space) counts as its left edge
+        return self._frame_at_clips_x(max(0, self._x_in_clips(pos)))
+
+    def _clip_paste_mouse(self, pos):
+        from timeline_clipboard import paste
+        paste(self, self._paste_mouse_frame(pos), True)
+
+    def _run_paste_pair(self, action, pair, pos):
+        # BUILD 160: True when action is To Mouse / To Tick of pair (run it)
+        if pair is None or action is None:
+            return False
+        if action == pair[0]:
+            self._clip_paste_mouse(pos)
+            return True
+        if action == pair[1]:
+            self._clip_paste_tic()
+            return True
+        return False
 
     def _add_empty_paste_action(self, menu):
         # BUILD 157: Paste on the empty-space / empty track menus, after a
@@ -931,21 +962,32 @@ class SequenceTimeline(QMainWindow):
             return None
         # menu.addSeparator()
         # return menu.addAction("Paste")
-        paste_action = menu.addAction("Paste")
+        # paste_action = menu.addAction("Paste")
+        # BUILD 160: Paste submenu (To Mouse, To Tick); returns the pair
+        paste_action = self._add_paste_submenu(menu)
         menu.addSeparator()
         return paste_action
 
-    def _run_clipboard_action(self, action, acts, clip):
+    # def _run_clipboard_action(self, action, acts, clip):
+    def _run_clipboard_action(self, action, acts, clip, pos=None):
         # BUILD 156: True when action was one of acts. Copy / Cut use the
         # selection (the right-click already selected an unselected clicked
         # clip with its link partners); with no selection, the clicked clip.
         # Paste: at the playhead (Paste To Tic).
+        # BUILD 160: paste_action is the (To Mouse, To Tick) pair; To Mouse
+        # pastes at the frame under pos (the right-click)
         copy_action, cut_action, paste_action = acts
-        if action is None or action not in [a for a in acts if a is not None]:
+        # if action is None or action not in [a for a in acts if a is not None]:
+        #     return False
+        # if action == paste_action:
+        #     self._clip_paste_tic()
+        #     return True
+        if action is None:
             return False
-        if action == paste_action:
-            self._clip_paste_tic()
+        if self._run_paste_pair(action, paste_action, pos):
             return True
+        if action not in (copy_action, cut_action):
+            return False
         if not self._selected_clip_ids:
             self._select_clip(clip, "normal")
         if action == copy_action:
@@ -994,8 +1036,10 @@ class SequenceTimeline(QMainWindow):
         acts = self._add_track_actions(menu)
         # paste_action = self._add_empty_paste_action(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if paste_action is not None and action == paste_action:
-            self._clip_paste_tic()
+        # if paste_action is not None and action == paste_action:
+        #     self._clip_paste_tic()
+        #     return
+        if self._run_paste_pair(action, paste_action, pos):     # BUILD 160
             return
         if action in acts:
             acts[action]()
@@ -1079,8 +1123,10 @@ class SequenceTimeline(QMainWindow):
             # Ctrl+V) when the clipboard has items, hidden when empty
             # paste_action = self._add_empty_paste_action(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if paste_action is not None and action == paste_action:
-            self._clip_paste_tic()
+        # if paste_action is not None and action == paste_action:
+        #     self._clip_paste_tic()
+        #     return
+        if self._run_paste_pair(action, paste_action, pos):     # BUILD 160
             return
         if action in add_track_acts:
             add_track_acts[action]()
@@ -2239,7 +2285,8 @@ class SequenceTimeline(QMainWindow):
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
             if action is None:
                 return
-            if self._run_clipboard_action(action, clip_acts, clip):
+            # if self._run_clipboard_action(action, clip_acts, clip):
+            if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
                 return
             if action == key_click_action:
                 click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
@@ -2270,7 +2317,8 @@ class SequenceTimeline(QMainWindow):
             # menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            if self._run_clipboard_action(action, clip_acts, clip):
+            # if self._run_clipboard_action(action, clip_acts, clip):
+            if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
                 return
             if action == edit_action:
                 self.edit_caption(clip)
@@ -2316,7 +2364,8 @@ class SequenceTimeline(QMainWindow):
         # menu.addSeparator()
         delete_action = menu.addAction("Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if self._run_clipboard_action(action, clip_acts, clip):
+        # if self._run_clipboard_action(action, clip_acts, clip):
+        if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
             return
         if action is not None and action in proxy_actions:
             from clip_proxy import apply_clip_proxy

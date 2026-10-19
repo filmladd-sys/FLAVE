@@ -122,6 +122,10 @@ def paste(tl, anchor, make_room):
     # Overwrite: existing clips under a pasted item are trimmed, moved in or
     # deleted (see the plan below). make_room is kept for callers; Paste To
     # Tic and Paste to End both overwrite.
+    # BUILD 160: every paste path (Ctrl+V, Edit menu Paste To Tic / Paste to
+    # End, right-click Paste > To Mouse / To Tick) overwrites the same way:
+    # covered clips removed, partly covered trimmed, a clip the paste lands
+    # inside split around it (overwrite_plan / apply_overwrite).
     from PySide6.QtWidgets import QMessageBox
     from keyframe import mem_id_from_db
     items = _CLIPBOARDS.get(_key(tl)) if tl.sequence_id is not None else None
@@ -148,26 +152,36 @@ def paste(tl, anchor, make_room):
     # paste in. Right overlap: in-point moved to the paste out (start and
     # source in_frame advance, length shrinks; keyframe keys stay put).
     # Fully inside: deleted.
-    state = {}      # mem id -> dict(cs, ce, shift, orig_cs, orig_ce, deleted)
-    for it in sorted(ok, key=lambda x: x["offset"]):
-        s = anchor + it["offset"]
-        e = s + it["length"]
-        for c in tl.clips_by_track.get(it["track_id"], []):
-            st = state.get(c[0])
-            if st is None:
-                cs0, ce0 = int(c[2]), int(c[2]) + int(c[3])
-                st = {"cs": cs0, "ce": ce0, "shift": 0, "orig_cs": cs0,
-                      "orig_ce": ce0, "deleted": False}
-            if st["deleted"] or st["ce"] <= s or st["cs"] >= e:
-                continue
-            if st["cs"] < s:
-                st["ce"] = s
-            elif st["ce"] > e:
-                st["shift"] += e - st["cs"]
-                st["cs"] = e
-            else:
-                st["deleted"] = True
-            state[c[0]] = st
+    # BUILD 160: replaced by overwrite_plan below. The old plan cut a clip
+    # spanning the paste at the paste in and dropped its right part, and
+    # dropped any gap between two pasted items inside one clip; a trimmed
+    # keyframe clip kept its keys outside the new range.
+    # state = {}      # mem id -> dict(cs, ce, shift, orig_cs, orig_ce, deleted)
+    # for it in sorted(ok, key=lambda x: x["offset"]):
+    #     s = anchor + it["offset"]
+    #     e = s + it["length"]
+    #     for c in tl.clips_by_track.get(it["track_id"], []):
+    #         st = state.get(c[0])
+    #         if st is None:
+    #             cs0, ce0 = int(c[2]), int(c[2]) + int(c[3])
+    #             st = {"cs": cs0, "ce": ce0, "shift": 0, "orig_cs": cs0,
+    #                   "orig_ce": ce0, "deleted": False}
+    #         if st["deleted"] or st["ce"] <= s or st["cs"] >= e:
+    #             continue
+    #         if st["cs"] < s:
+    #             st["ce"] = s
+    #         elif st["ce"] > e:
+    #             st["shift"] += e - st["cs"]
+    #             st["cs"] = e
+    #         else:
+    #             st["deleted"] = True
+    #         state[c[0]] = st
+    # BUILD 160: per destination track only, each existing clip keeps the
+    # parts of its range no pasted item on that track covers (pieces). No
+    # pieces: deleted. One piece: trimmed. Two or more (the paste lands
+    # inside it): split, the first piece keeps the row, the others are new
+    # rows (see apply_overwrite). Never refuses because of overlap.
+    state = overwrite_plan(tl, ok, anchor)
     # BUILD 106: sequence clips in the paste must pass the self / cycle
     # check against this sequence, else the whole paste is refused
     children = set()
@@ -199,35 +213,40 @@ def paste(tl, anchor, make_room):
         trimmed = deleted = 0
         # BUILD 106: pairs of sequence clips the overwrite deletes
         from sequence_timeline_sql import sequence_pairs_for, prune_sequence_children
+        # seq_pairs = sequence_pairs_for(
+        #     cur, [m for m, st in state.items() if st["deleted"]])
         seq_pairs = sequence_pairs_for(
-            cur, [m for m, st in state.items() if st["deleted"]])
-        for mem_id, st in state.items():
-            table, row_id = clip_table_and_id(mem_id)
-            ranges.append((st["orig_cs"], st["orig_ce"] - 1))
-            if st["deleted"]:
-                # Same row delete as the Delete path (no second undo)
-                cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
-                if table == "clips":
-                    from markers import delete_markers
-                    delete_markers(cur, [mem_id])
-                deleted += 1
-                continue
-            trimmed += 1
-            new_len = max(1, st["ce"] - st["cs"])
-            if table == "keyframe_clips":
-                # Keys are absolute frames: they do not move
-                cur.execute(
-                    "UPDATE keyframe_clips SET in_frame = ?, out_frame = ? WHERE id = ?",
-                    (st["cs"], st["cs"] + new_len, row_id))
-            elif table == "clips":
-                cur.execute(
-                    "UPDATE clips SET start_frame = ?, length_frames = ?, "
-                    "in_frame = in_frame + ? WHERE id = ?",
-                    (st["cs"], new_len, st["shift"], row_id))
-            else:
-                cur.execute(
-                    f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
-                    (st["cs"], new_len, row_id))
+            cur, [m for m, st in state.items() if not st["pieces"]])
+        # BUILD 160: old trim / delete loop (no split), replaced by
+        # apply_overwrite
+        # for mem_id, st in state.items():
+        #     table, row_id = clip_table_and_id(mem_id)
+        #     ranges.append((st["orig_cs"], st["orig_ce"] - 1))
+        #     if st["deleted"]:
+        #         # Same row delete as the Delete path (no second undo)
+        #         cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        #         if table == "clips":
+        #             from markers import delete_markers
+        #             delete_markers(cur, [mem_id])
+        #         deleted += 1
+        #         continue
+        #     trimmed += 1
+        #     new_len = max(1, st["ce"] - st["cs"])
+        #     if table == "keyframe_clips":
+        #         # Keys are absolute frames: they do not move
+        #         cur.execute(
+        #             "UPDATE keyframe_clips SET in_frame = ?, out_frame = ? WHERE id = ?",
+        #             (st["cs"], st["cs"] + new_len, row_id))
+        #     elif table == "clips":
+        #         cur.execute(
+        #             "UPDATE clips SET start_frame = ?, length_frames = ?, "
+        #             "in_frame = in_frame + ? WHERE id = ?",
+        #             (st["cs"], new_len, st["shift"], row_id))
+        #     else:
+        #         cur.execute(
+        #             f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
+        #             (st["cs"], new_len, row_id))
+        trimmed, deleted = apply_overwrite(cur, state, ranges)
         cols_by_table = {}
         groups = {}     # original link_id -> [(table, new row id, mem id)]
         for it in ok:
@@ -335,3 +354,158 @@ def paste(tl, anchor, make_room):
     if skipped:
         msg += f", skipped {skipped} (track no longer exists)"
     tl._after_clip_change(msg)
+
+
+# ---------------------------------------------------------------- BUILD 160
+# Paste overwrites: the pasted items replace whatever is in their time range
+# on their destination tracks (only tracks that receive a pasted item).
+
+
+def _subtract(cs, ce, spans):
+    # [cs, ce) minus the union of spans [(s, e)], as sorted [(a, b)] pieces
+    pieces = [(cs, ce)]
+    for s, e in sorted(spans):
+        out = []
+        for a, b in pieces:
+            if e <= a or s >= b:
+                out.append((a, b))
+                continue
+            if a < s:
+                out.append((a, s))
+            if e < b:
+                out.append((e, b))
+        pieces = out
+    return pieces
+
+
+def overwrite_plan(tl, ok, anchor):
+    # {mem id: {"cs", "ce", "pieces", "link_id"}} for every existing clip a
+    # pasted item overlaps on its destination track
+    spans = {}
+    for it in ok:
+        s = anchor + it["offset"]
+        spans.setdefault(it["track_id"], []).append((s, s + it["length"]))
+    state = {}
+    for track_id, sp in spans.items():
+        for c in tl.clips_by_track.get(track_id, []):
+            cs, ce = int(c[2]), int(c[2]) + int(c[3])
+            if not any(s < ce and e > cs for s, e in sp):
+                continue
+            state[c[0]] = {"cs": cs, "ce": ce, "pieces": _subtract(cs, ce, sp),
+                           "link_id": c[8] if len(c) > 8 else None}
+    return state
+
+
+def _copy_row(cur, table, row_id, changes):
+    # New row = copy of table row row_id (all columns but id) with changes
+    cols = [c for c in _columns(cur, table) if c != "id"]
+    cur.execute(f"SELECT {', '.join(cols)} FROM {table} WHERE id = ?", (row_id,))
+    vals = dict(zip(cols, cur.fetchone()))
+    vals.update(changes)
+    cur.execute(
+        f"INSERT INTO {table} ({', '.join(cols)}) VALUES "
+        f"({', '.join('?' for _ in cols)})", [vals[c] for c in cols])
+    return cur.lastrowid
+
+
+def _overwrite_keyframe_clip(cur, mem_id, st):
+    # Keyframe clip: cut at every piece edge with the slice path (keys by
+    # frame plus a boundary key each side, so the curve keeps its value on
+    # every kept frame), then delete the covered segments and their keys.
+    # Returns the kept pieces' mem ids in time order.
+    from keyframe import slice_keyframe_clip_db, db_id_from_mem
+    cuts = sorted({f for p in st["pieces"] for f in p
+                   if st["cs"] < f < st["ce"]})
+    segs = [(st["cs"], mem_id)]
+    cur_mem = mem_id
+    for f in cuts:
+        new_mem = slice_keyframe_clip_db(cur, cur_mem, f)
+        if new_mem is None:
+            continue
+        segs.append((f, new_mem))
+        cur_mem = new_mem
+    kept = []
+    for seg_start, seg_mem in segs:
+        if any(a <= seg_start < b for a, b in st["pieces"]):
+            kept.append(seg_mem)
+            continue
+        db_id = db_id_from_mem(seg_mem)
+        cur.execute("DELETE FROM keyframes WHERE keyframe_clip_id = ?", (db_id,))
+        cur.execute("DELETE FROM keyframe_clips WHERE id = ?", (db_id,))
+    return kept
+
+
+def apply_overwrite(cur, state, ranges):
+    # Run overwrite_plan in the paste's transaction (its one undo step).
+    # Trimmed: start / length set, a left trim advances the source in_frame
+    # by the same frames. Split: the first piece keeps the row, each other
+    # piece is a copy of the row (gain, proxy, sequence ref, text, ...) at
+    # its own source in-point; markers on a new piece's source frames move
+    # to it, as Slice does. Link like Slice: the first piece keeps the old
+    # link_id; the n-th pieces of one original group share a new link_id,
+    # an unlinked clip's pieces stay unlinked. Appends each touched clip's
+    # old span to ranges. Returns (trimmed, deleted) counts.
+    from sequence_timeline_captions import clip_table_and_id
+    from keyframe import mem_id_from_db, db_id_from_mem
+    trimmed = deleted = 0
+    extra = {}      # (old link_id, piece index) -> [(table, row id, mem id)]
+    for mem_id, st in state.items():
+        table, row_id = clip_table_and_id(mem_id)
+        ranges.append((st["cs"], st["ce"] - 1))
+        pieces = st["pieces"]
+        if not pieces:
+            # Same row delete as the Delete path (no second undo)
+            if table == "keyframe_clips":
+                cur.execute("DELETE FROM keyframes WHERE keyframe_clip_id = ?",
+                            (row_id,))
+            cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+            if table == "clips":
+                from markers import delete_markers
+                delete_markers(cur, [mem_id])
+            deleted += 1
+            continue
+        trimmed += 1
+        if table == "keyframe_clips":
+            kept = _overwrite_keyframe_clip(cur, mem_id, st)
+            for n, km in enumerate(kept[1:], 1):
+                extra.setdefault((st["link_id"], n), []).append(
+                    (table, db_id_from_mem(km), km))
+            continue
+        a0, b0 = pieces[0]
+        if table == "clips":
+            cur.execute("SELECT in_frame FROM clips WHERE id = ?", (row_id,))
+            in0 = int(cur.fetchone()[0] or 0)
+            for n, (a, b) in enumerate(pieces[1:], 1):
+                src_in = in0 + (a - st["cs"])
+                new_id = _copy_row(cur, "clips", row_id,
+                                   {"start_frame": a, "length_frames": b - a,
+                                    "in_frame": src_in})
+                from markers import move_markers
+                move_markers(cur, row_id, new_id, src_in, src_in + (b - a))
+                extra.setdefault((st["link_id"], n), []).append(
+                    ("clips", new_id, new_id))
+            cur.execute(
+                "UPDATE clips SET start_frame = ?, length_frames = ?, "
+                "in_frame = ? WHERE id = ?",
+                (a0, b0 - a0, in0 + (a0 - st["cs"]), row_id))
+        else:
+            for n, (a, b) in enumerate(pieces[1:], 1):
+                new_id = _copy_row(cur, table, row_id,
+                                   {"start_frame": a, "length_frames": b - a})
+                extra.setdefault((st["link_id"], n), []).append(
+                    (table, new_id, -new_id))
+            cur.execute(
+                f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
+                (a0, b0 - a0, row_id))
+    for (old_link, _n), members in extra.items():
+        if old_link is None:
+            new_link = None
+        else:
+            pick = ([m for m in members if m[0] == "clips"]
+                    or [m for m in members if m[0] == "keyframe_clips"]
+                    or members)
+            new_link = pick[0][2]
+        for table, row_id, _mem in members:
+            cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
+                        (new_link, row_id))
+    return trimmed, deleted
