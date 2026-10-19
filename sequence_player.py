@@ -825,7 +825,8 @@ class SequencePlayer(QWindow):
         opacity_f = ctypes.c_float(op)
         # BUILD 151: crop_x = px cut off the left AND the right of the source
         # (picture stays in place, kernel draws [crop_x, sw - crop_x]);
-        # negative = no crop. crop_y keeps the BUILD 147 shift below.
+        # negative = no crop. (BUILD 151: crop_y kept the BUILD 147 shift.)
+        # BUILD 152: crop_y is the same crop on y (top AND bottom).
         # BUILD 147: crop keyframes in ORIGINAL source pixels (None = 0).
         # The kernel samples the source shifted by (crop_x, crop_y) inside
         # the unchanged layer box; what leaves the source is transparent.
@@ -838,9 +839,11 @@ class SequencePlayer(QWindow):
                 c = 0.0
             if c and orig_size is not None and orig_size[orig_i]:
                 c = c * float(size) / float(orig_size[orig_i])
-            if orig_i == 0:
-                # BUILD 151: crop_x crops both sides; negative = no crop
-                c = max(0.0, c)
+            # if orig_i == 0:
+            #     # BUILD 151: crop_x crops both sides; negative = no crop
+            #     c = max(0.0, c)
+            # BUILD 152: crop_y too (top and bottom); negative = no crop
+            c = max(0.0, c)
             crops.append(ctypes.c_float(c))
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
