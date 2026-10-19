@@ -471,6 +471,11 @@ GL_QUADS = 0x0007
 # opacity (0..1) multiplies the layer alpha (opacity keyframes).
 # Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
 # inv_scale 1, and a scaled proxy frames to the same pixels as the original.
+# BUILD 151: crop_x is a real crop: a source pixel is drawn only if its
+# center lies in [crop_x, sw - crop_x] (crop_x source pixels removed from
+# the left and from the right; the picture does not move; crop_x <= 0 = no
+# crop; crop_x >= sw / 2 hides the layer). crop_y keeps the BUILD 147 rule
+# below. The BUILD 147 note (crop_x part no longer applies):
 # BUILD 147: crop_x / crop_y (source pixels, f32; 0 = unchanged). The layer
 # box is tested at the uncropped source position (sx, sy) as before; the
 # pixel is then read at (sx + crop_x, sy + crop_y), and a read outside the
@@ -494,7 +499,7 @@ PTX = b"""
     .reg .u32 usx, usy, off32, r, g, b, a, dr, dg, db, inv, c255;
     .reg .s32 oxv, oyv, sx, sy, pdx, pdy;
     .reg .f32 invs, invsy, fx, fy, fcx, fcy, fox, foy, fdx, fdy, fop, fa;
-    .reg .f32 fcrx, fcry;
+    .reg .f32 fcrx, fcry, fsx, fsw;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -554,7 +559,17 @@ PTX = b"""
     @p bra DONE;
     ld.param.f32 fcrx, [crop_x];
     ld.param.f32 fcry, [crop_y];
-    add.f32 fx, fx, fcrx;
+    // BUILD 151: crop_x removes fcrx source px from the left and from the
+    // right of the source (the picture stays in place); was a shift:
+    // add.f32 fx, fx, fcrx;
+    cvt.rn.f32.s32 fsx, sx;
+    add.f32 fsx, fsx, 0f3F000000;
+    setp.lt.f32 p, fsx, fcrx;
+    @p bra DONE;
+    cvt.rn.f32.u32 fsw, swv;
+    sub.f32 fsw, fsw, fcrx;
+    setp.gt.f32 p, fsx, fsw;
+    @p bra DONE;
     add.f32 fy, fy, fcry;
     cvt.rni.s32.f32 sx, fx;
     cvt.rni.s32.f32 sy, fy;
