@@ -283,7 +283,9 @@ def _refresh_after_restore(project_path, message):
                 tl._selected_clip_ids = set()
                 tl._selection_order = []
                 tl._selection_solo = False
-                tl._mark_preview_dirty([WHOLE_RANGE])
+                # BUILD 146: no whole-sequence mark: the reload's mile-marker
+                # diff (footage paths included) marks what the undo changed
+                # tl._mark_preview_dirty([WHOLE_RANGE])
                 tl._after_clip_change(message)
             except Exception as e:
                 print(f"Undo timeline refresh failed: {e}")

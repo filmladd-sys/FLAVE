@@ -1915,10 +1915,12 @@ class SequenceTimeline(QMainWindow):
             # clean frames with it (run right after the next forced
             # retarget, see _retarget_preview); otherwise old and new
             # ranges go dirty
-            ranges = self._move_preview_ranges(group, drag)
-            plan = self._preview_shift_plan(group, drag)
-            if plan is not None:
-                self._preview_pending_shift = (plan, ranges)
+            # BUILD 146: no per-edit plan: the mile-marker diff at the
+            # refresh finds the pure move (and its dirty spans) by itself
+            # ranges = self._move_preview_ranges(group, drag)
+            # plan = self._preview_shift_plan(group, drag)
+            # if plan is not None:
+            #     self._preview_pending_shift = (plan, ranges)
             # BUILD 139: otherwise the snapshot diff at the refresh marks
             # only the frames that changed (was: old and new ranges)
         except Exception as e:
@@ -2041,6 +2043,10 @@ class SequenceTimeline(QMainWindow):
     def _mark_preview_dirty(self, ranges):
         # Clean set drops these frames now (bar turns red); the database
         # UPDATE runs on the preview worker thread. refresh() wakes the worker.
+        # BUILD 146: per-edit marks are gone: every completed edit reaches
+        # refresh(), whose mile-marker diff marks exactly the spans that
+        # differ (callers kept; this does nothing).
+        return
         if self.sequence_id is None or not ranges:
             return
         try:
@@ -2432,6 +2438,9 @@ class SequenceTimeline(QMainWindow):
         # BUILD 135: completed edit / undo / reload: the audio mix may be
         # stale (the scrub burst rechecks the signature; Play always does).
         # Drags never get here before the drop.
+        # BUILD 146: the mile markers of the new state, built once here and
+        # used by both the audio bar ranges and the video dirty ranges
+        markers = self._build_mile_markers()
         try:
             from sequence_preview_audio import (mark_preview_audio_dirty,
                                                 audio_edit_ranges)
@@ -2441,7 +2450,8 @@ class SequenceTimeline(QMainWindow):
                 # (only what the next mix remixes; a pure move copies
                 # samples and stays green), not all red until the settle
                 audio_edit_ranges(self._project_db(), self.sequence_id,
-                                  float(self.fps or 30), int(self.total_frames()))
+                                  float(self.fps or 30), int(self.total_frames()),
+                                  markers=markers)
                 # BUILD 137: audio bar red now; settle the true state with
                 # one signature check AUDIO_SETTLE_MS after the last refresh.
                 # BUILD 138: that check also starts the background mix.
@@ -2451,7 +2461,58 @@ class SequenceTimeline(QMainWindow):
         except Exception:
             pass
         # Edit: new snapshot, wake the preview worker
-        self._retarget_preview(force=True)
+        self._retarget_preview(force=True, markers=markers)
+
+    def _footage_paths(self):
+        # BUILD 146: footage id -> original path (the video span descriptor:
+        # a relink or undo changes the picture under the same footage id)
+        try:
+            conn = sqlite3.connect(self._project_db())
+            try:
+                rows = conn.execute("SELECT id, original_path FROM footage").fetchall()
+            finally:
+                conn.close()
+            return dict((int(r[0]), r[1]) for r in rows)
+        except Exception:
+            return {}
+
+    def _video_index(self, snap):
+        from mile_markers import VideoIndex
+        try:
+            size = tuple(self._sequence_size())
+        except Exception:
+            size = None
+        return VideoIndex(snap, self._footage_paths(), size)
+
+    def _build_mile_markers(self, snap=None):
+        # BUILD 146: the mile markers (mile_markers.MarkerList) of the
+        # timeline now: the preview snapshot's layer stacks and the audio
+        # mix inputs. None on any failure (the caller falls back).
+        if self.sequence_id is None or not hasattr(self, "table"):
+            return None
+        try:
+            from sequence_player import timeline_snapshot
+            from mile_markers import MarkerList, AudioIndex
+            if snap is None:
+                snap = timeline_snapshot(self)
+            video = self._video_index(snap)
+            audio = inputs = layout = None
+            try:
+                from sequence_preview_audio import _mix_inputs, _layout_of
+                db = self._project_db()
+                inputs = _mix_inputs(db, self.sequence_id)
+                layout = _layout_of(inputs, float(self.fps or 30),
+                                    int(self.total_frames()), "")
+                audio = AudioIndex(layout)
+            except Exception as e:
+                print(f"Mile markers (audio) failed: {e}")
+                audio = inputs = layout = None
+            ml = MarkerList(video, audio, inputs, layout)
+            ml.snap = snap
+            return ml
+        except Exception as e:
+            print(f"Mile markers failed: {e}")
+            return None
 
     def _apply_controls_alignment(self):
         # Global setting playercontrols_alignment: left (default), center, right.
@@ -3003,7 +3064,7 @@ class SequenceTimeline(QMainWindow):
         if not self._playing and not self._play_filling:
             self._retarget_preview()
 
-    def _retarget_preview(self, force=False):
+    def _retarget_preview(self, force=False, markers=None):
         # Point the single preview worker at this timeline. GUI thread only:
         # the snapshot copies the rows and clips the worker composites.
         if self.sequence_id is None or not hasattr(self, "table"):
@@ -3023,8 +3084,15 @@ class SequenceTimeline(QMainWindow):
             # Snapshot only on edit, activation or first use; a scrub reuses it
             snap = getattr(self, "_preview_snapshot", None)
             old_snap = snap
+            old_ml = getattr(self, "_preview_markers", None)
+            new_ml = None
             if force or snap is None:
-                snap = timeline_snapshot(self)
+                # BUILD 146: the refresh's mile markers carry the snapshot
+                if force and markers is not None and getattr(markers, "snap", None) is not None:
+                    snap = markers.snap
+                    new_ml = markers
+                else:
+                    snap = timeline_snapshot(self)
                 self._preview_snapshot = snap
                 # BUILD 102: player caption overlay data, same refresh
                 old_caps = getattr(self, "_caption_snapshot", None)
@@ -3043,16 +3111,52 @@ class SequenceTimeline(QMainWindow):
             # BUILD 139: the frames this edit changes, from the snapshot
             # before vs after (same data the worker composites from): only
             # those go dirty. A failure marks everything (safe).
+            # BUILD 146: mile markers: the new marker list diffed against
+            # the previous one (mile_markers.diff_video): differing spans
+            # are dirty, a pure move found in the spans relocates its clean
+            # JPEG rows (FramesRelocate, queued before the dirty marks);
+            # no edit type is looked at.
             diff = []
+            relocs = []
+            if snap is not old_snap:
+                try:
+                    if new_ml is None or new_ml.video is None:
+                        from mile_markers import MarkerList
+                        new_ml = MarkerList(self._video_index(snap))
+                        new_ml.snap = snap
+                except Exception as e:
+                    print(f"Mile markers failed: {e}")
+                    new_ml = None
             if force and old_snap is not None and old_snap is not snap:
                 try:
-                    from sequence_preview_diff import changed_ranges
-                    diff = changed_ranges(old_snap, snap)
+                    from mile_markers import diff_video
+                    old_v = old_ml.video if (old_ml is not None
+                                             and getattr(old_ml, "snap", None) is old_snap) else None
+                    if old_v is None:
+                        # no list kept for the old snapshot: rebuild it with
+                        # the current paths / size (same descriptor format)
+                        from mile_markers import VideoIndex
+                        old_v = VideoIndex(old_snap, new_ml.video.paths, new_ml.video.size)
+                    diff, relocs = diff_video(old_v, new_ml.video)
                 except Exception as e:
                     print(f"Preview diff failed: {e}")
                     from sequence_preview_diff import WHOLE
-                    diff = [WHOLE]
+                    diff, relocs = [WHOLE], []
+            if new_ml is not None:
+                self._preview_markers = new_ml
+            if relocs:
+                try:
+                    from sequence_preview import FramesRelocate
+                    FramesRelocate(self._project_db(), self.sequence_id, relocs)
+                except Exception as e:
+                    # print(f"Preview relocate failed: {e}")
+                    from sequence_preview_diff import _merge
+                    diff = _merge(list(diff) + [(a + d, b + d) for a, b, d in relocs])
+            # BUILD 146: no per-edit shift plan any more (the marker diff
+            # finds pure moves); a stale one from an older path is dropped
             pending = getattr(self, "_preview_pending_shift", None)
+            self._preview_pending_shift = None
+            pending = None
             if force and pending:
                 # After the retarget, so the worker's old-snapshot pass
                 # cannot start a new chunk; a chunk already rendering was
@@ -3084,7 +3188,7 @@ class SequenceTimeline(QMainWindow):
                 self._preview_remark = []
                 from sequence_preview import FramesMarkDirty
                 FramesMarkDirty(self._project_db(), self.sequence_id, remark)
-            if force and (diff or pending or remark):
+            if force and (diff or pending or remark or relocs):
                 # BUILD 141: the marks came after the retarget: wake the
                 # worker so it sees them (no player needed to retrigger it)
                 get_worker().wake(self.sequence_id)

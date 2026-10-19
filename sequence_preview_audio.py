@@ -194,34 +194,44 @@ def settle_audio_state(project_db, sequence_id, fps, total_frames):
         return False
 
 
-def audio_edit_ranges(project_db, sequence_id, fps, total_frames):
+def audio_edit_ranges(project_db, sequence_id, fps, total_frames, markers=None):
     # BUILD 140, GUI thread, at a completed edit (refresh): the bar's dirty
     # frame ranges at once (one signature check + the layout plan, a few
     # small queries), instead of all red until the settle check. Only
     # dirty_frames changes: the dirty / stale / bar flags, the debounce and
     # the auto mix stay as they were.
+    # BUILD 146: markers = the refresh's MarkerList (its audio inputs and
+    # AudioIndex are used, no second load)
     try:
         st = _state(project_db, sequence_id)
-        inputs = _mix_inputs(project_db, sequence_id)
+        if markers is not None and markers.inputs is not None:
+            inputs = markers.inputs
+        else:
+            inputs = _mix_inputs(project_db, sequence_id)
         sig = _signature_of(inputs, fps, total_frames)
         have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
         if sig and have == sig and os.path.isfile(
                 preview_audio_wav_path(project_db, sequence_id)):
             st["dirty_frames"] = []         # the audio did not change
         else:
-            st["dirty_frames"] = _plan_frames(project_db, sequence_id, inputs,
-                                              fps, total_frames, sig)
+            st["dirty_frames"] = _plan_frames(
+                project_db, sequence_id, inputs, fps, total_frames, sig,
+                markers.audio if markers is not None else None)
         return st["dirty_frames"]
     except Exception:
         return None
 
 
-def _plan_frames(project_db, sequence_id, inputs, fps, total_frames, sig):
+def _plan_frames(project_db, sequence_id, inputs, fps, total_frames, sig,
+                 new_index=None):
     # BUILD 140: frames the next mix must remix (red), from the layout plan;
     # copied / zeroed samples of a pure move are not red. None = full mix.
     try:
-        plan = plan_partial(_read_layout(project_db, sequence_id),
-                            _layout_of(inputs, fps, total_frames, sig))
+        layout = _layout_of(inputs, fps, total_frames, sig)
+        if new_index is not None and (new_index.total != int(total_frames)
+                                      or new_index.fps != float(fps)):
+            new_index = None
+        plan = plan_partial(_read_layout(project_db, sequence_id), layout, new_index)
     except Exception:
         return None
     if plan is None:
@@ -997,6 +1007,15 @@ def cancel_mix(project_db, sequence_id):
 # No usable layout (missing, other signature, WAV size differs), an fps
 # change or a track reorder: full mix. (BUILD 139 also fell back to a full
 # mix for more than half the sequence to remix; BUILD 140 does not.)
+#
+# BUILD 146: the plan comes from mile markers (mile_markers.plan_audio):
+# the old and the new layout are cut into spans at every change point
+# (clip in / out, volume clip edges and keys, gain, enable); a span whose
+# descriptor (sources, sample offset, gain, volume state) differs is
+# remixed, an identical span found at another place is a sample copy (its
+# old samples zeroed). No walking of edit types; a track reorder is
+# partial too (only the spans whose layer order changed). The old row
+# planner is kept as plan_partial_rows (unused).
 
 LAYOUT_VERSION = 1
 # PARTIAL_MAX_FRACTION = 0.5
@@ -1121,9 +1140,31 @@ def _merge_ranges(ranges, n):
     return out
 
 
-def plan_partial(old, new):
+def plan_partial(old, new, new_index=None):
     # Sample-range plan turning the WAV of layout old into the WAV of layout
-    # new, or None when a full mix is needed. See the section comment.
+    # new, or None when a full mix is needed.
+    # BUILD 146: from the mile markers (mile_markers.plan_audio): the spans
+    # of the WAV's layout vs the timeline's, sample exact; dirty spans are
+    # remixed (zeroed where no row sounds), a pure move copies its samples.
+    # No row walking; a track reorder remixes only the spans where the sum
+    # order or a volume clip above changes (was: full mix).
+    # new_index: the timeline's AudioIndex when the caller has it (the
+    # refresh's MarkerList), else built from new.
+    if not old or not new or old.get("v") != LAYOUT_VERSION:
+        return None
+    from mile_markers import AudioIndex, plan_audio
+    plan = plan_audio(AudioIndex(old),
+                      new_index if new_index is not None else AudioIndex(new))
+    if plan is None:
+        return None
+    if plan["remix_len"] > PARTIAL_MAX_FRACTION * plan["n_new"]:
+        return None
+    return plan
+
+
+def plan_partial_rows(old, new):
+    # BUILD 139-140 row-diff plan, superseded by the mile markers (BUILD
+    # 146); unused, kept for comparison.
     if not old or not new or old.get("v") != LAYOUT_VERSION:
         return None
     if float(old["fps"]) != float(new["fps"]):

@@ -102,6 +102,66 @@ def FramesShift(project_path, sequence_id, first, last, delta):
         del _DIRTY_LOG[:-256]
 
 
+def FramesRelocate(project_path, sequence_id, relocs):
+    # BUILD 146: mile-marker relocations [(first, last, delta)] (a pure move
+    # proved span by span): the clean rows of first..last are copied to
+    # first+delta..last+delta. GUI thread. Only the targets leave the clean
+    # set now (logged dirty, so an in-flight worker batch keeps them dirty);
+    # the sources keep their rows (the marker diff marks them if their own
+    # picture changed, queued after this). The worker reads every source
+    # before writing any target (one transaction), so swapped blocks copy
+    # correctly.
+    key = (os.path.abspath(project_path), int(sequence_id))
+    relocs = [(int(a), int(b), int(d)) for a, b, d in relocs if int(b) >= int(a)]
+    if not relocs:
+        return
+    s = clean_set(project_path, sequence_id)
+    with _CLEAN_LOCK:
+        for a, b, d in relocs:
+            for f in [f for f in s if a + d <= f <= b + d]:
+                s.discard(f)
+            _DIRTY_SEQ[0] += 1
+            _DIRTY_LOG.append((_DIRTY_SEQ[0], key, a + d, b + d))
+        _DIRTY_QUEUE.append((project_path, int(sequence_id), None, None,
+                             ("relocate", relocs), _DIRTY_SEQ[0]))
+        del _DIRTY_LOG[:-256]
+
+
+def _apply_relocate(project_path, sequence_id, relocs, seq):
+    # Worker thread: FramesRelocate's copies in one transaction
+    key = (os.path.abspath(project_path), int(sequence_id))
+    conn = _connect(project_path, sequence_id)
+    moved = []
+    try:
+        got = []
+        for a, b, d in relocs:
+            rows = conn.execute(
+                "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
+                "AND dirty = 0 AND jpeg IS NOT NULL", (a, b)).fetchall()
+            got.append((d, rows))
+        for a, b, d in relocs:
+            conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
+                         (a + d, b + d))
+        for d, rows in got:
+            for frame, jpeg in rows:
+                nf = int(frame) + d
+                if nf < 0 or jpeg is None:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO preview (frame, dirty, jpeg) VALUES (?, 0, ?)",
+                    (nf, jpeg))
+                moved.append(nf)
+        conn.commit()
+    finally:
+        conn.close()
+    s = clean_set(project_path, sequence_id)
+    with _CLEAN_LOCK:
+        for a, b, d in relocs:
+            for f in [f for f in s if a + d <= f <= b + d]:
+                s.discard(f)
+        s.update(f for f in moved if not _dirty_since(key, seq, f))
+
+
 def _apply_shift(project_path, sequence_id, first, last, delta, seq):
     # Worker thread: move clean rows first..last by delta in one transaction
     key = (os.path.abspath(project_path), int(sequence_id))
@@ -146,6 +206,15 @@ def apply_dirty_queue():
     for item in items:
         project_path, sequence_id, first, last = item[:4]
         if not os.path.isfile(preview_db_path(project_path, sequence_id)):
+            continue
+        if len(item) > 4 and isinstance(item[4], tuple) and item[4][0] == "relocate":
+            # BUILD 146: (project, sequence, None, None, ("relocate", relocs),
+            # seq). On a failure the targets are already out of the clean
+            # set, so the worker rebuilds them.
+            try:
+                _apply_relocate(project_path, sequence_id, item[4][1], item[5])
+            except Exception as e:
+                print(f"Preview relocate failed: {e}")
             continue
         if len(item) > 4:
             # (project, sequence, first, last, delta, seq): row shift. On a
