@@ -631,6 +631,7 @@ def _make_window_class():
             self.sequence_id = int(timeline.sequence_id)
             self.job = None
             self._closing = False
+            self._user_cancel = False
             self._bridge = _Bridge()
             self._bridge.done.connect(self._on_done, Qt.QueuedConnection)
             from sequence_timeline_sql import _load_sequence_name
@@ -695,6 +696,10 @@ def _make_window_class():
             self.render_btn = QPushButton("Render")
             self.render_btn.clicked.connect(self._render)
             row.addWidget(self.render_btn)
+            # BUILD 143: Cancel cancels a running render, else closes the window
+            self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn.clicked.connect(self._cancel)
+            row.addWidget(self.cancel_btn)
             outer.addLayout(row)
             self.status = QLabel("")
             self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -708,6 +713,7 @@ def _make_window_class():
 
         def _set_busy(self, busy, text=""):
             self.render_btn.setEnabled(not busy)
+            self.render_btn.setText("Rendering" if busy else "Render")
             if busy:
                 self.setCursor(Qt.WaitCursor)       # this window only
             else:
@@ -717,6 +723,7 @@ def _make_window_class():
         def _render(self):
             if self.job is not None:
                 return
+            self._user_cancel = False
             # BUILD 142: no Sequence Player and no OpenGL wait: the render
             # composites on its own headless GPU composer
             # from sequence_player import open_player_for
@@ -797,12 +804,29 @@ def _make_window_class():
             self.job = None
             if self._closing:
                 return
+            if self._user_cancel and not ok:
+                # Cancel button: no error box, the window stays open
+                self._user_cancel = False
+                self._set_busy(False, "Render cancelled.")
+                return
+            self._user_cancel = False
             if ok:
                 self._set_busy(False, msg)
             else:
                 self._set_busy(False, "Render failed.")
                 from proxy_manager import show_message
                 show_message(self, "Render Manager", msg)
+
+        def _cancel(self):
+            # BUILD 143: running render -> cancel it (RenderJob.cancel: flag
+            # + kill ffmpeg; the thread ends after the current GPU batch and
+            # _on_done restores the idle UI); idle -> close the window
+            if self.job is not None:
+                self._user_cancel = True
+                self.job.cancel()
+                self.status.setText("Cancelling the render...")
+                return
+            self.close()
 
         def closeEvent(self, event):
             # Closing (or New Project) cancels a running render
