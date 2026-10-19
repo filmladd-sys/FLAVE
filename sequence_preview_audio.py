@@ -7,6 +7,7 @@ import hashlib
 import os
 import sqlite3
 import threading
+import time
 import wave
 
 try:
@@ -399,9 +400,14 @@ def _audiotmp_idents(project_db, names):
     try:
         conn = sqlite3.connect(path)
         try:
+            # BUILD 138: the newest row per name via a join. GROUP BY with
+            # length(audioblob) in the select list made SQLite read every
+            # blob into the sorter (~0.5 s for a few long sources, on the GUI
+            # thread); this form reads only the record headers (same result).
             rows = conn.execute(
-                "SELECT originalfilename, MAX(id), length(audioblob) FROM AudioTmp "
-                "WHERE originalfilename IN (%s) GROUP BY originalfilename"
+                "SELECT a.originalfilename, a.id, length(a.audioblob) FROM AudioTmp a "
+                "JOIN (SELECT MAX(id) AS mid FROM AudioTmp WHERE originalfilename "
+                "IN (%s) GROUP BY originalfilename) m ON a.id = m.mid"
                 % ",".join("?" * len(names)), list(names)).fetchall()
         finally:
             conn.close()
@@ -428,8 +434,21 @@ class MixCancelled(Exception):
     pass
 
 
+# BUILD 138: the background mix works in chunks of MIX_CHUNK samples (~5 s
+# of 48 kHz audio, a few ms of numpy each) and yields the GIL between them
+# with time.sleep(0), so the GUI thread and the video preview worker get it
+# every few ms even on long sequences.
+MIX_CHUNK = 262144
+
+
+def _mix_yield():
+    if threading.current_thread() is not threading.main_thread():
+        time.sleep(0)
+
+
 def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=None,
-             cancel=None):
+             cancel=None, as_array=False):
+    # as_array (BUILD 138, numpy only): return the int16 array, not bytes.
     # Return mono s16le bytes for the full sequence length (silence where empty).
     # vol_clips / track_order: linked volume keyframe gain (volume_gain).
     # cancel (BUILD 136): a threading.Event checked once per clip; set =
@@ -444,12 +463,15 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
         for r in rows:
             if cancel is not None and cancel.is_set():
                 raise MixCancelled()
+            _mix_yield()
             if r["length_frames"] <= 0 or not r["basename"]:
                 continue
             pcm = load_audiotmp(project_db, r["basename"])
             if not pcm:
                 continue
-            src = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
+            # BUILD 138: no whole-source float copy (it was most of the mix
+            # time); the used span is converted chunk by chunk below
+            src = np.frombuffer(pcm, dtype="<i2", count=len(pcm) // 2)
             dst0 = _frame_to_sample(r["start_frame"], fps)
             src0 = _frame_to_sample(r["in_frame"], fps)
             count = _frame_to_sample(r["length_frames"], fps)
@@ -467,15 +489,31 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
             gain = volume_gain(vol_clips, r.get("link_id"),
                                track_order.get(r["track_id"]), dst0, use, fps)
             lin = db_to_linear(r.get("gain_db", 0.0))
-            if gain is None:
-                if lin == 1.0:
-                    acc[dst0:dst1] += src[src0:src0 + use]
+            # BUILD 138: MIX_CHUNK samples at a time, yielding the GIL between
+            # chunks (same arithmetic per sample as before: identical output)
+            for a in range(0, use, MIX_CHUNK):
+                b = min(use, a + MIX_CHUNK)
+                seg = src[src0 + a:src0 + b].astype(np.float64)
+                if gain is None:
+                    if lin == 1.0:
+                        acc[dst0 + a:dst0 + b] += seg
+                    else:
+                        acc[dst0 + a:dst0 + b] += seg * lin
                 else:
-                    acc[dst0:dst1] += src[src0:src0 + use] * lin
-            else:
-                acc[dst0:dst1] += src[src0:src0 + use] * (gain * lin)
-        acc = np.clip(acc, -32768, 32767).astype("<i2")
-        return acc.tobytes()
+                    acc[dst0 + a:dst0 + b] += seg * (gain[a:b] * lin)
+                if cancel is not None and cancel.is_set():
+                    raise MixCancelled()
+                _mix_yield()
+            src = pcm = gain = None
+        out = np.empty(n, dtype="<i2")
+        for a in range(0, n, MIX_CHUNK):
+            b = min(n, a + MIX_CHUNK)
+            out[a:b] = np.clip(acc[a:b], -32768, 32767)
+            _mix_yield()
+        acc = None
+        if as_array:
+            return out          # BUILD 138: the worker writes it in chunks
+        return out.tobytes()
     # array-module fallback
     import array
     acc = [0.0] * n
@@ -527,7 +565,16 @@ def _write_wav_file(path, pcm_bytes):
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(SAMPLE_RATE)
-        w.writeframes(pcm_bytes)
+        if isinstance(pcm_bytes, (bytes, bytearray)):
+            w.writeframes(pcm_bytes)
+            return
+        # BUILD 138: an int16 array from the worker, written in chunks (no
+        # whole-WAV bytes copy holding the GIL), yielding between them
+        flat = pcm_bytes.view(np.uint8)
+        step = MIX_CHUNK * 2
+        for a in range(0, len(flat), step):
+            w.writeframesraw(flat[a:a + step].data)
+            _mix_yield()
 
 
 def build_preview_audio_wav(project_db, sequence_id, fps, total_frames):
@@ -640,6 +687,16 @@ def preview_audio_current(project_db, sequence_id, fps, total_frames):
     return None, want
 
 
+def any_mix_running(exclude=None):
+    # BUILD 138: True if a mix runs for any sequence other than exclude
+    # ((project_db, sequence_id) or None). For the global auto-mix cap.
+    skip = _state_key(*exclude) if exclude else None
+    for key, job in list(_JOBS.items()):
+        if key != skip and job is not None and not job.done:
+            return True
+    return False
+
+
 def running_mix(project_db, sequence_id):
     job = _JOBS.get(_state_key(project_db, sequence_id))
     if job is not None and not job.done:
@@ -657,6 +714,9 @@ def start_mix(project_db, sequence_id, fps, total_frames, sig):
     if old is not None and not old.done:
         old.cancel.set()
     job = MixJob(project_db, sequence_id, fps, total_frames, sig)
+    # BUILD 138: one mix at a time per sequence: the new worker first waits
+    # for the cancelled one (it stops within a chunk)
+    job.prev = old if (old is not None and not old.done) else None
     _JOBS[key] = job
     t = threading.Thread(target=_mix_worker, args=(job,),
                          name="PreviewAudioMix-%d" % job.token)
@@ -671,11 +731,17 @@ def _mix_worker(job):
     # files; never Qt.
     tmp = preview_audio_wav_path(job.project_db, job.sequence_id) + ".%d.tmp" % job.token
     try:
+        prev = getattr(job, "prev", None)
+        job.prev = None
+        if prev is not None and prev.thread is not None:
+            prev.thread.join()
+        if job.cancel.is_set():
+            raise MixCancelled()
         rows = _load_mix_rows(job.project_db, job.sequence_id)
         order = _track_order(job.project_db, job.sequence_id)
         vols = _load_volume_clips(job.project_db, job.sequence_id, order)
         pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames, vols,
-                       order, cancel=job.cancel)
+                       order, cancel=job.cancel, as_array=_HAS_NP)
         if job.cancel.is_set():
             raise MixCancelled()
         _write_wav_file(tmp, pcm)

@@ -55,6 +55,9 @@ from PySide6.QtGui import (
 
 # BUILD 108: clip backgrounds
 VIDEO_CLIP_BG = QColor(70, 90, 130)
+# BUILD 138: debounce after the last completed edit before the audio state
+# check (which also starts the background mix); quick edits -> one mix
+AUDIO_SETTLE_MS = 500
 AUDIO_CLIP_BG = QColor(80, 80, 80)
 
 class ClipDelegate(QStyledItemDelegate):
@@ -581,6 +584,8 @@ class SequenceTimeline(QMainWindow):
         self._audio_mix_job = None    # BUILD 136: sequence_preview_audio.MixJob
         self._audio_mix_timer = None  # BUILD 136: GUI-thread poll of the job
         self._audio_bar_timer = None  # BUILD 137: debounced audio state check
+        self._audio_auto_failed = False  # BUILD 138: no auto retry until an edit / Play
+        self._audio_auto_wanted = False  # BUILD 138: auto mix waits for the global slot
         name = _load_sequence_name(sequence_id)
         if name:
             self.setWindowTitle(f"Sequence Timeline: {name}: #{sequence_id}")
@@ -2433,7 +2438,10 @@ class SequenceTimeline(QMainWindow):
             if self.sequence_id is not None and self._project_db():
                 mark_preview_audio_dirty(self._project_db(), self.sequence_id)
                 # BUILD 137: audio bar red now; settle the true state with
-                # one signature check 300 ms after the last refresh
+                # one signature check AUDIO_SETTLE_MS after the last refresh.
+                # BUILD 138: that check also starts the background mix.
+                # A new edit retries a failed mix.
+                self._audio_auto_failed = False
                 self._audio_bar_schedule()
         except Exception:
             pass
@@ -2595,7 +2603,7 @@ class SequenceTimeline(QMainWindow):
         if self._audio_bar_timer is None:
             self._audio_bar_timer = QTimer(self)
             self._audio_bar_timer.setSingleShot(True)
-            self._audio_bar_timer.setInterval(300)
+            self._audio_bar_timer.setInterval(AUDIO_SETTLE_MS)
             self._audio_bar_timer.timeout.connect(self._audio_bar_check)
         self._audio_bar_timer.start()
         try:
@@ -2605,15 +2613,35 @@ class SequenceTimeline(QMainWindow):
 
     def _audio_bar_check(self):
         # BUILD 137: one signature check on the GUI thread (a few small
-        # queries); green when the WAV is current and no mix runs
+        # queries); green when the WAV is current and no mix runs.
+        # BUILD 138: a stale / missing WAV starts the background mix here
+        # (no Play needed); a running mix of an older state is restarted
+        # (start_mix reuses a job that already mixes the current state).
         try:
-            from sequence_preview_audio import settle_audio_state
+            if (getattr(self, "_edge_drag", None) is not None
+                    or getattr(self, "_key_drag", None) is not None
+                    or getattr(self, "_marker_drag", None) is not None):
+                self._audio_bar_schedule()      # never mid-drag: try later
+                return
+            from sequence_preview_audio import (settle_audio_state, running_mix,
+                                                any_mix_running)
             db = self._project_db()
             if db and self.sequence_id is not None:
-                settle_audio_state(db, self.sequence_id, float(self.fps or 30),
-                                   int(self.total_frames()))
-        except Exception:
-            pass
+                if running_mix(db, self.sequence_id) is not None:
+                    self._audio_mix_kick()
+                elif not settle_audio_state(db, self.sequence_id,
+                                            float(self.fps or 30),
+                                            int(self.total_frames())):
+                    if self._audio_auto_failed:
+                        pass        # failed: wait for an edit or Play
+                    elif any_mix_running(exclude=(db, self.sequence_id)):
+                        # global cap: one auto mix at a time (the poll retries)
+                        self._audio_auto_wanted = True
+                    else:
+                        self._audio_auto_wanted = False
+                        self._audio_mix_kick()
+        except Exception as e:
+            print(f"Audio state check failed: {e}")
         try:
             self.ruler.viewport().update()
         except Exception:
@@ -2628,6 +2656,12 @@ class SequenceTimeline(QMainWindow):
             self._audio_mix_job = None
         if status in ("stale", "cancelled") and pending:
             self._audio_mix_kick()
+        elif status == "failed":
+            # BUILD 138: red, and no automatic retry loop
+            self._audio_auto_failed = True
+        elif status == "stale":
+            # BUILD 138: an edit landed during the auto mix: settle again
+            self._audio_bar_schedule()
         return status
 
     def _audio_mix_wait(self):
@@ -3052,7 +3086,14 @@ class SequenceTimeline(QMainWindow):
             from sequence_preview_audio import check_audio_source
             db = self._project_db() if self.sequence_id is not None else ""
             if db and check_audio_source(db, self.sequence_id):
+                self._audio_auto_failed = False     # new source: retry
                 self._audio_bar_schedule()
+            elif db and self._audio_auto_wanted:
+                # BUILD 138: an auto mix waits for another sequence's mix
+                from sequence_preview_audio import any_mix_running
+                if not any_mix_running(exclude=(db, self.sequence_id)):
+                    self._audio_auto_wanted = False
+                    self._audio_bar_check()
         except Exception:
             pass
         # BUILD 136: both statuses when both run
