@@ -565,6 +565,9 @@ class SequenceTimeline(QMainWindow):
         self._snap_frame = None
         self._drop_info = None        # BUILD 125 drop preview
         self._drop_preview = []
+        self._rubber = None           # BUILD 148 rubber band (armed / drag)
+        self._rubber_rect = None      # BUILD 148 box drawn by the overlay
+        self._rubber_eat_menu = False
         self.clips_by_track = {}
         self._selected_clip_ids = set()
         self._selection_order = []
@@ -1290,6 +1293,12 @@ class SequenceTimeline(QMainWindow):
                 handled = slice_event(self, obj, event)
                 if handled is not None:
                     return handled
+            # BUILD 148: right-drag rubber-band selection in empty track
+            # space (a plain right-click still opens the same menu)
+            from sequence_timeline_rubber import rubber_event
+            handled = rubber_event(self, obj, event)
+            if handled is not None:
+                return handled
             if etype == QEvent.Resize and getattr(self, "playhead_overlay", None):
                 self.playhead_overlay.setGeometry(obj.rect())
                 self.playhead_overlay.raise_()

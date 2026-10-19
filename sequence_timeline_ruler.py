@@ -408,6 +408,12 @@ class PlayheadOverlay(QWidget):
             painter = QPainter(self)
             paint_slice_lines(tl, painter)
             painter.end()
+        # BUILD 148: rubber-band selection box (white border)
+        if getattr(tl, "_rubber_rect", None) is not None:
+            from sequence_timeline_rubber import paint_rubber
+            painter = QPainter(self)
+            paint_rubber(tl, painter)
+            painter.end()
         # Snap line (white) through every track while a drag snaps
         snap = getattr(tl, "_snap_frame", None)
         if snap is not None:
