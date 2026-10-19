@@ -2031,14 +2031,8 @@ class SequenceTimeline(QMainWindow):
             key_click_action = key_menu.addAction("At Mouse Click")
             key_tick_action = key_menu.addAction("At Timeline Tick")
             rename_action = menu.addAction("Rename")
-            # Linked: Unlink only; not linked: Link only
-            linked = len(clip) > 8 and clip[8] is not None
-            link_action = unlink_action = None
-            if linked:
-                unlink_action = menu.addAction("Unlink")
-            else:
-                link_action = menu.addAction("Link")
-                link_action.setEnabled(len(self._selected_clips()) >= 2)
+            # BUILD 133: Link / Unlink from the whole selection
+            link_action, unlink_action = self._add_link_actions(menu, clip)
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -2054,20 +2048,19 @@ class SequenceTimeline(QMainWindow):
                 from keyframe import rename_keyframe_clip
                 rename_keyframe_clip(self, clip)
             elif link_action is not None and action == link_action:
-                self.link_selected_clips()
+                self.link_selected_clips(clip)
             elif unlink_action is not None and action == unlink_action:
                 self.unlink_clips(clip)
             elif action == delete_action:
                 self.delete_selected_clip()
             return
         if is_caption_id(clip[0]):
-            # Caption clip menu: Edit, Slice, Link, Unlink, Delete
+            # Caption clip menu: Edit, Slice, Link or Unlink, Delete
+            # (BUILD 133: one of the two, same rule as the other clip menus)
             menu = QMenu(self)
             edit_action = menu.addAction("Edit")
             slice_action = menu.addAction("Slice")
-            link_action = menu.addAction("Link")
-            link_action.setEnabled(len(self._selected_clips()) >= 2)
-            unlink_action = menu.addAction("Unlink")
+            link_action, unlink_action = self._add_link_actions(menu, clip)
             menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -2075,9 +2068,9 @@ class SequenceTimeline(QMainWindow):
                 self.edit_caption(clip)
             elif action == slice_action:
                 self.slice_clip(clip, self._x_in_clips(pos))
-            elif action == link_action:
-                self.link_selected_clips()
-            elif action == unlink_action:
+            elif link_action is not None and action == link_action:
+                self.link_selected_clips(clip)
+            elif unlink_action is not None and action == unlink_action:
                 self.unlink_clips(clip)
             elif action == delete_action:
                 self.delete_selected_clip()
@@ -2096,14 +2089,8 @@ class SequenceTimeline(QMainWindow):
         marker_menu = menu.addMenu("Marker")
         marker_click_action = marker_menu.addAction("Add To Mouse Click")
         marker_tick_action = marker_menu.addAction("Add to Time Tick")
-        # Linked: Unlink only; not linked: Link only
-        clip_linked = len(clip) > 8 and clip[8] is not None
-        link_action = unlink_action = None
-        if clip_linked:
-            unlink_action = menu.addAction("Unlink")
-        else:
-            link_action = menu.addAction("Link")
-            link_action.setEnabled(len(self._selected_clips()) >= 2)
+        # BUILD 133: Link / Unlink from the whole selection
+        link_action, unlink_action = self._add_link_actions(menu, clip)
         menu.addSeparator()
         enable_action = menu.addAction("Disable" if enabled else "Enable")
         solo_action = menu.addAction("Solo")
@@ -2140,7 +2127,7 @@ class SequenceTimeline(QMainWindow):
         elif action == slice_action:
             self.slice_clip(clip, self._x_in_clips(pos))
         elif link_action is not None and action == link_action:
-            self.link_selected_clips()
+            self.link_selected_clips(clip)
         elif unlink_action is not None and action == unlink_action:
             self.unlink_clips(clip)
         elif action == enable_action:
@@ -2173,13 +2160,33 @@ class SequenceTimeline(QMainWindow):
             return
         self._after_clip_change(f"Marker at frame {frame}")
 
-    def link_selected_clips(self):
-        # Link: every selected clip gets link_id = first selected clip's id
-        # (footage clips / captions / keyframe_clips each store their own)
-        selected = list(self._selected_clips())
-        if len(selected) < 2:
+    def _add_link_actions(self, menu, clip):
+        # BUILD 133: one of Link / Unlink (sequence_timeline_link.
+        # link_menu_choice): all selected in one group -> Unlink; any
+        # unlinked or a second group in the selection -> Link; a one-member
+        # (dangling) link counts as unlinked. Returns (link, unlink) actions.
+        from sequence_timeline_link import link_menu_choice
+        choice, enabled = link_menu_choice(self._selected_clips(), clip,
+                                           self.clips_by_track)
+        if choice == "unlink":
+            return None, menu.addAction("Unlink")
+        link_action = menu.addAction("Link")
+        link_action.setEnabled(enabled)
+        return link_action, None
+
+    def link_selected_clips(self, clip=None):
+        # Link: every selected clip joins one link_id (footage clips /
+        # captions / keyframe_clips each store their own). BUILD 133: the
+        # winner is the right-clicked clip's group, else the first selected
+        # clip's group, else the first selected clip's id; every member of
+        # each group the selection touches joins (groups merge).
+        from sequence_timeline_link import link_plan
+        plan = link_plan(self._selected_clips(), clip, self.clips_by_track)
+        if plan is None:
             return
-        new_link = selected[0][0]
+        new_link, selected = plan
+        if not selected:
+            return
         from undo import push_undo
         push_undo(self._project_db(), "Link clips")
         try:
