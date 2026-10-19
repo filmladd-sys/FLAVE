@@ -676,6 +676,15 @@ class SequenceTimeline(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        # BUILD 129: 'Generating preview NN%' in a permanent label at the
+        # right of the status bar (showMessage, the play clock / frame text,
+        # is untouched). Polled on the GUI thread at 4 per second.
+        self._preview_status = QLabel("")
+        self.status_bar.addPermanentWidget(self._preview_status)
+        self._preview_status_timer = QTimer(self)
+        self._preview_status_timer.setInterval(250)
+        self._preview_status_timer.timeout.connect(self._preview_status_poll)
+        self._preview_status_timer.start()
 
         # Zoom keys work regardless of which child has focus
         for keys in ["+", "=", "Ctrl+="]:
@@ -2794,6 +2803,21 @@ class SequenceTimeline(QMainWindow):
             if self._play_ready():
                 self._start_clock()
 
+    def _preview_status_poll(self):
+        # BUILD 129: worker progress -> status label (text set only on change)
+        try:
+            from sequence_preview_worker import _worker, status_text
+            prog = getattr(_worker, "progress", None)
+            # The project path (a settings read) only while generating here
+            if prog is None or prog[1] != self.sequence_id:
+                text = ""
+            else:
+                text = status_text(_worker, self._project_db(), self.sequence_id)
+        except Exception:
+            text = ""
+        if self._preview_status.text() != text:
+            self._preview_status.setText(text)
+
     def changeEvent(self, event):
         # Active timeline gets the preview worker
         super().changeEvent(event)
@@ -2909,6 +2933,8 @@ class SequenceTimeline(QMainWindow):
             pass
         if hasattr(self, "_preview_timer"):
             self._preview_timer.stop()
+        if hasattr(self, "_preview_status_timer"):
+            self._preview_status_timer.stop()
         # The player closes with its timeline
         if getattr(self, "_player", None) is not None:
             from sequence_player import close_player_for
