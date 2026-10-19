@@ -45,7 +45,8 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QStatusBar, QMessageBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QInputDialog, QAbstractItemView, QMenu, QApplication,
     QStyledItemDelegate, QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-    QCheckBox, QLineEdit, QLabel, QColorDialog, QDialogButtonBox
+    QCheckBox, QLineEdit, QLabel, QColorDialog, QDialogButtonBox,
+    QProxyStyle, QStyle, QStyleFactory
 )
 from PySide6.QtCore import Qt, QRect, QEvent, QTimer
 from PySide6.QtGui import (
@@ -59,6 +60,46 @@ VIDEO_CLIP_BG = QColor(70, 90, 130)
 # check (which also starts the background mix); quick edits -> one mix
 AUDIO_SETTLE_MS = 500
 AUDIO_CLIP_BG = QColor(80, 80, 80)
+
+# BUILD 158: no track highlight. The track table draws every cell with a
+# row panel (QTableView drawCell -> PE_PanelItemViewRow) and the item panel
+# (CE_ItemViewItem -> PE_PanelItemViewItem) carrying the Selected /
+# MouseOver / HasFocus states; the platform style paints those light grey /
+# lighter on hover (header cells and the clip-area lane). This style drops
+# those states for the track table only, so a row always paints exactly as
+# an unselected, unhovered row; the focus rectangle is not drawn.
+_TRACK_STRIP_STATES = (QStyle.State_Selected | QStyle.State_MouseOver
+                       | QStyle.State_HasFocus)
+
+
+def _plain_option(opt):
+    opt = type(opt)(opt)
+    opt.state = opt.state & ~_TRACK_STRIP_STATES
+    return opt
+
+
+class _NoTrackHighlightStyle(QProxyStyle):
+    def drawPrimitive(self, element, option, painter, widget=None):
+        if element in (QStyle.PE_PanelItemViewRow, QStyle.PE_PanelItemViewItem):
+            option = _plain_option(option)
+        elif element == QStyle.PE_FrameFocusRect:
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+    def drawControl(self, element, option, painter, widget=None):
+        if element == QStyle.CE_ItemViewItem:
+            option = _plain_option(option)
+        super().drawControl(element, option, painter, widget)
+
+
+def _track_table_style(table):
+    # Same base as the application style (the app never sets one: the
+    # platform default), parented to the table so it lives as long
+    base = QStyleFactory.create(QApplication.style().name() or "")
+    style = _NoTrackHighlightStyle(base) if base is not None else _NoTrackHighlightStyle()
+    style.setParent(table)
+    return style
+
 
 class ClipDelegate(QStyledItemDelegate):
     # Waveform drawing lives in sequence_timeline_audio.py
@@ -612,7 +653,12 @@ class SequenceTimeline(QMainWindow):
         # BUILD 126: 4th logical column = collapse triangle, shown far left
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Name", "Type", "", ""])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # BUILD 158: no track highlight. No row selection at all (nothing
+        # reads the table selection: menus / Name edit use the clicked row)
+        # and the cell panels drop Selected / hover / focus states.
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setStyle(_track_table_style(self.table))
         # Only Name items are editable (set per item in refresh)
         self.table.setEditTriggers(
             QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
