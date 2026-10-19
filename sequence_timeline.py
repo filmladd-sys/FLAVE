@@ -130,6 +130,13 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
                 painter.setOpacity(1.0)
                 continue
+            # BUILD 128: keyframe-style title bar (black, 1 px white border,
+            # white name) on top; the content (thumbnails, waveform, caption
+            # bar, SEQ icons, markers) is drawn in the rect below it
+            from keyframe import split_title_rect, paint_title_bar
+            full_rect = clip_rect
+            title_rect, clip_rect = split_title_rect(full_rect)
+            ctop, ch = clip_rect.top(), clip_rect.height()
             if track_type == "caption":
                 paint_caption_bar(painter, clip_rect)
             else:
@@ -147,17 +154,17 @@ class ClipDelegate(QStyledItemDelegate):
                 # BUILD 108: track colors (video blue / audio gray)
                 painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
                                  else VIDEO_CLIP_BG)
-                ih = rect.height()
+                ih = ch
                 lpix = sequence_clip_icon(ih, False)
                 rpix = sequence_clip_icon(ih, True)
                 iw = lpix.width() if lpix is not None else 0
                 if iw and 2 * iw <= w:
-                    painter.drawPixmap(x, rect.top(), lpix)
-                    painter.drawPixmap(x + w - iw, rect.top(), rpix)
+                    painter.drawPixmap(x, ctop, lpix)
+                    painter.drawPixmap(x + w - iw, ctop, rpix)
                     text_rect.setLeft(x + iw)
                     text_rect.setRight(x + w - iw - 1)
                 elif iw:
-                    painter.drawPixmap(x, rect.top(), lpix, 0, 0, min(iw, w), ih)
+                    painter.drawPixmap(x, ctop, lpix, 0, 0, min(iw, w), ih)
                     text_rect.setLeft(x + min(iw, w))
             elif track_type == "audio":
                 # Audio clips: waveform from stored peaks, no icons
@@ -167,13 +174,13 @@ class ClipDelegate(QStyledItemDelegate):
                 # Video clips show the source frame at their left edge; stills use 0
                 icon_frame = in_frame if track_type == "video" else 0
                 # No grabs mid-drag; generate on release
-                pix = tl.icon_pixmap(footage_id, rect.height(), icon_frame,
+                pix = tl.icon_pixmap(footage_id, ch, icon_frame,
                                      generate=tl._edge_drag is None, clip_id=clip_id)
                 has_in = pix is not None and not pix.isNull()
                 # Out icon: video reads storage only (never generated in paint);
                 # stills reuse the in icon; missing draws black
                 if track_type == "video":
-                    out_pix = video_out_pixmap(tl, footage_id, rect.height(),
+                    out_pix = video_out_pixmap(tl, footage_id, ch,
                                                in_frame, length_frames, clip_id)
                 else:
                     out_pix = pix
@@ -182,7 +189,7 @@ class ClipDelegate(QStyledItemDelegate):
                 if has_out:
                     out_full_w = out_pix.width()
                 else:
-                    out_full_w = in_full_w if has_in else rect.height()
+                    out_full_w = in_full_w if has_in else ch
                 # Room for icons: the whole clip; the edge handles overlap the
                 # icons on both sides
                 avail = w
@@ -194,44 +201,49 @@ class ClipDelegate(QStyledItemDelegate):
                     out_w = 0
                     in_w = min(in_full_w, avail)
                 if has_in and in_w > 0:
-                    painter.drawPixmap(x, rect.top(), pix, 0, 0, in_w, pix.height())
+                    painter.drawPixmap(x, ctop, pix, 0, 0, in_w, pix.height())
                     text_rect.setLeft(x + in_w)
                 if out_w > 0:
                     # Flush right: icon's right edge on the clip's right edge
                     out_x = x + w - out_w
                     if has_out:
-                        painter.drawPixmap(out_x, rect.top(), out_pix,
+                        painter.drawPixmap(out_x, ctop, out_pix,
                                            out_pix.width() - out_w, 0, out_w, out_pix.height())
                     else:
                         # Black only for a real missing frame: there is room,
                         # but the out frame is past the footage end or its
                         # icon was requested and does not exist
-                        painter.fillRect(QRect(out_x, rect.top(), out_w, rect.height()),
+                        painter.fillRect(QRect(out_x, ctop, out_w, ch),
                                          QColor(0, 0, 0))
                     text_rect.setRight(out_x - 1)
-            # Markers: square at the top plus a line (video / image / audio only)
+            # Markers: square at the top of the content (just below the title
+            # bar) plus a line (video / image / audio only); hit-testing is
+            # by x only, so it still lines up
             from markers import paint_markers
             if track_type != "caption":
                 paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf,
                               getattr(tl, "_hover_marker_id", None))
-            # Outline last so the clip's full time span, handle included, is visible
-            # Selected clip (last click or clip menu) gets a light yellow border
-            if clip_id in tl._selected_clip_ids:
-                painter.setPen(QColor(255, 255, 160))
-            else:
-                painter.setPen(QColor(160, 180, 220))
-            painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
-            if clip_rect.width() > 0:
-                # BUILD 127: left-aligned, sticky to the visible left edge,
-                # elided at the right; drawn last. Audio names get a subtle
-                # backing (the waveform runs under them).
-                label = filename or ""
-                if clip_solo:
-                    label += " [S]"
+            # Outline: drawn after the title bar (below)
+            label = filename or ""
+            if clip_solo:
+                label += " [S]"
+            if title_rect is not None:
+                # BUILD 128: the name lives in the title bar (sticky left,
+                # elided); no in-content name
+                paint_title_bar(painter, title_rect, label, rect)
+            elif clip_rect.width() > 0:
+                # Row too short for a bar: BUILD 127 in-content name
                 draw_clip_name(painter, text_rect, rect, label,
                                caption=(track_type == "caption"),
                                backing=(track_type == "audio" and seq_ref is None),
                                fallback_rect=clip_rect)
+            # Outline last, around the whole clip including the title bar
+            # (selected: light yellow)
+            if clip_id in tl._selected_clip_ids:
+                painter.setPen(QColor(255, 255, 160))
+            else:
+                painter.setPen(QColor(160, 180, 220))
+            painter.drawRect(full_rect.adjusted(0, 0, -1, -1))
             painter.setOpacity(1.0)
         painter.restore()
 
@@ -1017,6 +1029,9 @@ class SequenceTimeline(QMainWindow):
         # rowHeight here made the out icon cache key miss paint's key.
         # BUILD 126: a collapsed track draws no icons; icons are made for
         # its open height so they are ready when it opens
+        # BUILD 128: open clips draw thumbnails in the content rect below
+        # the title bar, so the icon height is the content height
+        from keyframe import title_heights
         grid = 1 if self.table.showGrid() else 0
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 0)
@@ -1024,7 +1039,7 @@ class SequenceTimeline(QMainWindow):
                 h = self.table.rowHeight(r)
                 if item.data(ROLE_COLLAPSED):
                     h = int(item.data(ROLE_OPEN_HEIGHT) or DEFAULT_TRACK_HEIGHT)
-                return max(0, h - grid)
+                return title_heights(max(0, h - grid))[1]
         return 0
 
     def _row_collapsed(self, pos):

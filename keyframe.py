@@ -387,6 +387,43 @@ def sticky_name_rect(text_rect, visible_rect=None, pad=4):
     return QRect(left, text_rect.top(), right - left + 1, text_rect.height())
 
 
+TITLE_MIN_CONTENT = 8   # BUILD 128: rows too short for bar + content: no bar
+
+
+def title_heights(clip_h):
+    # BUILD 128: (title bar height, content height) for an open video /
+    # audio / image / caption / sequence clip of height clip_h. Rows shorter
+    # than TITLE_BAR_H + TITLE_MIN_CONTENT get no bar (0, clip_h).
+    clip_h = int(clip_h)
+    if clip_h < TITLE_BAR_H + TITLE_MIN_CONTENT:
+        return 0, clip_h
+    return TITLE_BAR_H, clip_h - TITLE_BAR_H
+
+
+def split_title_rect(clip_rect):
+    # (title_rect or None, content_rect) per title_heights
+    th, ch = title_heights(clip_rect.height())
+    if th <= 0:
+        return None, clip_rect
+    title_rect = clip_rect.adjusted(0, 0, 0, -ch)
+    content = clip_rect.adjusted(0, th, 0, 0)
+    return title_rect, content
+
+
+def paint_title_bar(painter, title_rect, title, visible_rect=None):
+    # Black bar, 1 px white border, white name: left-aligned, sticky to the
+    # visible left edge, elided at the right (BUILD 127). Shared by keyframe
+    # clips and (BUILD 128) the other open-track clip types.
+    painter.fillRect(title_rect, QColor(0, 0, 0))
+    painter.setPen(QPen(QColor(255, 255, 255)))
+    painter.drawRect(title_rect.adjusted(0, 0, -1, -1))
+    name_rect = sticky_name_rect(title_rect, visible_rect, 3)
+    if name_rect is not None and name_rect.width() > 2:
+        text = painter.fontMetrics().elidedText(
+            " ".join((title or "").split()), Qt.ElideRight, name_rect.width())
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, text)
+
+
 def paint_keyframe_clip(painter, clip_rect, title, keys=None,
                         clip_start=0, ppf=1.0, stored_type="", linked=True,
                         visible_rect=None):
@@ -397,17 +434,9 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
     painter.fillRect(clip_rect, body)
     h = min(TITLE_BAR_H, max(1, clip_rect.height()))
     title_rect = clip_rect.adjusted(0, 0, 0, -(clip_rect.height() - h))
-    painter.fillRect(title_rect, QColor(0, 0, 0))
-    painter.setPen(QPen(QColor(255, 255, 255)))
-    painter.drawRect(title_rect.adjusted(0, 0, -1, -1))
-    # BUILD 127: title left-aligned in the title bar, sticky (see
-    # sticky_name_rect); same font / color, elided at the right edge
-    name_rect = sticky_name_rect(title_rect, visible_rect, 3)
-    if name_rect is not None and name_rect.width() > 2:
-        text = painter.fontMetrics().elidedText(
-            " ".join(title_with_link_state(title, linked).split()), Qt.ElideRight,
-            name_rect.width())
-        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, text)
+    # BUILD 127 / 128: shared title bar painter (unchanged look)
+    paint_title_bar(painter, title_rect, title_with_link_state(title, linked),
+                    visible_rect)
     if not keys or ppf <= 0:
         return
     body_h = max(0, clip_rect.height() - h)
