@@ -1408,38 +1408,24 @@ class SequencePlayer(QWindow):
         except Exception:
             pass
         try:
-            from sequence_preview_audio import (ensure_preview_audio_wav_status,
+            from sequence_preview_audio import (preview_audio_current,
+                                                collect_finished_mixes,
                                                 preview_audio_generation)
             from sequence_player_audio import PreviewAudioPlayer
             project_db = self.timeline._project_db()
             fps = float(getattr(self.timeline, "fps", 30) or 30)
             total = int(self.timeline.total_frames())
-            # BUILD 135: signature checked on every Play; a stale mix is
-            # rebuilt here, synchronously as before, with a status line and
-            # a wait cursor while it mixes
-            busy = []
-
-            def _on_rebuild():
-                from PySide6.QtWidgets import QApplication
-                from PySide6.QtCore import Qt
-                try:
-                    self.timeline.status_bar.showMessage("Rebuilding preview audio...")
-                except Exception:
-                    pass
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                busy.append(1)
-            try:
-                wav, _rebuilt = ensure_preview_audio_wav_status(
-                    project_db, self.sequence_id, fps, total, _on_rebuild)
-            finally:
-                if busy:
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.restoreOverrideCursor()
-                    try:
-                        self.timeline.status_bar.clearMessage()
-                    except Exception:
-                        pass
+            # BUILD 136: never mixes here (the timeline's Play waits for the
+            # background mix, sequence_preview_audio.start_mix). Play the
+            # WAV only if it matches the timeline; otherwise video plays
+            # silent (e.g. the mix failed) rather than an old mix.
+            collect_finished_mixes(project_db, self.sequence_id)
+            wav, _sig = preview_audio_current(project_db, self.sequence_id, fps, total)
             if not wav:
+                # Drop the old PCM too: has_audio() False, so the play clock
+                # falls back to the wall clock instead of a stopped sink
+                if self._preview_audio is not None:
+                    self._preview_audio.prepare(None, fps)
                 return
             if self._preview_audio is None:
                 self._preview_audio = PreviewAudioPlayer()

@@ -6,6 +6,7 @@
 import hashlib
 import os
 import sqlite3
+import threading
 import wave
 
 try:
@@ -68,11 +69,31 @@ def preview_audio_generation(project_db, sequence_id):
 
 
 def preview_audio_scrub_ok(project_db, sequence_id, fps, total_frames):
+    # BUILD 136: silent while a background mix runs for this sequence
+    try:
+        job = _JOBS.get(_state_key(project_db, sequence_id))
+        if job is not None and not job.done:
+            return False
+    except Exception:
+        pass
+    return _scrub_ok_sig(project_db, sequence_id, fps, total_frames)
+
+
+def _scrub_ok_sig(project_db, sequence_id, fps, total_frames):
     # Scrub burst gate: True when the WAV matches the timeline. While dirty
     # the signature is compared once; a mismatch keeps scrub silent (no
     # rebuild here, Play rebuilds) until the next edit / rebuild.
     try:
         st = _state(project_db, sequence_id)
+        # BUILD 136: a source re-import rewrites the sibling .audiotmp.db
+        # (no timeline edit): its size / mtime change re-dirties the mix
+        # (stands in for a peaks.py hook)
+        src = _audiotmp_stamp(project_db)
+        if src != st.get("src_stamp"):
+            if "src_stamp" in st:
+                st["dirty"] = True
+                st["stale"] = None
+            st["src_stamp"] = src
         if not st["dirty"]:
             return True
         if st["stale"] is None:
@@ -85,6 +106,14 @@ def preview_audio_scrub_ok(project_db, sequence_id, fps, total_frames):
         return not st["stale"]
     except Exception:
         return False
+
+
+def _audiotmp_stamp(project_db):
+    try:
+        st = os.stat(audiotmp_db_path(project_db))
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
 
 
 def preview_audio_wav_path(project_db, sequence_id):
@@ -344,9 +373,16 @@ def _write_sig(path, sig):
         f.write(sig + "\n")
 
 
-def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=None):
+class MixCancelled(Exception):
+    pass
+
+
+def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=None,
+             cancel=None):
     # Return mono s16le bytes for the full sequence length (silence where empty).
     # vol_clips / track_order: linked volume keyframe gain (volume_gain).
+    # cancel (BUILD 136): a threading.Event checked once per clip; set =
+    # raise MixCancelled
     n = max(0, _frame_to_sample(total_frames, fps))
     if n <= 0:
         return b""
@@ -355,6 +391,8 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
     if _HAS_NP:
         acc = np.zeros(n, dtype=np.float64)
         for r in rows:
+            if cancel is not None and cancel.is_set():
+                raise MixCancelled()
             if r["length_frames"] <= 0 or not r["basename"]:
                 continue
             pcm = load_audiotmp(project_db, r["basename"])
@@ -391,6 +429,8 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
     import array
     acc = [0.0] * n
     for r in rows:
+        if cancel is not None and cancel.is_set():
+            raise MixCancelled()
         if r["length_frames"] <= 0 or not r["basename"]:
             continue
         pcm = load_audiotmp(project_db, r["basename"])
@@ -427,12 +467,16 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
 def _write_wav(path, pcm_bytes):
     # Mono 48 kHz 16-bit little-endian WAV
     tmp = path + ".tmp"
-    with wave.open(tmp, "wb") as w:
+    _write_wav_file(tmp, pcm_bytes)
+    os.replace(tmp, path)
+
+
+def _write_wav_file(path, pcm_bytes):
+    with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(SAMPLE_RATE)
         w.writeframes(pcm_bytes)
-    os.replace(tmp, path)
 
 
 def build_preview_audio_wav(project_db, sequence_id, fps, total_frames):
@@ -495,3 +539,148 @@ def ensure_preview_audio_wav_status(project_db, sequence_id, fps, total_frames,
         # print("ensure_preview_audio_wav failed")
         print("Preview audio check failed: %s" % e)
         return None, False
+
+
+# ---------------------------------------------------------------- BUILD 136
+# Background mix. A worker thread (no Qt) mixes into a per-job temp file and
+# swaps it in only if the job is still the newest one for the sequence, not
+# cancelled, and the timeline's signature (re-read on the worker's own
+# sqlite connections) still equals the one it mixed. The GUI thread polls
+# job.done and calls collect_mix(job), which bumps the reload generation.
+
+_JOBS = {}                     # state key -> newest MixJob
+_SWAP_LOCK = threading.Lock()
+_TOKENS = [0]
+
+
+class MixJob(object):
+    def __init__(self, project_db, sequence_id, fps, total_frames, sig):
+        _TOKENS[0] += 1
+        self.token = _TOKENS[0]
+        self.key = _state_key(project_db, sequence_id)
+        self.project_db = project_db
+        self.sequence_id = int(sequence_id)
+        self.fps = float(fps)
+        self.total_frames = int(total_frames)
+        self.sig = sig              # signature this job mixes
+        self.cancel = threading.Event()
+        self.done = False
+        self.status = None          # 'swapped' / 'stale' / 'cancelled' / 'failed'
+        self.error = None
+        self.collected = False
+        self.thread = None
+
+
+def preview_audio_current(project_db, sequence_id, fps, total_frames):
+    # GUI thread: (wav path or None, signature). Path only when the WAV on
+    # disk matches the timeline now. A few small queries, no mixing.
+    if not project_db or sequence_id is None:
+        return None, ""
+    want = audio_timeline_signature(project_db, sequence_id, fps, total_frames)
+    wav = preview_audio_wav_path(project_db, sequence_id)
+    have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
+    if want and have == want and os.path.isfile(wav):
+        return wav, want
+    return None, want
+
+
+def running_mix(project_db, sequence_id):
+    job = _JOBS.get(_state_key(project_db, sequence_id))
+    if job is not None and not job.done:
+        return job
+    return None
+
+
+def start_mix(project_db, sequence_id, fps, total_frames, sig):
+    # GUI thread: reuse a running job that mixes this signature, else cancel
+    # it (cooperatively) and start a new one. Returns the job.
+    key = _state_key(project_db, sequence_id)
+    old = _JOBS.get(key)
+    if old is not None and not old.done and old.sig == sig:
+        return old
+    if old is not None and not old.done:
+        old.cancel.set()
+    job = MixJob(project_db, sequence_id, fps, total_frames, sig)
+    _JOBS[key] = job
+    t = threading.Thread(target=_mix_worker, args=(job,),
+                         name="PreviewAudioMix-%d" % job.token)
+    t.daemon = True             # never blocks app exit
+    job.thread = t
+    t.start()
+    return job
+
+
+def _mix_worker(job):
+    # Worker thread. Only sqlite (own connections, opened here), numpy and
+    # files; never Qt.
+    tmp = preview_audio_wav_path(job.project_db, job.sequence_id) + ".%d.tmp" % job.token
+    try:
+        rows = _load_mix_rows(job.project_db, job.sequence_id)
+        order = _track_order(job.project_db, job.sequence_id)
+        vols = _load_volume_clips(job.project_db, job.sequence_id, order)
+        pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames, vols,
+                       order, cancel=job.cancel)
+        if job.cancel.is_set():
+            raise MixCancelled()
+        _write_wav_file(tmp, pcm)
+        with _SWAP_LOCK:
+            now = audio_timeline_signature(
+                job.project_db, job.sequence_id, job.fps, job.total_frames)
+            newest = _JOBS.get(job.key)
+            if job.cancel.is_set():
+                job.status = "cancelled"
+            elif newest is not job and newest is not None and newest.token > job.token:
+                job.status = "stale"
+            elif now != job.sig:
+                job.status = "stale"        # an edit landed during the mix
+            else:
+                wav = preview_audio_wav_path(job.project_db, job.sequence_id)
+                os.replace(tmp, wav)
+                _write_sig(preview_audio_sig_path(job.project_db, job.sequence_id),
+                           job.sig)
+                job.status = "swapped"
+    except MixCancelled:
+        job.status = "cancelled"
+    except Exception as e:
+        job.status = "failed"
+        job.error = str(e)
+    finally:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        job.done = True
+
+
+def collect_mix(job):
+    # GUI thread, once per finished job: a swapped WAV bumps the reload
+    # generation (players drop their in-memory PCM) and clears dirty when
+    # no edit came after the job's signature. Returns job.status.
+    if job is None or not job.done:
+        return None
+    if job.collected:
+        return job.status
+    job.collected = True
+    if job.status == "swapped":
+        st = _STATE.setdefault(job.key, {"gen": 0, "dirty": True, "stale": None})
+        st["gen"] += 1
+        st["stale"] = None
+        st["dirty"] = True      # scrub re-checks the signature once
+    elif job.status == "failed":
+        print("Preview audio mix failed: %s" % job.error)
+    return job.status
+
+
+def collect_finished_mixes(project_db, sequence_id):
+    # GUI thread: collect a finished, uncollected job (e.g. its timeline
+    # closed before the poll saw it)
+    job = _JOBS.get(_state_key(project_db, sequence_id))
+    if job is not None and job.done and not job.collected:
+        collect_mix(job)
+
+
+def cancel_mix(project_db, sequence_id):
+    job = running_mix(project_db, sequence_id)
+    if job is not None:
+        job.cancel.set()

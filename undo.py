@@ -268,6 +268,13 @@ def current_project():
 def _refresh_after_restore(project_path, message):
     # Whole sequence dirty, then reload every open window
     try:
+        # BUILD 136: every sequence's audio mix may differ now, including
+        # sequences with no timeline open (cheap flags, no mixing)
+        from sequence_preview_audio import mark_preview_audio_dirty
+        mark_preview_audio_dirty(project_path)
+    except Exception:
+        pass
+    try:
         import sequence_timeline
         for tl in list(sequence_timeline._open_windows.values()):
             try:

@@ -577,6 +577,9 @@ class SequenceTimeline(QMainWindow):
         self._preview_center = None
         self._preview_seen = -1
         self._preview_status = None   # BUILD 129 label, created below
+        self._play_mixing = False     # BUILD 136: Play waits for the audio mix
+        self._audio_mix_job = None    # BUILD 136: sequence_preview_audio.MixJob
+        self._audio_mix_timer = None  # BUILD 136: GUI-thread poll of the job
         name = _load_sequence_name(sequence_id)
         if name:
             self.setWindowTitle(f"Sequence Timeline: {name}: #{sequence_id}")
@@ -2496,7 +2499,7 @@ class SequenceTimeline(QMainWindow):
 
     def _toggle_play(self):
         # Same as the Pause button while playing or filling, else Play
-        if self._playing or self._play_filling:
+        if self._playing or self._play_filling or self._play_mixing:
             self._on_play_control("Pause")
         else:
             self._on_play_control("Play")
@@ -2514,6 +2517,9 @@ class SequenceTimeline(QMainWindow):
         except Exception as e:
             print(f"Play could not open the player: {e}")
         self._play_from = int(self.current_frame)
+        # BUILD 136: a stale audio mix starts mixing in the background now,
+        # alongside any video fill; the clock waits for it (_start_clock)
+        self._audio_mix_kick()
         if self._play_ready():
             self._start_clock()
             return
@@ -2549,9 +2555,89 @@ class SequenceTimeline(QMainWindow):
             left = 0
         self.status_bar.showMessage(f"Filling preview: {left} frames left")
 
+    def _audio_mix_kick(self):
+        # BUILD 136: start (or reuse) the background mix when the WAV does
+        # not match the timeline. True when a mix is running for this Play.
+        try:
+            from sequence_preview_audio import (preview_audio_current, start_mix,
+                                                cancel_mix)
+            db = self._project_db()
+            if not db or self.sequence_id is None:
+                return False
+            fps = float(self.fps or 30)
+            total = int(self.total_frames())
+            wav, sig = preview_audio_current(db, self.sequence_id, fps, total)
+            if wav or not sig:
+                # Up to date: a mix of some other (older) state is useless
+                cancel_mix(db, self.sequence_id)
+                self._audio_mix_job = None
+                return False
+            self._audio_mix_job = start_mix(db, self.sequence_id, fps, total, sig)
+            if self._audio_mix_timer is None:
+                self._audio_mix_timer = QTimer(self)
+                self._audio_mix_timer.setInterval(50)
+                self._audio_mix_timer.timeout.connect(self._audio_mix_poll)
+            self._audio_mix_timer.start()
+            self._preview_status_poll()
+            return True
+        except Exception as e:
+            print(f"Audio mix start failed: {e}")
+            self._audio_mix_job = None
+            return False
+
+    def _audio_mix_finish(self, job, pending):
+        # Finished job: collect it (GUI thread: reload generation). A stale
+        # or superseded result while Play still waits starts a fresh mix.
+        from sequence_preview_audio import collect_mix
+        status = collect_mix(job)
+        if self._audio_mix_job is job:
+            self._audio_mix_job = None
+        if status in ("stale", "cancelled") and pending:
+            self._audio_mix_kick()
+        return status
+
+    def _audio_mix_wait(self):
+        # _start_clock gate: True = Play waits for the running mix
+        job = getattr(self, "_audio_mix_job", None)
+        if job is None:
+            return False
+        if job.done:
+            self._audio_mix_finish(job, True)
+            job = self._audio_mix_job
+            if job is None or job.done:
+                return False
+        self._play_filling = False
+        self._play_mixing = True
+        self._preview_status_poll()
+        return True
+
+    def _audio_mix_poll(self):
+        # 50 ms GUI-thread poll while a mix runs
+        job = getattr(self, "_audio_mix_job", None)
+        if job is None:
+            if self._audio_mix_timer is not None:
+                self._audio_mix_timer.stop()
+            self._preview_status_poll()
+            return
+        if not job.done:
+            return
+        self._audio_mix_finish(job, self._play_mixing or self._play_filling)
+        if self._audio_mix_job is not None:
+            return      # a fresh mix runs
+        if self._audio_mix_timer is not None:
+            self._audio_mix_timer.stop()
+        self._preview_status_poll()
+        if self._play_mixing:
+            self._play_mixing = False
+            self._start_clock()
+
     def _start_clock(self):
         # Prime the start-frame batch, then audio, then the tick timer.
         # Do not start the WAV until play_has(start) is true.
+        # BUILD 136: the whole Play (video too) waits for a running audio
+        # mix so A/V start together with the new WAV
+        if self._audio_mix_wait():
+            return
         self._play_filling = False
         try:
             from sequence_preview_worker import set_play_priority
@@ -2734,6 +2820,9 @@ class SequenceTimeline(QMainWindow):
 
     def _stop_play(self):
         was = self._playing or self._play_filling
+        # BUILD 136: Stop drops the pending start; a running mix finishes and
+        # is kept when its signature is still current
+        self._play_mixing = False
         self._playing = False
         self._play_filling = False
         self._play_prime_tries = 0
@@ -2921,6 +3010,10 @@ class SequenceTimeline(QMainWindow):
                 text = status_text(_worker, self._project_db(), self.sequence_id)
         except Exception:
             text = ""
+        # BUILD 136: both statuses when both run
+        job = getattr(self, "_audio_mix_job", None)
+        if job is not None and not job.done:
+            text = (text + "   " if text else "") + "Mixing audio"
         if getattr(self, "_preview_status", None) is None:
             return
         if self._preview_status.text() != text:
@@ -3049,6 +3142,15 @@ class SequenceTimeline(QMainWindow):
             self._preview_timer.stop()
         if hasattr(self, "_preview_status_timer"):
             self._preview_status_timer.stop()
+        # BUILD 136: no poll after close; the worker (no Qt) is cancelled
+        # and exits on its own (daemon thread, nothing joined here)
+        self._play_mixing = False
+        if getattr(self, "_audio_mix_timer", None) is not None:
+            self._audio_mix_timer.stop()
+        job = getattr(self, "_audio_mix_job", None)
+        if job is not None and not job.done:
+            job.cancel.set()
+        self._audio_mix_job = None
         # The player closes with its timeline
         if getattr(self, "_player", None) is not None:
             from sequence_player import close_player_for
