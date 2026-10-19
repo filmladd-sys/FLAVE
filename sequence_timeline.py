@@ -1879,15 +1879,9 @@ class SequenceTimeline(QMainWindow):
             if refused:
                 self._after_clip_change("Move refused: overlaps a clip on the target track")
             else:
-                # Same frames, new layer order: that range is dirty
-                src_kind = self._track_type(drag.get("src_track"))
-                if src_kind in ("video", "image"):
-                    s0, ln = int(drag["orig_start"]), int(clip[3])
-                    self._mark_preview_dirty([(s0, s0 + ln - 1)])
-                elif src_kind == "keyframe":
-                    # Above/below changes which linked clips it drives
-                    self._mark_preview_dirty(self._move_preview_ranges(
-                        [{"clip": clip, "start": drag["orig_start"]}], drag))
+                # BUILD 139: a track move changes the layer order only where
+                # the stack differs; the snapshot diff at the refresh marks
+                # exactly those frames (was: the clip's whole range)
                 self._after_clip_change(f"Clip moved to track {target}")
             return
         group = drag.get("group") or [{"clip": clip}]
@@ -1923,10 +1917,10 @@ class SequenceTimeline(QMainWindow):
             # ranges go dirty
             ranges = self._move_preview_ranges(group, drag)
             plan = self._preview_shift_plan(group, drag)
-            if plan is None:
-                self._mark_preview_dirty(ranges)
-            else:
+            if plan is not None:
                 self._preview_pending_shift = (plan, ranges)
+            # BUILD 139: otherwise the snapshot diff at the refresh marks
+            # only the frames that changed (was: old and new ranges)
         except Exception as e:
             QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
         self._after_clip_change(f"Clip moved to frame {new_start}")
@@ -2001,7 +1995,11 @@ class SequenceTimeline(QMainWindow):
                 if is_keyframe_clip_id(c[0]) or kind in ("video", "image"):
                     visual = visual or kind in ("video", "image")
                     span.append((old, old + max(1, int(c[3])) - 1))
-            if len(deltas) != 1 or not links or not visual or not span:
+            # BUILD 139: an unlinked clip (group of one) may shift too; the
+            # snapshot check (shift_ok) proves the move before it runs
+            if len(deltas) != 1 or not visual or not span:
+                return None
+            if not links and len(group) != 1:
                 return None
             delta = deltas.pop()
             if delta == 0:
@@ -2329,9 +2327,10 @@ class SequenceTimeline(QMainWindow):
                 )
             conn.commit()
             conn.close()
-            # Preview: old and new ranges of trimmed video/image/keyframe
-            # clips and linked partners (re-marked after the reload below)
-            self._mark_preview_dirty(self._move_preview_ranges(group, drag))
+            # Preview (BUILD 139): the snapshot diff at the refresh below
+            # marks only the frames the trim changes (the added / removed
+            # end, or the whole clip when its source or keys shift); was:
+            # old and new ranges of trimmed clips and linked partners
         except Exception as e:
             QMessageBox.warning(self, "Clip Edge", f"Could not save clip: {e}")
         # The video clip of the group gets its out icon (dragged or partner)
@@ -2628,6 +2627,10 @@ class SequenceTimeline(QMainWindow):
             db = self._project_db()
             if db and self.sequence_id is not None:
                 if running_mix(db, self.sequence_id) is not None:
+                    # BUILD 139: settle the bar's dirty ranges, then restart
+                    # / keep the running mix
+                    settle_audio_state(db, self.sequence_id, float(self.fps or 30),
+                                       int(self.total_frames()))
                     self._audio_mix_kick()
                 elif not settle_audio_state(db, self.sequence_id,
                                             float(self.fps or 30),
@@ -3013,6 +3016,7 @@ class SequenceTimeline(QMainWindow):
             from sequence_player import timeline_snapshot
             # Snapshot only on edit, activation or first use; a scrub reuses it
             snap = getattr(self, "_preview_snapshot", None)
+            old_snap = snap
             if force or snap is None:
                 snap = timeline_snapshot(self)
                 self._preview_snapshot = snap
@@ -3030,6 +3034,18 @@ class SequenceTimeline(QMainWindow):
                                   self.total_frames(), snap,
                                   getattr(self, "fps", None))
             self._preview_center = frame
+            # BUILD 139: the frames this edit changes, from the snapshot
+            # before vs after (same data the worker composites from): only
+            # those go dirty. A failure marks everything (safe).
+            diff = []
+            if force and old_snap is not None and old_snap is not snap:
+                try:
+                    from sequence_preview_diff import changed_ranges
+                    diff = changed_ranges(old_snap, snap)
+                except Exception as e:
+                    print(f"Preview diff failed: {e}")
+                    from sequence_preview_diff import WHOLE
+                    diff = [WHOLE]
             pending = getattr(self, "_preview_pending_shift", None)
             if force and pending:
                 # After the retarget, so the worker's old-snapshot pass
@@ -3038,12 +3054,25 @@ class SequenceTimeline(QMainWindow):
                 self._preview_pending_shift = None
                 try:
                     from sequence_preview import FramesShift
+                    from sequence_preview_diff import shift_ok, subtract
                     first, last, delta = pending[0]
+                    # BUILD 139: shift only when the snapshots prove every
+                    # moved frame is the same picture at its new frame
+                    if old_snap is None or not shift_ok(old_snap, snap,
+                                                        first, last, delta):
+                        raise ValueError("not a pure move")
+                    # The shifted spans are FramesShift's (a dirty mark
+                    # queued before it would empty the rows it moves)
+                    diff = subtract(diff, [(first, last),
+                                           (first + delta, last + delta)])
                     FramesShift(self._project_db(), self.sequence_id,
                                 first, last, delta)
                 except Exception as e:
                     # print(f"Preview shift failed: {e}")
                     self._mark_preview_dirty(pending[1])
+            if diff:
+                from sequence_preview import FramesMarkDirty
+                FramesMarkDirty(self._project_db(), self.sequence_id, diff)
             remark = getattr(self, "_preview_remark", None)
             if force and remark:
                 self._preview_remark = []

@@ -4,6 +4,8 @@
 # sibling .audiotmp.db. No FFmpeg. ASCII only.
 
 import hashlib
+import json
+import math
 import os
 import sqlite3
 import threading
@@ -53,6 +55,7 @@ def mark_preview_audio_dirty(project_db, sequence_id=None):
             st["dirty"] = True
             st["stale"] = None
             st["bar"] = False       # BUILD 137: audio bar red at once
+            st["dirty_frames"] = None   # BUILD 139: ranges unknown until settled
             return
         db = os.path.normcase(os.path.abspath(project_db))
         for key, st in _STATE.items():
@@ -60,6 +63,7 @@ def mark_preview_audio_dirty(project_db, sequence_id=None):
                 st["dirty"] = True
                 st["stale"] = None
                 st["bar"] = False
+                st["dirty_frames"] = None
     except Exception:
         pass
 
@@ -140,22 +144,50 @@ def audio_bar_ok(project_db, sequence_id):
         return False
 
 
+def audio_bar_ranges(project_db, sequence_id):
+    # BUILD 139, paint path (dict lookups only): None = the whole bar is
+    # red (unknown or full remix), [] = green, else inclusive frame ranges
+    # still dirty (the rest of the WAV is current and kept)
+    if audio_bar_ok(project_db, sequence_id):
+        return []
+    try:
+        st = _STATE.get(_state_key(project_db, sequence_id))
+        frames = None if st is None else st.get("dirty_frames")
+        return list(frames) if frames else None
+    except Exception:
+        return None
+
+
 def settle_audio_state(project_db, sequence_id, fps, total_frames):
     # BUILD 137, GUI thread: one signature check (a few small queries) to
     # settle the true state after an edit / at open / after a mix. A
     # running mix stays red. Returns the bar state.
     try:
         st = _state(project_db, sequence_id)
-        if running_mix(project_db, sequence_id) is not None:
-            st["bar"] = False
-            return False
+        running = running_mix(project_db, sequence_id) is not None
         check_audio_source(project_db, sequence_id)
-        wav, _sig = preview_audio_current(project_db, sequence_id, fps, total_frames)
+        wav, sig, inputs = _current(project_db, sequence_id, fps, total_frames)
         ok = wav is not None
-        st["bar"] = ok
-        st["stale"] = not ok
-        st["dirty"] = not ok
-        return ok
+        if running:
+            # a running mix stays red; BUILD 139: its ranges still settle
+            st["bar"] = False
+        else:
+            st["bar"] = ok
+            st["stale"] = not ok
+            st["dirty"] = not ok
+        # BUILD 139: which frames the next (partial) mix rewrites, for the
+        # bar; None = all (no usable layout: full remix)
+        st["dirty_frames"] = None
+        if not ok and inputs is not None:
+            try:
+                plan = plan_partial(
+                    _read_layout(project_db, sequence_id),
+                    _layout_of(inputs, fps, total_frames, sig))
+                if plan is not None:
+                    st["dirty_frames"] = plan["frames"]
+            except Exception:
+                st["dirty_frames"] = None
+        return ok and not running
     except Exception:
         return False
 
@@ -359,15 +391,31 @@ def volume_gain(vol_clips, link_id, clip_order, dst0, count, fps):
 
 def audio_timeline_signature(project_db, sequence_id, fps, total_frames):
     # Stable text signature of the mix inputs; hashed for the .sig file.
+    return _signature_of(_mix_inputs(project_db, sequence_id), fps, total_frames)
+
+
+def _mix_inputs(project_db, sequence_id):
+    # BUILD 139: everything the mix reads, loaded once (the signature, the
+    # layout and the worker share it): rows, track order, volume clips,
+    # [(basename, ident)]
     rows = _load_mix_rows(project_db, sequence_id)
+    order = _track_order(project_db, sequence_id)
+    vols = _load_volume_clips(project_db, sequence_id, order)
+    idents = _audiotmp_idents(
+        project_db, sorted(set(r["basename"] for r in rows if r["basename"])))
+    return {"rows": rows, "order": order, "vols": vols, "idents": idents}
+
+
+def _signature_of(inputs, fps, total_frames):
+    # Same text and hash as before BUILD 139 (existing .sig files stay valid)
+    rows = inputs["rows"]
+    order = inputs["order"]
     parts = ["fps=%s" % repr(float(fps)), "frames=%d" % int(total_frames),
              "mix=audio-tracks-only"]
-    order = _track_order(project_db, sequence_id)
     for r in rows:
         parts.append("link=%s order=%s gain=%r" % (
             r.get("link_id"), order.get(r["track_id"]), r.get("gain_db", 0.0)))
-    for link_id, in_f, out_f, pts, kf_order in _load_volume_clips(
-            project_db, sequence_id, order):
+    for link_id, in_f, out_f, pts, kf_order in inputs["vols"]:
         parts.append("vol link=%s in=%d out=%d order=%d keys=%s" % (
             link_id, in_f, out_f, kf_order,
             ",".join("%d:%r" % (f, v) for f, v in pts)))
@@ -382,8 +430,7 @@ def audio_timeline_signature(project_db, sequence_id, fps, total_frames):
     # BUILD 135: the source PCM each row reads (AudioTmp row id + byte
     # length per basename: a re-import replaces the row) and the rate
     parts.append("rate=%d" % SAMPLE_RATE)
-    for name, ident in _audiotmp_idents(
-            project_db, sorted(set(r["basename"] for r in rows if r["basename"]))):
+    for name, ident in inputs["idents"]:
         parts.append("src=%s %s" % (name, ident))
     blob = "\n".join(parts).encode("ascii", "replace")
     return hashlib.sha256(blob).hexdigest()
@@ -431,6 +478,10 @@ def _write_sig(path, sig):
 
 
 class MixCancelled(Exception):
+    pass
+
+
+class _MixStale(Exception):
     pass
 
 
@@ -588,6 +639,7 @@ def build_preview_audio_wav(project_db, sequence_id, fps, total_frames):
         pcm = _mix_pcm(project_db, rows, fps, total_frames, vols, order)
         wav_path = preview_audio_wav_path(project_db, sequence_id)
         sig_path = preview_audio_sig_path(project_db, sequence_id)
+        _drop_layout(project_db, sequence_id)   # BUILD 139: no stale base
         _write_wav(wav_path, pcm)
         _write_sig(sig_path, audio_timeline_signature(
             project_db, sequence_id, fps, total_frames))
@@ -667,24 +719,37 @@ class MixJob(object):
         self.error = None
         self.collected = False
         self.thread = None
+        self.mode = None            # BUILD 139: 'partial' / 'full'
+
 
 
 def preview_audio_current(project_db, sequence_id, fps, total_frames):
     # GUI thread: (wav path or None, signature). Path only when the WAV on
     # disk matches the timeline now. A few small queries, no mixing.
+    wav, want, _inputs = _current(project_db, sequence_id, fps, total_frames)
+    return wav, want
+
+
+def _current(project_db, sequence_id, fps, total_frames):
+    # (wav or None, signature, mix inputs) -- BUILD 139: the inputs are
+    # loaded once and reused for the layout plan
     if not project_db or sequence_id is None:
-        return None, ""
-    want = audio_timeline_signature(project_db, sequence_id, fps, total_frames)
+        return None, "", None
+    inputs = _mix_inputs(project_db, sequence_id)
+    want = _signature_of(inputs, fps, total_frames)
     wav = preview_audio_wav_path(project_db, sequence_id)
     have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
     ok = bool(want and have == want and os.path.isfile(wav))
     try:
-        _state(project_db, sequence_id)["bar"] = ok    # BUILD 137
+        st = _state(project_db, sequence_id)
+        st["bar"] = ok    # BUILD 137
+        if ok:
+            st["dirty_frames"] = None
     except Exception:
         pass
     if ok:
-        return wav, want
-    return None, want
+        return wav, want, inputs
+    return None, want, inputs
 
 
 def any_mix_running(exclude=None):
@@ -737,14 +802,49 @@ def _mix_worker(job):
             prev.thread.join()
         if job.cancel.is_set():
             raise MixCancelled()
-        rows = _load_mix_rows(job.project_db, job.sequence_id)
-        order = _track_order(job.project_db, job.sequence_id)
-        vols = _load_volume_clips(job.project_db, job.sequence_id, order)
-        pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames, vols,
-                       order, cancel=job.cancel, as_array=_HAS_NP)
+        t0 = time.perf_counter()
+        inputs = _mix_inputs(job.project_db, job.sequence_id)
+        if _signature_of(inputs, job.fps, job.total_frames) != job.sig:
+            # BUILD 139: the timeline moved on before the mix started; the
+            # inputs read here are what the layout records, so they must be
+            # exactly the state of job.sig
+            raise _MixStale()
+        rows = inputs["rows"]
+        order = inputs["order"]
+        vols = inputs["vols"]
+        layout = _layout_of(inputs, job.fps, job.total_frames, job.sig)
+        plan = None
+        pcm = None
+        if _HAS_NP:
+            try:
+                plan = plan_partial(_read_layout(job.project_db, job.sequence_id,
+                                                 check_wav=True), layout)
+            except Exception:
+                plan = None
+        if plan is not None:
+            try:
+                pcm = _partial_pcm(job, inputs, plan)
+                job.mode = "partial"
+            except MixCancelled:
+                raise
+            except Exception as e:
+                print("Preview audio partial mix failed (%s): full mix" % e)
+                pcm = None
+        if pcm is None:
+            pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames, vols,
+                           order, cancel=job.cancel, as_array=_HAS_NP)
+            job.mode = "full"
         if job.cancel.is_set():
             raise MixCancelled()
         _write_wav_file(tmp, pcm)
+        if job.mode == "partial":
+            print("WORKER audio mix: partial, %d of %d samples remixed, %d copied, "
+                  "%.2fs" % (plan["remix_len"], plan["n_new"], plan["copy_len"],
+                             time.perf_counter() - t0))
+        else:
+            print("WORKER audio mix: full, %d samples, %.2fs" % (
+                _frame_to_sample(job.total_frames, job.fps),
+                time.perf_counter() - t0))
         with _SWAP_LOCK:
             now = audio_timeline_signature(
                 job.project_db, job.sequence_id, job.fps, job.total_frames)
@@ -757,10 +857,16 @@ def _mix_worker(job):
                 job.status = "stale"        # an edit landed during the mix
             else:
                 wav = preview_audio_wav_path(job.project_db, job.sequence_id)
+                # BUILD 139: layout out first, so a crash mid-swap can never
+                # leave a layout describing a different WAV (next mix: full)
+                _drop_layout(job.project_db, job.sequence_id)
                 os.replace(tmp, wav)
                 _write_sig(preview_audio_sig_path(job.project_db, job.sequence_id),
                            job.sig)
+                _write_layout(job.project_db, job.sequence_id, layout)
                 job.status = "swapped"
+    except _MixStale:
+        job.status = "stale"
     except MixCancelled:
         job.status = "cancelled"
     except Exception as e:
@@ -810,3 +916,359 @@ def cancel_mix(project_db, sequence_id):
     job = running_mix(project_db, sequence_id)
     if job is not None:
         job.cancel.set()
+
+
+# ---------------------------------------------------------------- BUILD 139
+# Range-based mix. Next to the WAV, {sequence_id}_previewaudio.layout (JSON)
+# records the mix inputs the WAV was built from (rows, volume clips, track
+# order, source idents, fps, frames, sample count) and the signature it
+# matches. The next mix diffs that layout with the timeline and rewrites
+# only the samples that change:
+#   copies -- a clip moved alone into silence (no other audio under its old
+#             or new samples, no volume keyframes, not cut by the end):
+#             its samples are copied from the old WAV, its old samples zeroed
+#   remix  -- every other added / removed / changed clip, changed volume
+#             clip and new tail: those sample ranges are mixed again from
+#             the sources, with the same per-sample arithmetic as the full
+#             mix (_mix_pcm), so the result is byte-identical to a full mix
+#             and the .sig signature stays exact.
+# No usable layout (missing, other signature, WAV size differs), an fps
+# change, a track reorder, or more than PARTIAL_MAX_FRACTION of the sequence
+# to remix: full mix.
+
+LAYOUT_VERSION = 1
+PARTIAL_MAX_FRACTION = 0.5
+_LAYOUT_CACHE = {}          # path -> ((size, mtime_ns), layout)
+
+
+def preview_audio_layout_path(project_db, sequence_id):
+    folder = os.path.dirname(os.path.abspath(project_db))
+    return os.path.join(folder, "%d_previewaudio.layout" % int(sequence_id))
+
+
+def _layout_of(inputs, fps, total_frames, sig):
+    # JSON-normal layout of the mix inputs (lists, as read back)
+    order = inputs["order"]
+    inv = dict((i, tid) for tid, i in order.items())
+    idents = dict(inputs["idents"])
+    rows = [[int(r["track_id"]), int(r["footage_id"]), r["basename"],
+             int(r["start_frame"]), int(r["in_frame"]), int(r["length_frames"]),
+             r.get("link_id"), float(r.get("gain_db", 0.0) or 0.0),
+             idents.get(r["basename"], "")]
+            for r in inputs["rows"]]
+    vols = [[link_id, int(in_f), int(out_f),
+             [[int(f), float(v)] for f, v in pts], inv.get(kf_order)]
+            for link_id, in_f, out_f, pts, kf_order in inputs["vols"]]
+    tracks = [tid for tid, _i in sorted(order.items(), key=lambda kv: kv[1])]
+    layout = {"v": LAYOUT_VERSION, "sig": sig, "fps": float(fps),
+              "total": int(total_frames),
+              "n": _frame_to_sample(total_frames, fps),
+              "rows": rows, "vols": vols, "tracks": tracks}
+    return json.loads(json.dumps(layout))
+
+
+def _write_layout(project_db, sequence_id, layout):
+    path = preview_audio_layout_path(project_db, sequence_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(layout, f)
+    os.replace(tmp, path)
+
+
+def _drop_layout(project_db, sequence_id):
+    try:
+        os.remove(preview_audio_layout_path(project_db, sequence_id))
+    except OSError:
+        pass
+
+
+def _read_layout(project_db, sequence_id, check_wav=False):
+    # The layout if it describes the WAV on disk now (its signature is the
+    # .sig file's; check_wav: the WAV holds exactly n mono 16-bit samples),
+    # else None. Parsed files are cached by size / mtime.
+    path = preview_audio_layout_path(project_db, sequence_id)
+    try:
+        stt = os.stat(path)
+    except OSError:
+        return None
+    stamp = (stt.st_size, stt.st_mtime_ns)
+    hit = _LAYOUT_CACHE.get(path)
+    if hit is not None and hit[0] == stamp:
+        layout = hit[1]
+    else:
+        try:
+            with open(path, "r") as f:
+                layout = json.load(f)
+        except Exception:
+            return None
+        _LAYOUT_CACHE[path] = (stamp, layout)
+    if not isinstance(layout, dict) or layout.get("v") != LAYOUT_VERSION:
+        return None
+    if layout.get("sig") != _read_sig(preview_audio_sig_path(project_db, sequence_id)):
+        return None
+    if check_wav:
+        try:
+            with wave.open(preview_audio_wav_path(project_db, sequence_id), "rb") as w:
+                if (w.getnchannels() != 1 or w.getsampwidth() != 2
+                        or w.getframerate() != SAMPLE_RATE
+                        or w.getnframes() != int(layout.get("n", -1))):
+                    return None
+        except Exception:
+            return None
+    return layout
+
+
+def _ident_samples(ident):
+    # "rowid:bytes" -> source length in samples, else None
+    try:
+        return int(str(ident).split(":")[1]) // 2
+    except Exception:
+        return None
+
+
+def _footprint(row, fps, n):
+    # (lo, hi, exact_hi, whole): lo..hi = samples the row may write
+    # (superset, for remix); exact_hi = last written sample + 1 when the
+    # source length is known (else None); whole = not cut by the end
+    start, in_f, length, ident = row[3], row[4], row[5], row[8]
+    dst0 = _frame_to_sample(start, fps)
+    count = _frame_to_sample(length, fps)
+    lo, hi = dst0, min(n, dst0 + max(0, count))
+    slen = _ident_samples(ident)
+    if slen is None:
+        return lo, hi, None, False
+    take = min(count, slen - _frame_to_sample(in_f, fps))
+    if take <= 0:
+        return lo, hi, lo, True
+    return lo, hi, min(n, dst0 + take), dst0 + take <= n
+
+
+def _merge_ranges(ranges, n):
+    out = []
+    for a, b in sorted((max(0, int(a)), min(int(n), int(b))) for a, b in ranges):
+        if b <= a:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def plan_partial(old, new):
+    # Sample-range plan turning the WAV of layout old into the WAV of layout
+    # new, or None when a full mix is needed. See the section comment.
+    if not old or not new or old.get("v") != LAYOUT_VERSION:
+        return None
+    if float(old["fps"]) != float(new["fps"]):
+        return None
+    fps = float(new["fps"])
+    n_old, n_new = int(old["n"]), int(new["n"])
+    common = set(old["tracks"]) & set(new["tracks"])
+    if ([t for t in old["tracks"] if t in common]
+            != [t for t in new["tracks"] if t in common]):
+        return None         # reorder: the per-sample sum order may change
+    old_rows = [tuple(r) for r in old["rows"]]
+    new_rows = [tuple(r) for r in new["rows"]]
+    removed = _multiset_minus(old_rows, new_rows)
+    added = _multiset_minus(new_rows, old_rows)
+    old_v = [json.dumps(v) for v in old["vols"]]
+    new_v = [json.dumps(v) for v in new["vols"]]
+    vol_changed = ([json.loads(v) for v in _multiset_minus(old_v, new_v)]
+                   + [json.loads(v) for v in _multiset_minus(new_v, old_v)])
+    vol_links = set(v[0] for v in old["vols"]) | set(v[0] for v in new["vols"])
+
+    def alone(row, rows, n, lo, hi):
+        # no other row of rows (one instance of row skipped) touches lo..hi
+        skipped = False
+        for r in rows:
+            if r == row and not skipped:
+                skipped = True
+                continue
+            a, b, _e, _w = _footprint(r, fps, n)
+            if a < hi and b > lo:
+                return False
+        return True
+
+    copies, zero, remix = [], [], []
+    used = set()
+    for r in removed:
+        o_lo, o_hi, o_ex, o_whole = _footprint(r, fps, n_old)
+        match = None
+        for j, a in enumerate(added):
+            if j in used:
+                continue
+            # same source, in point, length, link, gain, ident; start (and
+            # track) may differ
+            if (a[1], a[2], a[4], a[5], a[6], a[7], a[8]) == (
+                    r[1], r[2], r[4], r[5], r[6], r[7], r[8]):
+                match = j
+                break
+        if match is not None:
+            a = added[match]
+            n_lo, n_hi, n_ex, n_whole = _footprint(a, fps, n_new)
+            if (o_ex is not None and n_ex is not None and o_whole and n_whole
+                    and o_ex - o_lo == n_ex - n_lo and o_ex > o_lo
+                    and (r[6] is None or r[6] not in vol_links)
+                    and alone(r, old_rows, n_old, o_lo, o_ex)
+                    and alone(a, new_rows, n_new, n_lo, n_ex)):
+                used.add(match)
+                copies.append((o_lo, n_lo, o_ex - o_lo))
+                zero.append((o_lo, o_ex))
+                continue
+        remix.append((o_lo, o_hi))
+    for j, a in enumerate(added):
+        if j in used:
+            continue
+        n_lo, n_hi, _e, _w = _footprint(a, fps, n_new)
+        remix.append((n_lo, n_hi))
+    for v in vol_changed:
+        remix.append((_frame_to_sample(v[1], fps) - 2,
+                      _frame_to_sample(v[2], fps) + 2))
+    if n_new > n_old:
+        remix.append((n_old, n_new))
+    remix = _merge_ranges(remix, n_new)
+    zero = _merge_ranges(zero, n_new)
+    remix_len = sum(b - a for a, b in remix)
+    if remix_len > PARTIAL_MAX_FRACTION * n_new:
+        return None
+    touched = _merge_ranges(remix + zero + [(d, d + ln) for _s, d, ln in copies],
+                            n_new)
+    per = fps / float(SAMPLE_RATE)
+    frames = []
+    for a, b in touched:
+        f0 = int(a * per)
+        f1 = int(math.ceil(b * per)) - 1
+        frames.append((f0, max(f0, f1)))
+    return {"n_old": n_old, "n_new": n_new, "copies": copies, "zero": zero,
+            "remix": remix, "remix_len": remix_len,
+            "copy_len": sum(ln for _s, _d, ln in copies), "frames": frames}
+
+
+def _multiset_minus(a, b):
+    # Items of list a not matched one-for-one in list b (a's order)
+    left = {}
+    for x in b:
+        left[x] = left.get(x, 0) + 1
+    out = []
+    for x in a:
+        if left.get(x, 0) > 0:
+            left[x] -= 1
+        else:
+            out.append(x)
+    return out
+
+
+def _read_wav_array(path, n):
+    # The WAV's n samples as int16, read in chunks (yields between them)
+    out = np.empty(n, dtype="<i2")
+    pos = 0
+    with wave.open(path, "rb") as w:
+        if w.getnframes() != n:
+            raise ValueError("WAV length changed")
+        while pos < n:
+            data = w.readframes(min(MIX_CHUNK, n - pos))
+            if not data:
+                break
+            k = len(data) // 2
+            out[pos:pos + k] = np.frombuffer(data, dtype="<i2", count=k)
+            pos += k
+            _mix_yield()
+    if pos != n:
+        raise ValueError("WAV short read")
+    return out
+
+
+def _partial_pcm(job, inputs, plan):
+    # Old WAV + plan -> new samples (int16 array), see plan_partial
+    old = _read_wav_array(preview_audio_wav_path(job.project_db, job.sequence_id),
+                          plan["n_old"])
+    n_new = plan["n_new"]
+    if n_new == plan["n_old"]:
+        out = old
+    else:
+        out = np.zeros(n_new, dtype="<i2")
+        m = min(n_new, plan["n_old"])
+        out[:m] = old[:m]
+    segs = [(d, old[s:s + ln].copy()) for s, d, ln in plan["copies"]]
+    for a, b in plan["zero"]:
+        out[a:b] = 0
+    for d, seg in segs:
+        out[d:d + len(seg)] = seg
+    if job.cancel.is_set():
+        raise MixCancelled()
+    _mix_ranges(job.project_db, inputs["rows"], job.fps, n_new, inputs["vols"],
+                inputs["order"], plan["remix"], out, cancel=job.cancel)
+    return out
+
+
+def _mix_ranges(project_db, rows, fps, n, vol_clips, track_order, ranges, out,
+                cancel=None):
+    # Mix only sample ranges [a, b) into out (int16, n samples). Same
+    # per-sample arithmetic and row order as _mix_pcm (numpy path), so each
+    # sample equals the full mix. A row's source is read only if it
+    # reaches a range.
+    if not ranges:
+        return
+    vol_clips = vol_clips or []
+    track_order = track_order or {}
+    accs = [np.zeros(b - a, dtype=np.float64) for a, b in ranges]
+    for r in rows:
+        if cancel is not None and cancel.is_set():
+            raise MixCancelled()
+        _mix_yield()
+        if r["length_frames"] <= 0 or not r["basename"]:
+            continue
+        dst0 = _frame_to_sample(r["start_frame"], fps)
+        count = _frame_to_sample(r["length_frames"], fps)
+        if count <= 0:
+            continue
+        reach = min(n, dst0 + count)
+        hits = [i for i, (a, b) in enumerate(ranges) if a < reach and b > dst0]
+        if not hits:
+            continue
+        pcm = load_audiotmp(project_db, r["basename"])
+        if not pcm:
+            continue
+        src = np.frombuffer(pcm, dtype="<i2", count=len(pcm) // 2)
+        src0 = _frame_to_sample(r["in_frame"], fps)
+        if src0 >= len(src):
+            continue
+        take = min(count, len(src) - src0)
+        if take <= 0:
+            continue
+        dst1 = min(n, dst0 + take)
+        if dst0 >= n or dst1 <= dst0:
+            continue
+        lin = db_to_linear(r.get("gain_db", 0.0))
+        for i in hits:
+            a, b = ranges[i]
+            p, q = max(a, dst0), min(b, dst1)
+            if q <= p:
+                continue
+            gain = volume_gain(vol_clips, r.get("link_id"),
+                               track_order.get(r["track_id"]), p, q - p, fps)
+            acc = accs[i]
+            s0 = src0 + (p - dst0)
+            for c0 in range(0, q - p, MIX_CHUNK):
+                c1 = min(q - p, c0 + MIX_CHUNK)
+                seg = src[s0 + c0:s0 + c1].astype(np.float64)
+                tgt = acc[p - a + c0:p - a + c1]
+                if gain is None:
+                    if lin == 1.0:
+                        tgt += seg
+                    else:
+                        tgt += seg * lin
+                else:
+                    tgt += seg * (gain[c0:c1] * lin)
+                if cancel is not None and cancel.is_set():
+                    raise MixCancelled()
+                _mix_yield()
+        src = pcm = None
+    for i, (a, b) in enumerate(ranges):
+        acc = accs[i]
+        for c0 in range(0, b - a, MIX_CHUNK):
+            c1 = min(b - a, c0 + MIX_CHUNK)
+            out[a + c0:a + c1] = np.clip(acc[c0:c1], -32768, 32767)
+            _mix_yield()
+        accs[i] = None

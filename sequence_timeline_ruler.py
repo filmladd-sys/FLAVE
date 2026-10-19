@@ -127,16 +127,31 @@ class RulerHeader(QHeaderView):
             # green = {id}_previewaudio.wav current, red = dirty / missing /
             # mixing / failed. Same extent as the video bar. Cached state
             # only (sequence_preview_audio.audio_bar_ok): no query here.
-            audio_ok = False
+            # BUILD 139: ranges -- [] green, None all red, else green with
+            # the still-dirty frame ranges red (audio_bar_ranges, cached)
+            audio_dirty = None
             if tl.sequence_id is not None:
                 try:
-                    from sequence_preview_audio import audio_bar_ok
-                    audio_ok = audio_bar_ok(tl._project_db(), tl.sequence_id)
+                    from sequence_preview_audio import audio_bar_ranges
+                    audio_dirty = audio_bar_ranges(tl._project_db(), tl.sequence_id)
                 except Exception:
-                    audio_ok = False
-            painter.fillRect(rect.left(), bar_y + PREVIEW_BAR_HEIGHT,
-                             bar_right - rect.left(), AUDIO_BAR_HEIGHT,
-                             QColor(40, 170, 60) if audio_ok else QColor(170, 40, 40))
+                    audio_dirty = None
+            a_y = bar_y + PREVIEW_BAR_HEIGHT
+            a_w = bar_right - rect.left()
+            if audio_dirty is None:
+                painter.fillRect(rect.left(), a_y, a_w, AUDIO_BAR_HEIGHT,
+                                 QColor(170, 40, 40))
+            else:
+                painter.fillRect(rect.left(), a_y, a_w, AUDIO_BAR_HEIGHT,
+                                 QColor(40, 170, 60))
+                for f0, f1 in audio_dirty:
+                    if f1 < first or f0 > last:
+                        continue
+                    x0 = max(rect.left(), int(left + (f0 - start) * ppf))
+                    x1 = min(bar_right, int(left + (f1 + 1 - start) * ppf))
+                    if x0 < bar_right:
+                        painter.fillRect(x0, a_y, max(1, x1 - x0),
+                                         AUDIO_BAR_HEIGHT, QColor(170, 40, 40))
         clean = []
         if tl.sequence_id is not None and last >= first:
             try:

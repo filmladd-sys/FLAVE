@@ -283,21 +283,12 @@ def collect_opacity_clips(clips_by_track, track_order=None):
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
-    # Dirty the preview cache over the keyframe clip's [in, out).
-    if clip is None or timeline is None:
-        return
-    if len(clip) > 10 and clip[10] == "volume":
-        # Volume changes only the audio mix (its .sig), not video frames
-        return
-    in_f = max(0, int(clip[2]))
-    length = max(1, int(clip[3]))
-    last = in_f + length - 1
-    if last < in_f:
-        return
-    try:
-        timeline._mark_preview_dirty([(in_f, last)])
-    except Exception:
-        pass
+    # BUILD 139: no mark here. The edit's refresh diffs the timeline
+    # snapshot (sequence_preview_diff), which includes every linked
+    # keyframe clip's keys, so only the frames whose key pair / value
+    # changed go dirty (between the neighbour keys of the edited key), not
+    # the keyframe clip's whole [in, out). Kept for its callers.
+    return
 
 
 
@@ -661,11 +652,8 @@ def add_keyframe_clip(timeline, track_id, click_frame):
         QMessageBox.warning(
             timeline, "Add Keyframe Clip", "Could not add clip: %s" % e)
         return
-    # Preview dirty over the new clip range (scale takes effect once linked)
-    try:
-        timeline._mark_preview_dirty([(in_frame, out_frame - 1)])
-    except Exception:
-        pass
+    # BUILD 139: a new keyframe clip is unlinked (no effect until linked);
+    # the refresh's snapshot diff marks whatever changes (nothing here)
     timeline._after_clip_change(
         "Added keyframe clip at frame %d" % in_frame)
 
