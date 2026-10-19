@@ -369,6 +369,13 @@ class PlayheadOverlay(QWidget):
             painter = QPainter(self)
             paint_preview(tl, painter)
             painter.end()
+        # BUILD 131: slice-mode line (yellow, 1 px) on the clip under the
+        # mouse and its link partners
+        if getattr(tl, "_slice_lines", None):
+            from sequence_timeline_slice import paint_slice_lines
+            painter = QPainter(self)
+            paint_slice_lines(tl, painter)
+            painter.end()
         # Snap line (white) through every track while a drag snaps
         snap = getattr(tl, "_snap_frame", None)
         if snap is not None:

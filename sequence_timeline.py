@@ -696,6 +696,14 @@ class SequenceTimeline(QMainWindow):
         # Space = Play / Pause for this timeline. Window shortcut only; text
         # fields and spin boxes take Space first (shortcut override)
         QShortcut(QKeySequence(Qt.Key_Space), self, activated=self._toggle_play)
+        # BUILD 131: slice mode. C enters, V exits (window shortcuts: a text
+        # field or item editor takes plain letters first via shortcut
+        # override); Escape exits in keyPressEvent; right-click exits in
+        # the viewport filter
+        self._slice_mode = False
+        self._slice_lines = []
+        QShortcut(QKeySequence(Qt.Key_C), self, activated=self._slice_enter)
+        QShortcut(QKeySequence(Qt.Key_V), self, activated=self._slice_exit_key)
 
         self._create_menus()
         self.refresh()
@@ -1215,9 +1223,33 @@ class SequenceTimeline(QMainWindow):
         self._save_view_state()
         event.accept()
 
+    def _slice_enter(self):
+        from sequence_timeline_slice import enter_slice_mode
+        enter_slice_mode(self)
+
+    def _slice_exit_key(self):
+        from sequence_timeline_slice import slice_key_exit
+        slice_key_exit(self)
+
+    def keyPressEvent(self, event):
+        # BUILD 131: Escape leaves slice mode (keys a child did not take)
+        if (event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier
+                and self._slice_mode):
+            from sequence_timeline_slice import slice_key_exit
+            if slice_key_exit(self):
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
             etype = event.type()
+            if self._slice_mode:
+                # BUILD 131: slice mode takes the mouse first
+                from sequence_timeline_slice import slice_event
+                handled = slice_event(self, obj, event)
+                if handled is not None:
+                    return handled
             if etype == QEvent.Resize and getattr(self, "playhead_overlay", None):
                 self.playhead_overlay.setGeometry(obj.rect())
                 self.playhead_overlay.raise_()
@@ -2921,6 +2953,12 @@ class SequenceTimeline(QMainWindow):
             self.ruler.viewport().update()
 
     def closeEvent(self, event):
+        # BUILD 131: slice mode ends with the window
+        try:
+            from sequence_timeline_slice import exit_slice_mode
+            exit_slice_mode(self)
+        except Exception:
+            pass
         # Always save geometry and view state first
         self._save_geometry()
         self._save_view_state()
