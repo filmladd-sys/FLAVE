@@ -318,8 +318,17 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     from keyframe import collect_crop_x_clips, collect_crop_y_clips
     crop_x_clips = collect_crop_x_clips(tl.clips_by_track, track_order)
     crop_y_clips = collect_crop_y_clips(tl.clips_by_track, track_order)
+    # BUILD 154: gamma / brightness / contrast (snapshot[10], [11], [12])
+    from keyframe import (collect_gamma_clips, collect_brightness_clips,
+                          collect_contrast_clips)
+    gamma_clips = collect_gamma_clips(tl.clips_by_track, track_order)
+    brightness_clips = collect_brightness_clips(tl.clips_by_track, track_order)
+    contrast_clips = collect_contrast_clips(tl.clips_by_track, track_order)
+    # return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
+    #         proxies, opacity_clips, crop_x_clips, crop_y_clips)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
-            proxies, opacity_clips, crop_x_clips, crop_y_clips)
+            proxies, opacity_clips, crop_x_clips, crop_y_clips,
+            gamma_clips, brightness_clips, contrast_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -654,6 +663,12 @@ class SequencePlayer(QWindow):
         # BUILD 147: crop keyframes; layer items gain crop_x, crop_y ([9], [10])
         crop_x_clips = snapshot[8] if len(snapshot) >= 9 else []
         crop_y_clips = snapshot[9] if len(snapshot) >= 10 else []
+        # BUILD 154: color keyframes; layer items gain gamma, brightness,
+        # contrast ([11], [12], [13])
+        gamma_clips = snapshot[10] if len(snapshot) >= 11 else []
+        brightness_clips = snapshot[11] if len(snapshot) >= 12 else []
+        contrast_clips = snapshot[12] if len(snapshot) >= 13 else []
+        from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
         from keyframe import scale_percent_for_link, position_x_offset
@@ -696,9 +711,15 @@ class SequencePlayer(QWindow):
                         crop_x_clips, link_id, frame, clip_order)
                     crop_y = crop_offset_for_link(
                         crop_y_clips, link_id, frame, clip_order)
+                    gamma = color_value_for_link(
+                        gamma_clips, link_id, frame, clip_order)
+                    brightness = color_value_for_link(
+                        brightness_clips, link_id, frame, clip_order)
+                    contrast = color_value_for_link(
+                        contrast_clips, link_id, frame, clip_order)
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
                                    pos_dy, (clip[0], path), orig_size, opacity,
-                                   crop_x, crop_y))
+                                   crop_x, crop_y, gamma, brightness, contrast))
                 break
         return layers
 
@@ -794,7 +815,8 @@ class SequencePlayer(QWindow):
 
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
                pos_dx=None, pos_dy=None, orig_size=None, opacity=None,
-               crop_x=None, crop_y=None):
+               crop_x=None, crop_y=None, gamma=None, brightness=None,
+               contrast=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -845,6 +867,25 @@ class SequencePlayer(QWindow):
             # BUILD 152: crop_y too (top and bottom); negative = no crop
             c = max(0.0, c)
             crops.append(ctypes.c_float(c))
+        # BUILD 154: color keyframes (None = no change). The kernel runs, per
+        # RGB channel of the source pixel before the opacity / alpha blend,
+        # c = channel / 255, then contrast (c - 0.5) * contrast + 0.5 clamped
+        # 0..1, then brightness c + brightness / 100 clamped 0..1, then gamma
+        # c ** (1 / gamma); alpha is untouched. Each step runs only when its
+        # value is not the identity (flags), so identity is bit-exact.
+        def _num(v, default, lo, hi):
+            try:
+                v = float(v) if v is not None else default
+            except (TypeError, ValueError):
+                v = default
+            if v != v:
+                v = default
+            return max(lo, min(hi, v))
+        g_ = _num(gamma, 1.0, 0.1, 5.0)
+        b_ = _num(brightness, 0.0, -100.0, 100.0) / 100.0
+        k_ = _num(contrast, 1.0, 0.0, 5.0)
+        cflags = ((1 if k_ != 1.0 else 0) | (2 if b_ != 0.0 else 0)
+                  | (4 if g_ != 1.0 else 0))
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -864,7 +905,8 @@ class SequencePlayer(QWindow):
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
         vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
                  ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y,
-                 opacity_f, crops[0], crops[1]]
+                 opacity_f, crops[0], crops[1], ctypes.c_uint32(cflags),
+                 ctypes.c_float(k_), ctypes.c_float(b_), ctypes.c_float(1.0 / g_)]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -1267,13 +1309,17 @@ class SequencePlayer(QWindow):
             opacity = layer[8] if len(layer) > 8 else None
             crop_x = layer[9] if len(layer) > 9 else None      # BUILD 147
             crop_y = layer[10] if len(layer) > 10 else None
+            gamma = layer[11] if len(layer) > 11 else None     # BUILD 154
+            brightness = layer[12] if len(layer) > 12 else None
+            contrast = layer[13] if len(layer) > 13 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
                                 scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
                                 orig_size=orig_size, opacity=opacity,
-                                crop_x=crop_x, crop_y=crop_y)
+                                crop_x=crop_x, crop_y=crop_y,
+                                gamma=gamma, brightness=brightness, contrast=contrast)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -1286,7 +1332,8 @@ class SequencePlayer(QWindow):
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
                             scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
                             orig_size=orig_size, opacity=opacity,
-                            crop_x=crop_x, crop_y=crop_y)
+                            crop_x=crop_x, crop_y=crop_y,
+                            gamma=gamma, brightness=brightness, contrast=contrast)
                 continue
             dec = self._decoder(dkey, frame)
             nxt = self.dec_next.get(dkey)
@@ -1331,7 +1378,8 @@ class SequencePlayer(QWindow):
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
                         scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
                         orig_size=orig_size, opacity=opacity,
-                        crop_x=crop_x, crop_y=crop_y)
+                        crop_x=crop_x, crop_y=crop_y,
+                        gamma=gamma, brightness=brightness, contrast=contrast)
         self._sync()
         self._target = None
         if target is self.dst:

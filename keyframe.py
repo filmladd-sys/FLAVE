@@ -14,8 +14,11 @@ from PySide6.QtWidgets import (
 # it can change only while the clip has no keys (add_key, set_clip_type).
 # KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity")
 # BUILD 147: crop_x / crop_y (source pixels, default 0, CUDA blend only)
+# KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
+#                        "crop_x", "crop_y")
+# BUILD 154: gamma / brightness / contrast (color, CUDA blend only)
 KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
-                       "crop_x", "crop_y")
+                       "crop_x", "crop_y", "gamma", "brightness", "contrast")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -26,11 +29,19 @@ KEYFRAME_TYPE_CHOICES = (
     ("Opacity", "opacity"),
     ("X Crop", "crop_x"),     # BUILD 147
     ("Y Crop", "crop_y"),     # BUILD 147
+    ("Gamma", "gamma"),               # BUILD 154
+    ("Brightness", "brightness"),     # BUILD 154
+    ("Contrast", "contrast"),         # BUILD 154
 )
 
 # Value range per stored type (others unbounded). Volume and opacity are
 # percent 0..100.
-KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0)}
+# KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0)}
+# BUILD 154: gamma 0.1..5 (1 = none), brightness percent -100..100 (0 =
+# none), contrast 0..5 (1 = none); the blend clamps the same way
+KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0),
+                    "gamma": (0.1, 5.0), "brightness": (-100.0, 100.0),
+                    "contrast": (0.0, 5.0)}
 
 
 def clamp_key_value(stored_type, value):
@@ -255,6 +266,19 @@ def crop_offset_for_link(crop_clips, clip_link_id, frame, clip_order):
     return float(value)
 
 
+def color_value_for_link(color_clips, clip_link_id, frame, clip_order):
+    # BUILD 154: linked type-gamma / brightness / contrast keyframe above
+    # this clip (same rule as scale / position / crop): the raw key value
+    # (linear, flat outside the first / last key), or None = no effect.
+    keys = _pick_above_keyframe(color_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    return float(value)
+
+
 def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
     # Once per snapshot: (link_id, in_frame, out_frame, keys, order) for
     # linked keyframe clips of stored_type. order is table row index
@@ -311,6 +335,24 @@ def collect_crop_y_clips(clips_by_track, track_order=None):
     # BUILD 147
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "crop_y")
+
+
+def collect_gamma_clips(clips_by_track, track_order=None):
+    # BUILD 154
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "gamma")
+
+
+def collect_brightness_clips(clips_by_track, track_order=None):
+    # BUILD 154
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "brightness")
+
+
+def collect_contrast_clips(clips_by_track, track_order=None):
+    # BUILD 154
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "contrast")
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
@@ -801,6 +843,9 @@ def default_key_value(timeline, stored_type):
         return 100.0
     if stored_type == "opacity":
         return 100.0
+    # BUILD 154: gamma 1.0, contrast 1.0 (no change); brightness 0 below
+    if stored_type in ("gamma", "contrast"):
+        return 1.0
     # BUILD 147: crop_x / crop_y = 0 (no crop); others 0 as before
     return 0.0
 

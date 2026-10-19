@@ -471,6 +471,12 @@ GL_QUADS = 0x0007
 # opacity (0..1) multiplies the layer alpha (opacity keyframes).
 # Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
 # inv_scale 1, and a scaled proxy frames to the same pixels as the original.
+# BUILD 154: color_flags / contrast / brightness / inv_gamma: per source
+# RGB channel c = v / 255, in this order, each step only when its flag bit
+# is set (identity = not set): 1 contrast (c - 0.5) * contrast + 0.5,
+# clamp 0..1; 2 brightness c + brightness (-1..1), clamp 0..1; 4 gamma
+# c ** inv_gamma (inv_gamma = 1 / gamma). Back to round(c * 255). Alpha and
+# the opacity blend after it are unchanged; flags 0 skips it all.
 # BUILD 152: crop_y is the same real crop on y: drawn only if the source
 # pixel center lies in [crop_y, sh - crop_y] (top and bottom; picture in
 # place; <= 0 = no crop; >= sh / 2 hides the layer). The BUILD 147 y shift
@@ -496,7 +502,9 @@ PTX = b"""
     .param .u32 dw, .param .u32 dh, .param .s32 ox, .param .s32 oy,
     .param .f32 inv_scale, .param .s32 pos_dx, .param .s32 pos_dy,
     .param .f32 inv_scale_y, .param .f32 opacity,
-    .param .f32 crop_x, .param .f32 crop_y)
+    .param .f32 crop_x, .param .f32 crop_y,
+    .param .u32 color_flags, .param .f32 contrast, .param .f32 brightness,
+    .param .f32 inv_gamma)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
@@ -504,6 +512,9 @@ PTX = b"""
     .reg .s32 oxv, oyv, sx, sy, pdx, pdy;
     .reg .f32 invs, invsy, fx, fy, fcx, fcy, fox, foy, fdx, fdy, fop, fa;
     .reg .f32 fcrx, fcry, fsx, fsw, fsy, fsh;
+    .reg .pred pc, pb, pg;
+    .reg .u32 cflag, cfl;
+    .reg .f32 fcon, fbri, figm, fcc;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -609,6 +620,73 @@ PTX = b"""
     @p bra BLEND;
     ld.global.u8 a, [addr+3];
 BLEND:
+    // BUILD 154: color keyframes on the source RGB (not alpha), before the
+    // opacity / alpha blend. flags 0 (all identity): skipped, bit-exact.
+    // c = channel / 255; bit 1: contrast (c - 0.5) * contrast + 0.5, clamp
+    // 0..1; bit 2: brightness c + brightness (-1..1), clamp 0..1; bit 4:
+    // gamma c ** inv_gamma (ex2(lg2(c) * inv_gamma); c = 0 stays 0); then
+    // round(c * 255) <= 255.
+    ld.param.u32 cflag, [color_flags];
+    setp.eq.u32 p, cflag, 0;
+    @p bra COLOR_DONE;
+    ld.param.f32 fcon, [contrast];
+    ld.param.f32 fbri, [brightness];
+    ld.param.f32 figm, [inv_gamma];
+    and.b32 cfl, cflag, 1;
+    setp.ne.u32 pc, cfl, 0;
+    and.b32 cfl, cflag, 2;
+    setp.ne.u32 pb, cfl, 0;
+    and.b32 cfl, cflag, 4;
+    setp.ne.u32 pg, cfl, 0;
+    cvt.rn.f32.u32 fcc, r;
+    div.rn.f32 fcc, fcc, 0f437F0000;
+    @pc sub.rn.f32 fcc, fcc, 0f3F000000;
+    @pc mul.rn.f32 fcc, fcc, fcon;
+    @pc add.rn.f32 fcc, fcc, 0f3F000000;
+    @pc max.f32 fcc, fcc, 0f00000000;
+    @pc min.f32 fcc, fcc, 0f3F800000;
+    @pb add.rn.f32 fcc, fcc, fbri;
+    @pb max.f32 fcc, fcc, 0f00000000;
+    @pb min.f32 fcc, fcc, 0f3F800000;
+    @pg lg2.approx.f32 fcc, fcc;
+    @pg mul.rn.f32 fcc, fcc, figm;
+    @pg ex2.approx.f32 fcc, fcc;
+    mul.rn.f32 fcc, fcc, 0f437F0000;
+    cvt.rni.u32.f32 r, fcc;
+    min.u32 r, r, 255;
+    cvt.rn.f32.u32 fcc, g;
+    div.rn.f32 fcc, fcc, 0f437F0000;
+    @pc sub.rn.f32 fcc, fcc, 0f3F000000;
+    @pc mul.rn.f32 fcc, fcc, fcon;
+    @pc add.rn.f32 fcc, fcc, 0f3F000000;
+    @pc max.f32 fcc, fcc, 0f00000000;
+    @pc min.f32 fcc, fcc, 0f3F800000;
+    @pb add.rn.f32 fcc, fcc, fbri;
+    @pb max.f32 fcc, fcc, 0f00000000;
+    @pb min.f32 fcc, fcc, 0f3F800000;
+    @pg lg2.approx.f32 fcc, fcc;
+    @pg mul.rn.f32 fcc, fcc, figm;
+    @pg ex2.approx.f32 fcc, fcc;
+    mul.rn.f32 fcc, fcc, 0f437F0000;
+    cvt.rni.u32.f32 g, fcc;
+    min.u32 g, g, 255;
+    cvt.rn.f32.u32 fcc, b;
+    div.rn.f32 fcc, fcc, 0f437F0000;
+    @pc sub.rn.f32 fcc, fcc, 0f3F000000;
+    @pc mul.rn.f32 fcc, fcc, fcon;
+    @pc add.rn.f32 fcc, fcc, 0f3F000000;
+    @pc max.f32 fcc, fcc, 0f00000000;
+    @pc min.f32 fcc, fcc, 0f3F800000;
+    @pb add.rn.f32 fcc, fcc, fbri;
+    @pb max.f32 fcc, fcc, 0f00000000;
+    @pb min.f32 fcc, fcc, 0f3F800000;
+    @pg lg2.approx.f32 fcc, fcc;
+    @pg mul.rn.f32 fcc, fcc, figm;
+    @pg ex2.approx.f32 fcc, fcc;
+    mul.rn.f32 fcc, fcc, 0f437F0000;
+    cvt.rni.u32.f32 b, fcc;
+    min.u32 b, b, 255;
+COLOR_DONE:
     ld.param.f32 fop, [opacity];
     cvt.rn.f32.u32 fa, a;
     mul.f32 fa, fa, fop;
