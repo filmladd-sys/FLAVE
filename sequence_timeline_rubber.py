@@ -9,9 +9,14 @@
 # left-click (no drag past the threshold) is unchanged. The BUILD 148
 # right-button arm, its menu-on-release and the context-menu swallowing
 # were removed: right-click opens the menu through Qt as before BUILD 148,
-# and a right-drag draws nothing. ASCII only.
+# and a right-drag draws nothing.
+# BUILD 150: the box also selects the link partners of the clips it
+# touches; the selection (yellow borders) follows the box live while
+# dragging; dragging into / past the left or right edge scrolls the view
+# (scrub edge rule, stops at frame 0 / the sequence end) with the box
+# anchored in sequence frames. ASCII only.
 
-from PySide6.QtCore import Qt, QEvent, QRect
+from PySide6.QtCore import Qt, QEvent, QRect, QTimer
 from PySide6.QtWidgets import QApplication
 
 from sequence_timeline_ruler import CLIPS_COL
@@ -29,11 +34,24 @@ def _empty_space(tl, pos):
     return True
 
 
+def _clips_span(tl):
+    # (left x, right x) of the visible Clips area in viewport coordinates
+    left = tl.table.columnViewportPosition(CLIPS_COL)
+    w = min(tl.table.columnWidth(CLIPS_COL), tl.table.viewport().width() - left)
+    return left, left + max(1, w) - 1
+
+
 def _box(tl):
+    # BUILD 150: the anchor is kept in sequence frames (rb["frame"]), so the
+    # box keeps its start while the view scrolls; the moving corner is the
+    # mouse, held inside the visible Clips area
     rb = tl._rubber
-    o, p = rb["origin"], rb["pos"]
-    return QRect(min(o.x(), p.x()), min(o.y(), p.y()),
-                 abs(p.x() - o.x()) + 1, abs(p.y() - o.y()) + 1)
+    left, right = _clips_span(tl)
+    ox = int(round(left + (rb["frame"] - tl.view_start_frame) * tl.pixels_per_frame))
+    oy = rb["origin"].y()
+    px = max(left, min(right, rb["pos"].x()))
+    py = rb["pos"].y()
+    return QRect(min(ox, px), min(oy, py), abs(px - ox) + 1, abs(py - oy) + 1)
 
 
 def clips_in_rect(tl, rect):
@@ -62,28 +80,125 @@ def clips_in_rect(tl, rect):
     return [t[2] for t in out]
 
 
-def select_rect(tl, rect):
-    # Replace the selection with the clips in rect (no link partners added;
-    # an empty box clears the selection, like a click on empty space)
-    clips = clips_in_rect(tl, rect)
-    tl._selection_order = [c[0] for c in clips]
-    tl._selected_clip_ids = set(tl._selection_order)
-    tl._selection_solo = False
-    tl.table.viewport().update()
-    tl._update_edit_actions()
+def clips_with_partners(tl, clips):
+    # BUILD 150: the box's clips plus their link-group partners (the same
+    # _linked_clips the plain click uses), box order first, no duplicates
+    out = []
+    seen = set()
+    for c in clips:
+        for m in [c] + tl._linked_clips(c):
+            if m[0] not in seen:
+                seen.add(m[0])
+                out.append(m)
+    return out
+
+
+def select_rect(tl, rect, live=False):
+    # Replace the selection with the clips in rect and (BUILD 150) their
+    # link partners; an empty box clears the selection, like a click on
+    # empty space. live=True (during the drag): the selection borders
+    # follow the box; the edit actions update on the release.
+    clips = clips_with_partners(tl, clips_in_rect(tl, rect))
+    order = [c[0] for c in clips]
+    if order != tl._selection_order or tl._selection_solo:
+        tl._selection_order = order
+        tl._selected_clip_ids = set(order)
+        tl._selection_solo = False
+        tl.table.viewport().update()
+    if not live:
+        tl._update_edit_actions()
     return clips
+
+
+# BUILD 150: edge auto-scroll while the box is dragged, with the scrub's
+# pan rule (sequence_timeline_ruler.scrub_edge: pans by the mouse travel
+# into / past the margin, plus a timer tick while held there; stops at
+# frame 0 and at the end of the sequence). RUBBER_EDGE_PX: the margin
+# inside the visible Clips edges where panning starts.
+RUBBER_EDGE_PX = 8
+
+
+def _pan(tl, tick=False):
+    from sequence_timeline_ruler import scrub_edge
+    rb = tl._rubber
+    left, right = _clips_span(tl)
+    width = right - left + 1
+    xc = rb["pos"].x() - left
+    last = xc if tick else rb.get("last_x")
+    view, _frame, rem = scrub_edge(
+        xc, last, width, tl.view_start_frame, tl.pixels_per_frame,
+        tl.total_frames(), tl.visible_frames(), rb.get("rem", 0.0), tick,
+        margin=RUBBER_EDGE_PX)
+    rb["last_x"] = xc
+    rb["rem"] = rem
+    if view != tl.view_start_frame:
+        tl.view_start_frame = view
+        rb["panned"] = True
+        tl.ruler.viewport().update()
+        tl.table.viewport().update()
+        try:
+            tl._update_status()
+        except Exception:
+            pass
+    m = max(0, min(RUBBER_EDGE_PX, (width - 1) // 3))
+    return xc < m or xc > width - m
+
+
+def _update(tl, tick=False):
+    # Pan if at an edge, then redraw the box and the live selection
+    edge = _pan(tl, tick)
+    tl._rubber_rect = _box(tl)
+    select_rect(tl, tl._rubber_rect, live=True)
+    tl.playhead_overlay.update()
+    timer = _timer(tl)
+    if edge and not timer.isActive():
+        timer.start()
+    elif not edge and timer.isActive():
+        timer.stop()
+
+
+def _timer(tl):
+    t = getattr(tl, "_rubber_timer", None)
+    if t is None:
+        from sequence_timeline_ruler import SCRUB_TICK_MS
+        t = QTimer(tl)
+        t.setInterval(SCRUB_TICK_MS)
+        t.timeout.connect(lambda: _tick(tl))
+        tl._rubber_timer = t
+    return t
+
+
+def _tick(tl):
+    rb = getattr(tl, "_rubber", None)
+    if rb is None or not rb.get("active"):
+        _timer(tl).stop()
+        return
+    _update(tl, tick=True)
+
+
+def _finish(tl, rb):
+    # Release (or a lost button): stop panning, keep the panned view
+    _timer(tl).stop()
+    if rb.get("panned"):
+        try:
+            tl._update_status()
+            tl._save_view_state()
+        except Exception:
+            pass
 
 
 def rubber_event(tl, obj, event, was_slice=False):
     # BUILD 149: left button. Viewport events. True = consumed, None = not
-    # ours (the normal handling runs). The press is never consumed, so a
-    # plain left-click on empty space does what it did before (clear the
-    # selection, the item view's press); only a drag past the threshold
-    # becomes a box. Right-click is not handled here at all (the track /
-    # empty-space menu opens through Qt as before BUILD 148).
+    # ours (the normal handling runs). The press is not consumed here, so
+    # a plain left-click on empty space does what it did before (clear the
+    # selection); only a drag past the threshold becomes a box. Right-click
+    # is not handled here at all (the track / empty-space menu opens
+    # through Qt as before BUILD 148).
     etype = event.type()
     rb = getattr(tl, "_rubber", None)
     if etype == QEvent.MouseButtonPress:
+        if rb is not None:
+            _finish(tl, rb)
         tl._rubber = None
         if tl._rubber_rect is not None:
             tl._rubber_rect = None
@@ -95,13 +210,21 @@ def rubber_event(tl, obj, event, was_slice=False):
         # their own left-press handling
         if was_slice or getattr(tl, "_slice_mode", False) or not _empty_space(tl, pos):
             return None
-        tl._rubber = {"origin": pos, "pos": pos, "active": False}
+        left, _right = _clips_span(tl)
+        frame = tl.view_start_frame + (pos.x() - left) / float(tl.pixels_per_frame)
+        tl._rubber = {"origin": pos, "pos": pos, "active": False,
+                      "frame": frame, "last_x": None, "rem": 0.0,
+                      "panned": False}
         return None
     if rb is None:
         return None
     if etype == QEvent.MouseMove:
         if not (event.buttons() & Qt.LeftButton):
+            _finish(tl, rb)
             tl._rubber = None
+            if tl._rubber_rect is not None:
+                tl._rubber_rect = None
+                tl.playhead_overlay.update()
             return None
         rb["pos"] = event.position().toPoint()
         if not rb["active"]:
@@ -109,17 +232,15 @@ def rubber_event(tl, obj, event, was_slice=False):
             if abs(d.x()) + abs(d.y()) < max(1, QApplication.startDragDistance()):
                 return None     # still a plain click (hover handling runs)
             rb["active"] = True
-        tl._rubber_rect = _box(tl)
-        tl.playhead_overlay.update()
+        _update(tl)
         return True
     if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
         rb["pos"] = event.position().toPoint()
+        rect = _box(tl) if rb["active"] else None
+        _finish(tl, rb)
         tl._rubber = None
         tl._rubber_rect = None
-        if rb["active"]:
-            o, p = rb["origin"], rb["pos"]
-            rect = QRect(min(o.x(), p.x()), min(o.y(), p.y()),
-                         abs(p.x() - o.x()) + 1, abs(p.y() - o.y()) + 1)
+        if rect is not None:
             clips = select_rect(tl, rect)
             tl.playhead_overlay.update()
             try:

@@ -1294,7 +1294,8 @@ class SequenceTimeline(QMainWindow):
                 if handled is not None:
                     return handled
             # BUILD 148 / 149: left-drag rubber-band selection in empty
-            # track space (a plain left-click is unchanged)
+            # track space (a plain left-click is unchanged). BUILD 150:
+            # link partners, edge auto-scroll, live selection borders
             from sequence_timeline_rubber import rubber_event
             handled = rubber_event(self, obj, event)
             if handled is not None:
@@ -1430,6 +1431,12 @@ class SequenceTimeline(QMainWindow):
                         "snap_px": self._snap_pixels(),
                     }
                     self._edge_drag["group"] = self._drag_group(clip, "move")
+                    return True
+                # BUILD 150: a left-click on empty track space (Clips area)
+                # is not passed on to the table, so the track row is not
+                # selected / highlighted (it keeps its color); the clip
+                # selection was cleared above as before
+                if hit_clip is None and self._x_in_clips(press_pos) >= 0:
                     return True
             if etype == QEvent.MouseMove:
                 pos = event.position().toPoint()
