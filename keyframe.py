@@ -10,8 +10,12 @@ from PySide6.QtWidgets import (
     QPushButton, QMessageBox, QDoubleSpinBox, QApplication, QInputDialog,
 )
 
-# Stored on keyframe_clips.type. Not enforced beyond storing the string.
-KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity")
+# Stored on keyframe_clips.type. BUILD 147: one type per keyframe clip;
+# it can change only while the clip has no keys (add_key, set_clip_type).
+# KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity")
+# BUILD 147: crop_x / crop_y (source pixels, default 0, CUDA blend only)
+KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
+                       "crop_x", "crop_y")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -20,6 +24,8 @@ KEYFRAME_TYPE_CHOICES = (
     ("Scale", "scale"),
     ("Volume", "volume"),
     ("Opacity", "opacity"),
+    ("X Crop", "crop_x"),     # BUILD 147
+    ("Y Crop", "crop_y"),     # BUILD 147
 )
 
 # Value range per stored type (others unbounded). Volume and opacity are
@@ -236,6 +242,19 @@ def opacity_for_link(opacity_clips, clip_link_id, frame, clip_order):
     return max(0.0, min(100.0, float(value))) / 100.0
 
 
+def crop_offset_for_link(crop_clips, clip_link_id, frame, clip_order):
+    # BUILD 147: linked type-crop_x / crop_y keyframe above this clip (same
+    # rule as scale / position): the crop offset in source pixels of the
+    # original footage (0 = none), or None when there is no effect.
+    keys = _pick_above_keyframe(crop_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    return float(value)
+
+
 def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
     # Once per snapshot: (link_id, in_frame, out_frame, keys, order) for
     # linked keyframe clips of stored_type. order is table row index
@@ -280,6 +299,18 @@ def collect_position_y_clips(clips_by_track, track_order=None):
 def collect_opacity_clips(clips_by_track, track_order=None):
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "opacity")
+
+
+def collect_crop_x_clips(clips_by_track, track_order=None):
+    # BUILD 147
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "crop_x")
+
+
+def collect_crop_y_clips(clips_by_track, track_order=None):
+    # BUILD 147
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "crop_y")
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
@@ -577,7 +608,7 @@ def persist_keyframe_link_id(cur, clip_mem_id, link_id):
 
 
 class AddKeyframeClipDialog(QDialog):
-    # Name + type (X / Y / Scale) + Add
+    # Name + type (X / Y / Scale / ... / X Crop / Y Crop) + Add
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Keyframe Clip")
@@ -660,13 +691,30 @@ def add_keyframe_clip(timeline, track_id, click_frame):
 
 class AddKeyDialog(QDialog):
     # One numeric value labeled with the clip type (X / Y / Scale)
+    # BUILD 147: choose_type=True (the clip has no keys): a Type drop-down
+    # preset to the clip's type; this key sets the clip's type. defaults:
+    # callable stored_type -> initial value when the type is changed.
     def __init__(self, parent, type_label, initial=None, title="Add Key",
-                 stored_type=None):
+                 stored_type=None, choose_type=False, defaults=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
+        self.type_combo = None
+        self._defaults = defaults
+        if choose_type:
+            trow = QHBoxLayout()
+            trow.addWidget(QLabel("Type:"))
+            self.type_combo = QComboBox()
+            for label, _stored in KEYFRAME_TYPE_CHOICES:
+                self.type_combo.addItem(label)
+            for i, (_label, stored) in enumerate(KEYFRAME_TYPE_CHOICES):
+                if stored == stored_type:
+                    self.type_combo.setCurrentIndex(i)
+            trow.addWidget(self.type_combo)
+            layout.addLayout(trow)
         row = QHBoxLayout()
-        row.addWidget(QLabel("%s:" % (type_label or "Value")))
+        self.value_label = QLabel("%s:" % (type_label or "Value"))
+        row.addWidget(self.value_label)
         self.spin = QDoubleSpinBox()
         self.spin.setDecimals(2)
         lo, hi = KEY_VALUE_RANGES.get(stored_type or "",
@@ -681,6 +729,27 @@ class AddKeyDialog(QDialog):
         ok_btn = QPushButton("OK")
         ok_btn.clicked.connect(self.accept)
         layout.addWidget(ok_btn)
+        if self.type_combo is not None:
+            self.type_combo.currentIndexChanged.connect(self._type_changed)
+
+    def _type_changed(self, idx):
+        # BUILD 147: new type: its label, value range and default value
+        if idx < 0 or idx >= len(KEYFRAME_TYPE_CHOICES):
+            return
+        label, stored = KEYFRAME_TYPE_CHOICES[idx]
+        self.stored_type = stored
+        self.value_label.setText("%s:" % label)
+        lo, hi = KEY_VALUE_RANGES.get(stored, (-1000000000.0, 1000000000.0))
+        self.spin.setRange(lo, hi)
+        if self._defaults is not None:
+            try:
+                self.spin.setValue(float(self._defaults(stored)))
+            except Exception:
+                pass
+
+    def chosen_type(self):
+        # BUILD 147: the type this key is for (the clip's, or the drop-down's)
+        return self.stored_type
 
     def value(self):
         return clamp_key_value(self.stored_type, self.spin.value())
@@ -690,6 +759,28 @@ def clip_type_from_db(cur, db_id):
     cur.execute("SELECT type FROM keyframe_clips WHERE id = ?", (int(db_id),))
     row = cur.fetchone()
     return (row[0] if row else "") or ""
+
+
+def key_count_from_db(cur, db_id):
+    # BUILD 147
+    cur.execute("SELECT COUNT(*) FROM keyframes WHERE keyframe_clip_id = ?",
+                (int(db_id),))
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def set_clip_type(cur, db_id, stored_type):
+    # BUILD 147: the one-type rule. A keyframe clip's type changes only while
+    # it has no keys; returns True when the clip has (now) that type.
+    if stored_type not in KEYFRAME_CLIP_TYPES:
+        return False
+    if clip_type_from_db(cur, db_id) == stored_type:
+        return True
+    if key_count_from_db(cur, db_id) > 0:
+        return False
+    cur.execute("UPDATE keyframe_clips SET type = ? WHERE id = ?",
+                (stored_type, int(db_id)))
+    return True
 
 
 def clip_type_label_from_db(cur, db_id):
@@ -710,6 +801,7 @@ def default_key_value(timeline, stored_type):
         return 100.0
     if stored_type == "opacity":
         return 100.0
+    # BUILD 147: crop_x / crop_y = 0 (no crop); others 0 as before
     return 0.0
 
 
@@ -773,22 +865,34 @@ def add_key(timeline, clip, click_frame):
         ensure_keyframe_tables(conn)
         stored_type = clip_type_from_db(cur, db_id)
         type_label = type_display_label(stored_type) or "Value"
+        # BUILD 147: no keys yet = the type may be chosen with this key
+        no_keys = key_count_from_db(cur, db_id) == 0
         conn.close()
     except Exception as e:
         QMessageBox.warning(timeline, "Add Key", "Could not read clip: %s" % e)
         return
     initial = default_key_value(timeline, stored_type)
     dlg = AddKeyDialog(timeline, type_label, initial=initial,
-                       stored_type=stored_type)
+                       stored_type=stored_type, choose_type=no_keys,
+                       defaults=lambda t: default_key_value(timeline, t))
     if dlg.exec() != QDialog.Accepted:
         return
-    value = clamp_key_value(stored_type, dlg.value())
+    new_type = dlg.chosen_type() if no_keys else stored_type
+    value = clamp_key_value(new_type, dlg.value())
     from undo import push_undo
     push_undo(project_db, "Add key")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         ensure_keyframe_tables(conn)
+        # BUILD 147: one type per clip. A different type is set only while
+        # the clip has no keys (checked again in this transaction).
+        if new_type != stored_type and not set_clip_type(cur, db_id, new_type):
+            conn.close()
+            timeline.status_bar.showMessage(
+                "Add Key refused: the clip already has %s keys" % type_label,
+                3000)
+            return
         cur.execute(
             "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
             "VALUES (?, ?, ?)",

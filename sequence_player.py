@@ -314,8 +314,12 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
                               render_deint)
     from keyframe import collect_opacity_clips
     opacity_clips = collect_opacity_clips(tl.clips_by_track, track_order)
+    # BUILD 147: crop_x / crop_y keyframe clips (snapshot[8], snapshot[9])
+    from keyframe import collect_crop_x_clips, collect_crop_y_clips
+    crop_x_clips = collect_crop_x_clips(tl.clips_by_track, track_order)
+    crop_y_clips = collect_crop_y_clips(tl.clips_by_track, track_order)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
-            proxies, opacity_clips)
+            proxies, opacity_clips, crop_x_clips, crop_y_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -647,6 +651,10 @@ class SequencePlayer(QWindow):
         pos_y_clips = snapshot[5] if len(snapshot) >= 6 else []
         proxies = snapshot[6] if len(snapshot) >= 7 else {}
         opacity_clips = snapshot[7] if len(snapshot) >= 8 else []
+        # BUILD 147: crop keyframes; layer items gain crop_x, crop_y ([9], [10])
+        crop_x_clips = snapshot[8] if len(snapshot) >= 9 else []
+        crop_y_clips = snapshot[9] if len(snapshot) >= 10 else []
+        from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
         from keyframe import scale_percent_for_link, position_x_offset
         from keyframe import position_y_offset
@@ -684,8 +692,13 @@ class SequencePlayer(QWindow):
                         pos_y_clips, link_id, frame, clip_order, self.seq_h)
                     opacity = opacity_for_link(
                         opacity_clips, link_id, frame, clip_order)
+                    crop_x = crop_offset_for_link(
+                        crop_x_clips, link_id, frame, clip_order)
+                    crop_y = crop_offset_for_link(
+                        crop_y_clips, link_id, frame, clip_order)
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
-                                   pos_dy, (clip[0], path), orig_size, opacity))
+                                   pos_dy, (clip[0], path), orig_size, opacity,
+                                   crop_x, crop_y))
                 break
         return layers
 
@@ -780,7 +793,8 @@ class SequencePlayer(QWindow):
 
 
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
-               pos_dx=None, pos_dy=None, orig_size=None, opacity=None):
+               pos_dx=None, pos_dy=None, orig_size=None, opacity=None,
+               crop_x=None, crop_y=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -809,6 +823,19 @@ class SequencePlayer(QWindow):
         except (TypeError, ValueError):
             op = 1.0
         opacity_f = ctypes.c_float(op)
+        # BUILD 147: crop keyframes in ORIGINAL source pixels (None = 0).
+        # The kernel samples the source shifted by (crop_x, crop_y) inside
+        # the unchanged layer box; what leaves the source is transparent.
+        # A proxy is shifted by the same fraction of its own size.
+        crops = []
+        for value, size, orig_i in ((crop_x, sw, 0), (crop_y, sh, 1)):
+            try:
+                c = float(value) if value is not None else 0.0
+            except (TypeError, ValueError):
+                c = 0.0
+            if c and orig_size is not None and orig_size[orig_i]:
+                c = c * float(size) / float(orig_size[orig_i])
+            crops.append(ctypes.c_float(c))
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -828,7 +855,7 @@ class SequencePlayer(QWindow):
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
         vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
                  ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y,
-                 opacity_f]
+                 opacity_f, crops[0], crops[1]]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -1194,12 +1221,15 @@ class SequencePlayer(QWindow):
             pos_dy = layer[5] if len(layer) > 5 else None
             orig_size = layer[7] if len(layer) > 7 else None
             opacity = layer[8] if len(layer) > 8 else None
+            crop_x = layer[9] if len(layer) > 9 else None      # BUILD 147
+            crop_y = layer[10] if len(layer) > 10 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
                                 scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
-                                orig_size=orig_size, opacity=opacity)
+                                orig_size=orig_size, opacity=opacity,
+                                crop_x=crop_x, crop_y=crop_y)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -1211,7 +1241,8 @@ class SequencePlayer(QWindow):
                 stride = [int(v) for v in f.strides][0] if f.strides else sw * 3
                 self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3, sync,
                             scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
-                            orig_size=orig_size, opacity=opacity)
+                            orig_size=orig_size, opacity=opacity,
+                            crop_x=crop_x, crop_y=crop_y)
                 continue
             dec = self._decoder(dkey, frame)
             nxt = self.dec_next.get(dkey)
@@ -1255,7 +1286,8 @@ class SequencePlayer(QWindow):
             # The kernel reads the decoder frame directly
             self._blend(int(f.GetPtrToPlane(0)), sw, sh, stride, 3,
                         scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
-                        orig_size=orig_size, opacity=opacity)
+                        orig_size=orig_size, opacity=opacity,
+                        crop_x=crop_x, crop_y=crop_y)
         self._sync()
         self._target = None
         if target is self.dst:

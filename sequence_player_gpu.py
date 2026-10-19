@@ -471,6 +471,12 @@ GL_QUADS = 0x0007
 # opacity (0..1) multiplies the layer alpha (opacity keyframes).
 # Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
 # inv_scale 1, and a scaled proxy frames to the same pixels as the original.
+# BUILD 147: crop_x / crop_y (source pixels, f32; 0 = unchanged). The layer
+# box is tested at the uncropped source position (sx, sy) as before; the
+# pixel is then read at (sx + crop_x, sy + crop_y), and a read outside the
+# source leaves the destination as it is (cropped away). Positive crop_x
+# shows source further right (the picture moves left inside its box, the
+# box's right strip empties); negative the other way. Same for crop_y.
 PTX = b"""
 .version 7.0
 .target sm_75
@@ -480,13 +486,15 @@ PTX = b"""
     .param .u32 sw, .param .u32 sh, .param .u32 sstride, .param .u32 bpp,
     .param .u32 dw, .param .u32 dh, .param .s32 ox, .param .s32 oy,
     .param .f32 inv_scale, .param .s32 pos_dx, .param .s32 pos_dy,
-    .param .f32 inv_scale_y, .param .f32 opacity)
+    .param .f32 inv_scale_y, .param .f32 opacity,
+    .param .f32 crop_x, .param .f32 crop_y)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
     .reg .u32 usx, usy, off32, r, g, b, a, dr, dg, db, inv, c255;
     .reg .s32 oxv, oyv, sx, sy, pdx, pdy;
     .reg .f32 invs, invsy, fx, fy, fcx, fcy, fox, foy, fdx, fdy, fop, fa;
+    .reg .f32 fcrx, fcry;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -534,6 +542,20 @@ PTX = b"""
     add.f32 fy, fy, foy;
     sub.f32 fx, fx, 0f3F000000;
     sub.f32 fy, fy, 0f3F000000;
+    cvt.rni.s32.f32 sx, fx;
+    cvt.rni.s32.f32 sy, fy;
+    setp.lt.s32 p, sx, 0;
+    @p bra DONE;
+    setp.lt.s32 p, sy, 0;
+    @p bra DONE;
+    setp.ge.s32 p, sx, swv;
+    @p bra DONE;
+    setp.ge.s32 p, sy, shv;
+    @p bra DONE;
+    ld.param.f32 fcrx, [crop_x];
+    ld.param.f32 fcry, [crop_y];
+    add.f32 fx, fx, fcrx;
+    add.f32 fy, fy, fcry;
     cvt.rni.s32.f32 sx, fx;
     cvt.rni.s32.f32 sy, fy;
     setp.lt.s32 p, sx, 0;
