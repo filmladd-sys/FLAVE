@@ -271,7 +271,10 @@ def paste(tl, anchor, make_room):
             if table == "clips" and it.get("markers"):
                 from markers import insert_marker_rows
                 insert_marker_rows(cur, mem, it["markers"])
-            if it["link_id"] is not None:
+            # if it["link_id"] is not None:
+            # BUILD 155: a pasted keyframe clip is always unlinked (link_id
+            # stays NULL); it does not rejoin its pasted link partners
+            if it["link_id"] is not None and table != "keyframe_clips":
                 groups.setdefault(it["link_id"], []).append((table, new_id, mem))
             ranges.append((s, s + it["length"] - 1))
         # BUILD 106: pasted sequence clips get their sequence_children row;
