@@ -693,13 +693,14 @@ def _make_window_class():
             outer.addLayout(form)
             row = QHBoxLayout()
             row.addStretch(1)
-            self.render_btn = QPushButton("Render")
-            self.render_btn.clicked.connect(self._render)
-            row.addWidget(self.render_btn)
             # BUILD 143: Cancel cancels a running render, else closes the window
+            # BUILD 144: Cancel sits left of Render
             self.cancel_btn = QPushButton("Cancel")
             self.cancel_btn.clicked.connect(self._cancel)
             row.addWidget(self.cancel_btn)
+            self.render_btn = QPushButton("Render")
+            self.render_btn.clicked.connect(self._render)
+            row.addWidget(self.render_btn)
             outer.addLayout(row)
             self.status = QLabel("")
             self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
