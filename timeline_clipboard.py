@@ -285,14 +285,16 @@ def paste(tl, anchor, make_room):
         prune_sequence_children(cur, seq_pairs)
         # New link_id per original group (first pasted member's in-memory
         # id, as Link does); a lone pasted member stays unlinked
-        for members in groups.values():
-            if len(members) < 2:
-                continue
-            new_link = members[0][2]
-            for table, new_id, _mem in members:
-                if "link_id" in cols_by_table.get(table, ()):
-                    cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
-                                (new_link, new_id))
+        # BUILD 156: no relink at all: every pasted clip stays unlinked
+        # (link_id NULL, set on insert above)
+        # for members in groups.values():
+        #     if len(members) < 2:
+        #         continue
+        #     new_link = members[0][2]
+        #     for table, new_id, _mem in members:
+        #         if "link_id" in cols_by_table.get(table, ()):
+        #             cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
+        #                         (new_link, new_id))
         conn.commit()
         conn.close()
     except Exception as e:

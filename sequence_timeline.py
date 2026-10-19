@@ -747,6 +747,14 @@ class SequenceTimeline(QMainWindow):
         self._slice_lines = []
         QShortcut(QKeySequence(Qt.Key_C), self, activated=self._slice_enter)
         QShortcut(QKeySequence(Qt.Key_V), self, activated=self._slice_exit_key)
+        # BUILD 156: Ctrl+C / Ctrl+X / Ctrl+V = Copy / Cut / Paste To Tic
+        # (window shortcuts; a text field / spin box / item editor takes
+        # its own copy / cut / paste first via shortcut override, and the
+        # handlers also do nothing while one has focus). Not tied to slice
+        # mode (plain C / V stay the slice keys).
+        QShortcut(QKeySequence("Ctrl+C"), self, activated=self._key_copy)
+        QShortcut(QKeySequence("Ctrl+X"), self, activated=self._key_cut)
+        QShortcut(QKeySequence("Ctrl+V"), self, activated=self._key_paste)
 
         self._create_menus()
         self.refresh()
@@ -761,13 +769,15 @@ class SequenceTimeline(QMainWindow):
 
         # Edit menu (in-memory clipboard per sequence, timeline_clipboard.py)
         edit_menu = menubar.addMenu("Edit")
-        self._copy_action = QAction("Copy", self)
+        # BUILD 156: the shortcut text only (the keys are the QShortcuts
+        # above; a second binding on the action would make them ambiguous)
+        self._copy_action = QAction("Copy\tCtrl+C", self)
         self._copy_action.triggered.connect(self._clip_copy)
-        self._paste_tic_action = QAction("Paste To Tic", self)
+        self._paste_tic_action = QAction("Paste To Tic\tCtrl+V", self)
         self._paste_tic_action.triggered.connect(self._clip_paste_tic)
         self._paste_end_action = QAction("Paste to End", self)
         self._paste_end_action.triggered.connect(self._clip_paste_end)
-        self._cut_action = QAction("Cut", self)
+        self._cut_action = QAction("Cut\tCtrl+X", self)
         self._cut_action.triggered.connect(self._clip_cut)
         for a in (self._copy_action, self._paste_tic_action,
                   self._paste_end_action, self._cut_action):
@@ -832,6 +842,54 @@ class SequenceTimeline(QMainWindow):
         from timeline_clipboard import paste, end_anchor
         paste(self, end_anchor(self), False)
         self._update_edit_actions()
+
+    # BUILD 156: keyboard Copy / Cut / Paste (Ctrl+C / X / V)
+    def _key_copy(self):
+        from sequence_timeline_slice import text_input_focused
+        if text_input_focused(self):
+            return
+        self._clip_copy()
+
+    def _key_cut(self):
+        from sequence_timeline_slice import text_input_focused
+        if text_input_focused(self):
+            return
+        self._clip_cut()
+
+    def _key_paste(self):
+        from sequence_timeline_slice import text_input_focused
+        if text_input_focused(self):
+            return
+        self._clip_paste_tic()
+
+    def _add_clipboard_actions(self, menu):
+        # BUILD 156: Copy / Cut / Paste on a clip's right-click menu. Paste
+        # only when this sequence's clipboard has something (hidden, not
+        # disabled). Returns (copy, cut, paste or None).
+        from timeline_clipboard import has_clipboard
+        copy_action = menu.addAction("Copy")
+        cut_action = menu.addAction("Cut")
+        paste_action = menu.addAction("Paste") if has_clipboard(self) else None
+        return copy_action, cut_action, paste_action
+
+    def _run_clipboard_action(self, action, acts, clip):
+        # BUILD 156: True when action was one of acts. Copy / Cut use the
+        # selection (the right-click already selected an unselected clicked
+        # clip with its link partners); with no selection, the clicked clip.
+        # Paste: at the playhead (Paste To Tic).
+        copy_action, cut_action, paste_action = acts
+        if action is None or action not in [a for a in acts if a is not None]:
+            return False
+        if action == paste_action:
+            self._clip_paste_tic()
+            return True
+        if not self._selected_clip_ids:
+            self._select_clip(clip, "normal")
+        if action == copy_action:
+            self._clip_copy()
+        else:
+            self._clip_cut()
+        return True
 
 
     def _row_track_id(self, row):
@@ -2090,9 +2148,13 @@ class SequenceTimeline(QMainWindow):
             # BUILD 133: Link / Unlink from the whole selection
             link_action, unlink_action = self._add_link_actions(menu, clip)
             menu.addSeparator()
+            clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+            menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
             if action is None:
+                return
+            if self._run_clipboard_action(action, clip_acts, clip):
                 return
             if action == key_click_action:
                 click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
@@ -2118,8 +2180,12 @@ class SequenceTimeline(QMainWindow):
             slice_action = menu.addAction("Slice")
             link_action, unlink_action = self._add_link_actions(menu, clip)
             menu.addSeparator()
+            clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+            menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if self._run_clipboard_action(action, clip_acts, clip):
+                return
             if action == edit_action:
                 self.edit_caption(clip)
             elif action == slice_action:
@@ -2159,8 +2225,12 @@ class SequenceTimeline(QMainWindow):
             from clip_proxy import add_clip_proxy_submenu
             proxy_actions = add_clip_proxy_submenu(self, menu, clip)
         menu.addSeparator()
+        clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+        menu.addSeparator()
         delete_action = menu.addAction("Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if self._run_clipboard_action(action, clip_acts, clip):
+            return
         if action is not None and action in proxy_actions:
             from clip_proxy import apply_clip_proxy
             apply_clip_proxy(self, clip, proxy_actions[action])
