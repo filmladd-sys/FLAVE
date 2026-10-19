@@ -1,30 +1,25 @@
 # sequence_timeline_rubber.py
 # BUILD 148: rubber-band selection on the Sequence Timeline track rows.
-# Right-press in empty clip-area space (no clip body / edge, key box or
-# marker under the mouse) arms it. Moving past the drag threshold draws a
-# white-bordered box (PlayheadOverlay paints tl._rubber_rect) that follows
-# the mouse; the release selects every clip (video, audio, image, caption,
-# keyframe) whose painted bounds intersect the box, replacing the
-# selection. A release without that drag opens the same right-click menu as
-# before (tl._track_context_menu at the press position).
-# Qt sends the mouse context-menu event at the press (X11 / macOS) or right
-# after the release (Windows); while armed, and after that release until
-# the next mouse press (at most EAT_MENU_SEC), the viewport filter swallows
-# it so the menu never opens during a drag and opens once (from here)
-# after a plain right-click. ASCII only.
+# BUILD 149: on the LEFT button. A left-press in empty clip-area space (no
+# clip body / edge, key box or marker under the mouse; never in slice
+# mode) arms it. Moving past the drag threshold draws a white-bordered box
+# (PlayheadOverlay paints tl._rubber_rect) that follows the mouse; the
+# release selects every clip (video, audio, image, caption, keyframe)
+# whose painted bounds intersect the box, replacing the selection. A plain
+# left-click (no drag past the threshold) is unchanged. The BUILD 148
+# right-button arm, its menu-on-release and the context-menu swallowing
+# were removed: right-click opens the menu through Qt as before BUILD 148,
+# and a right-drag draws nothing. ASCII only.
 
-import time
-
-from PySide6.QtCore import Qt, QEvent, QRect, QTimer
-from PySide6.QtGui import QContextMenuEvent
+from PySide6.QtCore import Qt, QEvent, QRect
 from PySide6.QtWidgets import QApplication
 
 from sequence_timeline_ruler import CLIPS_COL
 
 
 def _empty_space(tl, pos):
-    # True when a right-click here would open the track / empty-space menu
-    # (not a clip, clip edge, key box or marker) inside the Clips area
+    # Empty track space inside the Clips area: not a clip, clip edge, key
+    # box or marker (BUILD 149: those keep their own left-press drags)
     if tl._x_in_clips(pos) < 0:
         return False
     if tl._hit_key(pos) is not None or tl._hit_marker(pos) is not None:
@@ -79,60 +74,48 @@ def select_rect(tl, rect):
     return clips
 
 
-EAT_MENU_SEC = 1.0
-
-
-def _eating(tl):
-    until = getattr(tl, "_rubber_eat_menu", False)
-    if not until:
-        return False
-    if time.monotonic() > float(until):
-        tl._rubber_eat_menu = False
-        return False
-    return True
-
-
 def rubber_event(tl, obj, event, was_slice=False):
-    # Viewport events. True = consumed, None = not ours (normal handling)
+    # BUILD 149: left button. Viewport events. True = consumed, None = not
+    # ours (the normal handling runs). The press is never consumed, so a
+    # plain left-click on empty space does what it did before (clear the
+    # selection, the item view's press); only a drag past the threshold
+    # becomes a box. Right-click is not handled here at all (the track /
+    # empty-space menu opens through Qt as before BUILD 148).
     etype = event.type()
     rb = getattr(tl, "_rubber", None)
-    if etype == QEvent.ContextMenu:
-        if ((rb is not None or _eating(tl))
-                and event.reason() == QContextMenuEvent.Mouse):
-            tl._rubber_eat_menu = False     # one menu event per gesture
-            return True
-        return None
-    if etype in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
-        tl._rubber_eat_menu = False         # a new click: nothing to eat
-    if etype == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
-        pos = event.position().toPoint()
+    if etype == QEvent.MouseButtonPress:
         tl._rubber = None
-        tl._rubber_rect = None
-        # Slice mode's right-press (exit + menu) and clip / key / marker
-        # menus stay as they were
-        if was_slice or not _empty_space(tl, pos):
+        if tl._rubber_rect is not None:
+            tl._rubber_rect = None
+            tl.playhead_overlay.update()
+        if event.button() != Qt.LeftButton:
+            return None
+        pos = event.position().toPoint()
+        # Slice mode, clips (move / trim drag), key boxes and markers keep
+        # their own left-press handling
+        if was_slice or getattr(tl, "_slice_mode", False) or not _empty_space(tl, pos):
             return None
         tl._rubber = {"origin": pos, "pos": pos, "active": False}
-        return None     # the item view still sees the press, as before
+        return None
     if rb is None:
         return None
     if etype == QEvent.MouseMove:
-        if not (event.buttons() & Qt.RightButton):
+        if not (event.buttons() & Qt.LeftButton):
+            tl._rubber = None
             return None
         rb["pos"] = event.position().toPoint()
         if not rb["active"]:
             d = rb["pos"] - rb["origin"]
             if abs(d.x()) + abs(d.y()) < max(1, QApplication.startDragDistance()):
-                return True
+                return None     # still a plain click (hover handling runs)
             rb["active"] = True
         tl._rubber_rect = _box(tl)
         tl.playhead_overlay.update()
         return True
-    if etype == QEvent.MouseButtonRelease and event.button() == Qt.RightButton:
+    if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
         rb["pos"] = event.position().toPoint()
         tl._rubber = None
         tl._rubber_rect = None
-        tl._rubber_eat_menu = time.monotonic() + EAT_MENU_SEC
         if rb["active"]:
             o, p = rb["origin"], rb["pos"]
             rect = QRect(min(o.x(), p.x()), min(o.y(), p.y()),
@@ -144,9 +127,6 @@ def rubber_event(tl, obj, event, was_slice=False):
                     len(clips), "" if len(clips) == 1 else "s"), 2000)
             except Exception:
                 pass
-        else:
-            origin = rb["origin"]
-            QTimer.singleShot(0, lambda: tl._track_context_menu(origin))
         return None
     return None
 
