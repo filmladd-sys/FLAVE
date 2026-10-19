@@ -2,6 +2,12 @@
 # JPEG preview path for the Sequence Player: one frame and a card batch.
 # Methods take the SequenceTimeline player as self and are attached by
 # sequence_player.py. ASCII only.
+# BUILD 145: one frame engine. The preview worker composites every frame on
+# the headless composer (sequence_preview_gpu), whether or not a Sequence
+# Player is open; the player only presents (preview.db JPEGs, play ring)
+# and keeps no decoders. The open player composites only as a fallback when
+# the engine's GPU setup failed. The render runs the same composite_batch
+# on a private composer of the same class (own decoders, originals).
 
 import ctypes
 import os
@@ -255,6 +261,13 @@ def FrameGenerate(project_path, sequence_id, frame_num, snapshot=None, worker=Fa
     # Sequence Player's GPU context and composite; never opens a window,
     # so with no player open for this sequence it returns None.
     # BUILD 141: worker=True with no player open: headless GPU composite.
+    # BUILD 145: worker=True always uses the frame engine (_generator_for),
+    # player open or not; the GUI path (worker=False) still needs a player.
+    if worker:
+        gen = _generator_for(project_path, sequence_id)
+        if gen is None:
+            return None
+        return gen.frame_jpeg(int(frame_num), preview_jpeg_quality(), snapshot, worker)
     try:
         import sequence_timeline
         timeline = sequence_timeline._open_windows.get(int(sequence_id))
@@ -262,16 +275,13 @@ def FrameGenerate(project_path, sequence_id, frame_num, snapshot=None, worker=Fa
         return None
     player = getattr(timeline, "_player", None)
     if player is None or player.closed:
-        # BUILD 141: the worker composites headless when no player is open
-        # (the GUI path still needs the player)
-        player = _generator_for(project_path, sequence_id) if worker else None
-        if player is None:
-            return None
-        return player.frame_jpeg(int(frame_num), preview_jpeg_quality(), snapshot, worker)
+        # GUI path: needs the player (BUILD 145: the worker returned above)
+        return None
     if os.path.abspath(project_path) != os.path.abspath(timeline._project_db()):
         return None
-    if worker:
-        _release_headless()
+    # BUILD 145: the frame engine is not released for the player any more
+    # if worker:
+    #     _release_headless()
     return player.frame_jpeg(int(frame_num), preview_jpeg_quality(), snapshot, worker)
 
 
@@ -284,19 +294,21 @@ def _release_headless():
 
 
 def _generator_for(project_path, sequence_id):
-    # BUILD 141, worker thread: the open player for this sequence (its
-    # decoders stay warm; the headless composer is freed so one set of
-    # decoders runs), else the headless GPU composer, else None
-    player = _player_for(project_path, sequence_id)
-    if player is not None:
-        _release_headless()
-        return player
+    # Worker thread: the composer for this sequence's preview frames.
+    # BUILD 145: the frame engine (one headless composer, its decoders stay
+    # warm when a player opens or closes); the open player only when the
+    # engine's GPU setup failed; else None.
+    # Was (BUILD 141): the open player first (headless released), else the
+    # headless composer.
     try:
         from sequence_preview_gpu import headless_for
-        return headless_for(project_path, sequence_id)
+        engine = headless_for(project_path, sequence_id)
     except Exception as e:
         print(f"Preview headless GPU failed: {e}")
-        return None
+        engine = None
+    if engine is not None:
+        return engine
+    return _player_for(project_path, sequence_id)
 
 
 def preview_jpeg_quality():

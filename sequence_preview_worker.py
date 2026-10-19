@@ -5,6 +5,8 @@
 # sleeps on a condition when there is nothing to do. ASCII only.
 # BUILD 141: no Sequence Player needed: with none open for the sequence the
 # frames are composited headless on the GPU (sequence_preview_gpu).
+# BUILD 145: always on that headless composer (the one frame engine), with
+# or without a player open; the player only presents.
 
 import threading
 import time

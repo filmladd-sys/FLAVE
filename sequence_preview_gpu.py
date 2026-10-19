@@ -13,6 +13,15 @@
 # timeline, or when it switches sequence. ASCII only.
 # BUILD 142: the render uses its own composer of this class (new_composer /
 # free_composer): own decoders and buffers, no Sequence Player, no GL.
+# BUILD 145: the frame engine. _COMPOSER is the one composer of the preview
+# fill whether or not a Sequence Player is open (the player only presents
+# and holds no decoders), so opening or closing the player no longer tears
+# down and rebuilds the decoders. It is released only when the worker goes
+# idle on a closed timeline or switches sequence (not on player open, as
+# the BUILD 141 note above said). The render keeps a private composer:
+# it decodes the originals (the preview decodes proxies) at full speed, and
+# sharing one decoder set would make each side prune the other's decoders
+# (_prune_decoders keeps only the snapshot's clips) and seek every batch.
 
 import ctypes
 import os
@@ -156,7 +165,8 @@ def _sequence_size(project, sequence_id):
 
 def headless_for(project, sequence_id):
     # Worker thread: the headless composer for this sequence (created on
-    # first use, replaced when the sequence or its size changes), or None
+    # first use, replaced when the sequence or its size changes; BUILD 145:
+    # kept while a player opens and closes), or None
     # when the GPU setup failed (not retried for that key this session).
     w, h = _sequence_size(project, sequence_id)
     key = (os.path.abspath(project), int(sequence_id), w, h)
