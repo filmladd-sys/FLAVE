@@ -580,6 +580,7 @@ class SequenceTimeline(QMainWindow):
         self._play_mixing = False     # BUILD 136: Play waits for the audio mix
         self._audio_mix_job = None    # BUILD 136: sequence_preview_audio.MixJob
         self._audio_mix_timer = None  # BUILD 136: GUI-thread poll of the job
+        self._audio_bar_timer = None  # BUILD 137: debounced audio state check
         name = _load_sequence_name(sequence_id)
         if name:
             self.setWindowTitle(f"Sequence Timeline: {name}: #{sequence_id}")
@@ -2431,6 +2432,9 @@ class SequenceTimeline(QMainWindow):
             from sequence_preview_audio import mark_preview_audio_dirty
             if self.sequence_id is not None and self._project_db():
                 mark_preview_audio_dirty(self._project_db(), self.sequence_id)
+                # BUILD 137: audio bar red now; settle the true state with
+                # one signature check 300 ms after the last refresh
+                self._audio_bar_schedule()
         except Exception:
             pass
         # Edit: new snapshot, wake the preview worker
@@ -2567,6 +2571,7 @@ class SequenceTimeline(QMainWindow):
             fps = float(self.fps or 30)
             total = int(self.total_frames())
             wav, sig = preview_audio_current(db, self.sequence_id, fps, total)
+            self.ruler.viewport().update()     # BUILD 137: Play's check
             if wav or not sig:
                 # Up to date: a mix of some other (older) state is useless
                 cancel_mix(db, self.sequence_id)
@@ -2584,6 +2589,35 @@ class SequenceTimeline(QMainWindow):
             print(f"Audio mix start failed: {e}")
             self._audio_mix_job = None
             return False
+
+    def _audio_bar_schedule(self):
+        # BUILD 137: debounce (restart) the audio state check
+        if self._audio_bar_timer is None:
+            self._audio_bar_timer = QTimer(self)
+            self._audio_bar_timer.setSingleShot(True)
+            self._audio_bar_timer.setInterval(300)
+            self._audio_bar_timer.timeout.connect(self._audio_bar_check)
+        self._audio_bar_timer.start()
+        try:
+            self.ruler.viewport().update()
+        except Exception:
+            pass
+
+    def _audio_bar_check(self):
+        # BUILD 137: one signature check on the GUI thread (a few small
+        # queries); green when the WAV is current and no mix runs
+        try:
+            from sequence_preview_audio import settle_audio_state
+            db = self._project_db()
+            if db and self.sequence_id is not None:
+                settle_audio_state(db, self.sequence_id, float(self.fps or 30),
+                                   int(self.total_frames()))
+        except Exception:
+            pass
+        try:
+            self.ruler.viewport().update()
+        except Exception:
+            pass
 
     def _audio_mix_finish(self, job, pending):
         # Finished job: collect it (GUI thread: reload generation). A stale
@@ -2627,6 +2661,8 @@ class SequenceTimeline(QMainWindow):
         if self._audio_mix_timer is not None:
             self._audio_mix_timer.stop()
         self._preview_status_poll()
+        # BUILD 137: collect_mix settled the audio bar
+        self.ruler.viewport().update()
         if self._play_mixing:
             self._play_mixing = False
             self._start_clock()
@@ -3010,6 +3046,15 @@ class SequenceTimeline(QMainWindow):
                 text = status_text(_worker, self._project_db(), self.sequence_id)
         except Exception:
             text = ""
+        # BUILD 137: a source re-import (the .audiotmp.db changed; one
+        # os.stat per poll) turns the audio bar red, then a settle check
+        try:
+            from sequence_preview_audio import check_audio_source
+            db = self._project_db() if self.sequence_id is not None else ""
+            if db and check_audio_source(db, self.sequence_id):
+                self._audio_bar_schedule()
+        except Exception:
+            pass
         # BUILD 136: both statuses when both run
         job = getattr(self, "_audio_mix_job", None)
         if job is not None and not job.done:
@@ -3147,6 +3192,8 @@ class SequenceTimeline(QMainWindow):
         self._play_mixing = False
         if getattr(self, "_audio_mix_timer", None) is not None:
             self._audio_mix_timer.stop()
+        if getattr(self, "_audio_bar_timer", None) is not None:
+            self._audio_bar_timer.stop()
         job = getattr(self, "_audio_mix_job", None)
         if job is not None and not job.done:
             job.cancel.set()

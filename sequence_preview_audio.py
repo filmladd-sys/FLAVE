@@ -38,7 +38,7 @@ def _state_key(project_db, sequence_id):
 
 def _state(project_db, sequence_id):
     return _STATE.setdefault(_state_key(project_db, sequence_id),
-                             {"gen": 0, "dirty": True, "stale": None})
+                             {"gen": 0, "dirty": True, "stale": None, "bar": False})
 
 
 def mark_preview_audio_dirty(project_db, sequence_id=None):
@@ -51,12 +51,14 @@ def mark_preview_audio_dirty(project_db, sequence_id=None):
             st = _state(project_db, sequence_id)
             st["dirty"] = True
             st["stale"] = None
+            st["bar"] = False       # BUILD 137: audio bar red at once
             return
         db = os.path.normcase(os.path.abspath(project_db))
         for key, st in _STATE.items():
             if key[0] == db:
                 st["dirty"] = True
                 st["stale"] = None
+                st["bar"] = False
     except Exception:
         pass
 
@@ -88,12 +90,7 @@ def _scrub_ok_sig(project_db, sequence_id, fps, total_frames):
         # BUILD 136: a source re-import rewrites the sibling .audiotmp.db
         # (no timeline edit): its size / mtime change re-dirties the mix
         # (stands in for a peaks.py hook)
-        src = _audiotmp_stamp(project_db)
-        if src != st.get("src_stamp"):
-            if "src_stamp" in st:
-                st["dirty"] = True
-                st["stale"] = None
-            st["src_stamp"] = src
+        check_audio_source(project_db, sequence_id)
         if not st["dirty"]:
             return True
         if st["stale"] is None:
@@ -101,9 +98,63 @@ def _scrub_ok_sig(project_db, sequence_id, fps, total_frames):
             have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
             want = audio_timeline_signature(project_db, sequence_id, fps, total_frames)
             st["stale"] = not (os.path.isfile(wav) and want and have == want)
+            st["bar"] = not st["stale"]
             if not st["stale"]:
                 st["dirty"] = False
         return not st["stale"]
+    except Exception:
+        return False
+
+
+def check_audio_source(project_db, sequence_id):
+    # BUILD 136/137: the sibling .audiotmp.db changed size / mtime since the
+    # last look (source re-import) -> dirty. One os.stat. True if changed.
+    try:
+        st = _state(project_db, sequence_id)
+        src = _audiotmp_stamp(project_db)
+        if src == st.get("src_stamp"):
+            return False
+        seen = "src_stamp" in st
+        st["src_stamp"] = src
+        if seen:
+            st["dirty"] = True
+            st["stale"] = None
+            st["bar"] = False
+        return seen
+    except Exception:
+        return False
+
+
+def audio_bar_ok(project_db, sequence_id):
+    # BUILD 137, paint path: dict lookups only, never a query. Green only
+    # when the last check found the WAV current and no mix is running.
+    try:
+        key = _state_key(project_db, sequence_id)
+        st = _STATE.get(key)
+        if st is None or not st.get("bar"):
+            return False
+        job = _JOBS.get(key)
+        return not (job is not None and not job.done)
+    except Exception:
+        return False
+
+
+def settle_audio_state(project_db, sequence_id, fps, total_frames):
+    # BUILD 137, GUI thread: one signature check (a few small queries) to
+    # settle the true state after an edit / at open / after a mix. A
+    # running mix stays red. Returns the bar state.
+    try:
+        st = _state(project_db, sequence_id)
+        if running_mix(project_db, sequence_id) is not None:
+            st["bar"] = False
+            return False
+        check_audio_source(project_db, sequence_id)
+        wav, _sig = preview_audio_current(project_db, sequence_id, fps, total_frames)
+        ok = wav is not None
+        st["bar"] = ok
+        st["stale"] = not ok
+        st["dirty"] = not ok
+        return ok
     except Exception:
         return False
 
@@ -579,7 +630,12 @@ def preview_audio_current(project_db, sequence_id, fps, total_frames):
     want = audio_timeline_signature(project_db, sequence_id, fps, total_frames)
     wav = preview_audio_wav_path(project_db, sequence_id)
     have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
-    if want and have == want and os.path.isfile(wav):
+    ok = bool(want and have == want and os.path.isfile(wav))
+    try:
+        _state(project_db, sequence_id)["bar"] = ok    # BUILD 137
+    except Exception:
+        pass
+    if ok:
         return wav, want
     return None, want
 
@@ -662,13 +718,17 @@ def collect_mix(job):
     if job.collected:
         return job.status
     job.collected = True
+    st = _STATE.setdefault(job.key, {"gen": 0, "dirty": True, "stale": None,
+                                     "bar": False})
     if job.status == "swapped":
-        st = _STATE.setdefault(job.key, {"gen": 0, "dirty": True, "stale": None})
         st["gen"] += 1
-        st["stale"] = None
-        st["dirty"] = True      # scrub re-checks the signature once
-    elif job.status == "failed":
-        print("Preview audio mix failed: %s" % job.error)
+        # BUILD 137: green only if still current now (one check)
+        settle_audio_state(job.project_db, job.sequence_id, job.fps,
+                           job.total_frames)
+    else:
+        st["bar"] = False
+        if job.status == "failed":
+            print("Preview audio mix failed: %s" % job.error)
     return job.status
 
 

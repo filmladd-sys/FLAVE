@@ -29,6 +29,7 @@ SCRUB_TICK_MS = 30
 SCRUB_TICK_GAIN = 0.25
 SCRUB_DEPTH_MAX = 240
 PREVIEW_BAR_HEIGHT = 3   # preview cache bar drawn under the ruler marks
+AUDIO_BAR_HEIGHT = PREVIEW_BAR_HEIGHT   # BUILD 137: audio mix bar below it
 
 
 class RulerHeader(QHeaderView):
@@ -38,7 +39,7 @@ class RulerHeader(QHeaderView):
         self.timeline = timeline
         self.setSectionsClickable(False)
         self.setSectionsMovable(False)
-        self.setFixedHeight(RULER_HEIGHT + PREVIEW_BAR_HEIGHT)
+        self.setFixedHeight(RULER_HEIGHT + PREVIEW_BAR_HEIGHT + AUDIO_BAR_HEIGHT)
         self._dragging = False
         # BUILD 130: scrub auto-scroll state
         self._scrub_x = None        # last mouse x in the Clips area
@@ -98,7 +99,8 @@ class RulerHeader(QHeaderView):
             painter.setPen(QColor(190, 190, 190))
             text_h = painter.fontMetrics().height()
             fm = painter.fontMetrics()
-            text_y = min(rect.bottom() - PREVIEW_BAR_HEIGHT, top + 8 + text_h)
+            text_y = min(rect.bottom() - PREVIEW_BAR_HEIGHT - AUDIO_BAR_HEIGHT,
+                         top + 8 + text_h)
             first_sec = int(math.ceil(first / fps / interval)) * interval
             sec = first_sec
             while True:
@@ -114,12 +116,27 @@ class RulerHeader(QHeaderView):
                 sec += interval
         # Preview cache bar under the ruler: red = missing or dirty,
         # green = clean row in {sequence_id}_preview.db. One range query.
-        bar_y = rect.bottom() - PREVIEW_BAR_HEIGHT + 1
+        # BUILD 137: the video bar sits right above the audio bar
+        bar_y = rect.bottom() - AUDIO_BAR_HEIGHT - PREVIEW_BAR_HEIGHT + 1
         # Clamped to the sequence: nothing drawn past the last frame
         bar_right = min(rect.right() + 1, int(left + (total - start) * ppf))
         if bar_right > rect.left():
             painter.fillRect(rect.left(), bar_y, bar_right - rect.left(),
                              PREVIEW_BAR_HEIGHT, QColor(170, 40, 40))
+            # BUILD 137: audio mix bar, one state for the whole sequence:
+            # green = {id}_previewaudio.wav current, red = dirty / missing /
+            # mixing / failed. Same extent as the video bar. Cached state
+            # only (sequence_preview_audio.audio_bar_ok): no query here.
+            audio_ok = False
+            if tl.sequence_id is not None:
+                try:
+                    from sequence_preview_audio import audio_bar_ok
+                    audio_ok = audio_bar_ok(tl._project_db(), tl.sequence_id)
+                except Exception:
+                    audio_ok = False
+            painter.fillRect(rect.left(), bar_y + PREVIEW_BAR_HEIGHT,
+                             bar_right - rect.left(), AUDIO_BAR_HEIGHT,
+                             QColor(40, 170, 60) if audio_ok else QColor(170, 40, 40))
         clean = []
         if tl.sequence_id is not None and last >= first:
             try:
