@@ -4,7 +4,7 @@
 
 import math
 from PySide6.QtWidgets import QHeaderView, QWidget
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPen, QPainter
 
 
@@ -19,6 +19,15 @@ def _tic_setting(key, default):
 
 CLIPS_COL = 2   # Clips column index, shared with sequence_timeline.py
 RULER_HEIGHT = 24
+# BUILD 130: scrub auto-scroll. Within SCRUB_EDGE_PX of either edge of the
+# visible Clips area the view pans and the playhead stays SCRUB_EDGE_PX in.
+# While the button is held in (or past) a margin, a SCRUB_TICK_MS timer keeps
+# panning at SCRUB_TICK_GAIN px per tick per px of depth (depth capped at
+# SCRUB_DEPTH_MAX px).
+SCRUB_EDGE_PX = 60
+SCRUB_TICK_MS = 30
+SCRUB_TICK_GAIN = 0.25
+SCRUB_DEPTH_MAX = 240
 PREVIEW_BAR_HEIGHT = 3   # preview cache bar drawn under the ruler marks
 
 
@@ -31,6 +40,13 @@ class RulerHeader(QHeaderView):
         self.setSectionsMovable(False)
         self.setFixedHeight(RULER_HEIGHT + PREVIEW_BAR_HEIGHT)
         self._dragging = False
+        # BUILD 130: scrub auto-scroll state
+        self._scrub_x = None        # last mouse x in the Clips area
+        self._scrub_rem = 0.0       # sub-frame pan remainder (px)
+        self._scrub_panned = False  # view moved during this drag
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(SCRUB_TICK_MS)
+        self._edge_timer.timeout.connect(self._edge_tick)
 
     def paintSection(self, painter, rect, logical_index):
         if logical_index != CLIPS_COL:
@@ -156,15 +172,59 @@ class RulerHeader(QHeaderView):
         x = int(event.position().x())
         if self.logicalIndexAt(x) == CLIPS_COL and event.button() == Qt.LeftButton:
             self._dragging = True
-            self._scrub_to(self._frame_at(x))
+            self._scrub_x = None
+            self._scrub_rem = 0.0
+            self._scrub_panned = False
+            # BUILD 130: a click inside a margin pans at once (the clicked
+            # frame ends SCRUB_EDGE_PX in); holding there keeps panning
+            self._edge_scrub(x)
+            self._edge_timer.start()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._dragging:
-            self._scrub_to(self._frame_at(int(event.position().x())))
+            # Outside the widget too (the press grabs the mouse)
+            self._edge_scrub(int(event.position().x()))
             return
         super().mouseMoveEvent(event)
+
+    def _clips_geometry(self):
+        # (left x of the Clips area in this header, visible Clips width)
+        start = self.sectionViewportPosition(CLIPS_COL)
+        w = min(self.sectionSize(CLIPS_COL), self.viewport().width() - start)
+        return start, max(1, w)
+
+    def _edge_scrub(self, x, tick=False):
+        # Mouse x (header coordinates) -> view pan + playhead (scrub_edge)
+        tl = self.timeline
+        start, w = self._clips_geometry()
+        xc = x - start
+        last = xc if tick else self._scrub_x
+        view, frame, rem = scrub_edge(
+            xc, last, w, tl.view_start_frame, tl.pixels_per_frame,
+            tl.total_frames(), tl.visible_frames(), self._scrub_rem, tick)
+        self._scrub_x = xc
+        self._scrub_rem = rem
+        if view != tl.view_start_frame:
+            # The existing horizontal scroll: view_start_frame + repaint of
+            # the ruler, the clips and the overlays (playhead, drop preview)
+            tl.view_start_frame = view
+            self._scrub_panned = True
+            self.viewport().update()
+            tl.table.viewport().update()
+            overlay = getattr(tl, "playhead_overlay", None)
+            if overlay is not None:
+                overlay.update()
+        self._scrub_to(frame)
+
+    def _edge_tick(self):
+        # Held in or past a margin: keep panning (stops on release)
+        if not self._dragging or self._scrub_x is None:
+            self._edge_timer.stop()
+            return
+        start, _w = self._clips_geometry()
+        self._edge_scrub(int(self._scrub_x + start), tick=True)
 
     def _scrub_to(self, frame):
         # BUILD 111: move the playhead; if the frame changed (and not
@@ -182,8 +242,66 @@ class RulerHeader(QHeaderView):
     def mouseReleaseEvent(self, event):
         if self._dragging:
             self._dragging = False
+            self._edge_timer.stop()
+            if self._scrub_panned:
+                # Keep the panned view (saved once, not per move)
+                self._scrub_panned = False
+                try:
+                    self.timeline._save_view_state()
+                except Exception:
+                    pass
             return
         super().mouseReleaseEvent(event)
+
+
+def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
+               margin=SCRUB_EDGE_PX):
+    # BUILD 130: one scrub step. x / last_x: mouse x in the Clips area (may
+    # be < 0 or > width when past the widget); last_x None = press.
+    # Returns (view_start_frame, playhead frame, sub-frame remainder px).
+    # Middle region: frame under the mouse, view unchanged. In a margin
+    # (x < margin or x > width - margin) while the view can still move:
+    # pan by the mouse travel into the margin toward that edge (a press
+    # pans the clicked frame to the margin), plus on a timer tick
+    # SCRUB_TICK_GAIN * depth; the playhead stays at the margin. At frame 0
+    # (left) or the end (right) the view stops and the playhead follows the
+    # mouse up to the edge.
+    ppf = float(ppf) if ppf and ppf > 0 else 1.0
+    total = max(1, int(total))
+    width = max(1, int(width))
+    view = int(view)
+    max_start = max(0, total - max(1, int(visible)))
+    m = max(0, min(int(margin), (width - 1) // 3))
+    left_m, right_m = m, width - m
+
+    def at(px, v):
+        return max(0, min(total - 1, v + int(round(px / ppf))))
+
+    if m > 0 and x < left_m and view > 0:
+        ref = left_m if last_x is None else min(last_x, left_m)
+        pan = max(0.0, ref - x)
+        if tick:
+            pan += SCRUB_TICK_GAIN * min(SCRUB_DEPTH_MAX, left_m - x)
+        f = (pan + rem) / ppf
+        df = int(f)
+        rem = (f - df) * ppf
+        view = max(0, view - df)
+        if view == 0:
+            return view, at(x, view), 0.0
+        return view, at(left_m, view), rem
+    if m > 0 and x > right_m and view < max_start:
+        ref = right_m if last_x is None else max(last_x, right_m)
+        pan = max(0.0, x - ref)
+        if tick:
+            pan += SCRUB_TICK_GAIN * min(SCRUB_DEPTH_MAX, x - right_m)
+        f = (pan + rem) / ppf
+        df = int(f)
+        rem = (f - df) * ppf
+        view = min(max_start, view + df)
+        if view == max_start:
+            return view, at(x, view), 0.0
+        return view, at(right_m, view), rem
+    return view, at(x, view), 0.0
 
 
 RULER_LABEL_INTERVALS = (1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200)
