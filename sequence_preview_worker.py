@@ -3,6 +3,8 @@
 # timeline. Works outward from the playhead (next, previous, ...), skips clean
 # frames, yields to the GUI through the Sequence Player generate lock, and
 # sleeps on a condition when there is nothing to do. ASCII only.
+# BUILD 141: no Sequence Player needed: with none open for the sequence the
+# frames are composited headless on the GPU (sequence_preview_gpu).
 
 import threading
 import time
@@ -55,6 +57,17 @@ class PreviewWorker(object):
             self._gen += 1
             self._cond.notify()
 
+    def wake(self, sequence_id=None):
+        # BUILD 141: dirty marks landed after the retarget (the snapshot diff
+        # runs after it): start the pass again so a pass that already found
+        # everything clean does not leave the new dirty frames waiting for
+        # the next scrub (no player open = nobody else wakes the worker)
+        with self._cond:
+            if self._target is not None and (sequence_id is None
+                                             or self.sequence_id == sequence_id):
+                self._gen += 1
+                self._cond.notify()
+
     def clear(self, sequence_id=None):
         # Timeline closed: stop working on it
         with self._cond:
@@ -76,11 +89,21 @@ class PreviewWorker(object):
             # print("Preview worker CUDA attach failed: %s" % e)
             pass
         while True:
+            idle_release = False
             with self._cond:
                 while self._target is None or self._done_gen == self._gen:
+                    if self._target is None and _headless_active():
+                        # BUILD 141: timeline closed: free the headless GPU
+                        # composite (outside the condition: it takes the
+                        # generate lock)
+                        idle_release = True
+                        break
                     self._cond.wait()
                 target = self._target
                 gen = self._gen
+            if idle_release:
+                _release_headless()
+                continue
             try:
                 self._pass(target, gen)
             except Exception as e:
@@ -155,6 +178,7 @@ class PreviewWorker(object):
         made = 0
         bursts = 0
         hold_max = 0.0
+        retried = False
         i = 0
         try:
             while i < len(order):
@@ -235,6 +259,12 @@ class PreviewWorker(object):
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
                     0.5 * sec_per_frame + 0.5 * per)
+                if ((not jpegs or any(j is None for j in jpegs))
+                        and not retried and gen == self._gen):
+                    # BUILD 141: once per pass, try the chunk again: a player
+                    # closed mid-chunk hands over to the headless composite
+                    retried = True
+                    continue
                 if not jpegs:
                     return
                 for f, jpeg in zip(chunk, jpegs):
@@ -308,6 +338,22 @@ def _setting_int(key, default, lo, hi):
     except Exception:
         return default
     return max(lo, min(hi, v))
+
+
+def _headless_active():
+    try:
+        from sequence_preview_gpu import headless_active
+        return headless_active()
+    except Exception:
+        return False
+
+
+def _release_headless():
+    try:
+        from sequence_preview_gpu import release_headless
+        release_headless()
+    except Exception as e:
+        print(f"Preview headless GPU release failed: {e}")
 
 
 _worker = None

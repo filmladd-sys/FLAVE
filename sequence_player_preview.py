@@ -214,7 +214,9 @@ def FrameGenerateBatch(project_path, sequence_id, frames, snapshot):
     # Worker only: JPEG bytes for consecutive sequence frames in one card
     # pass (one lock hold, multi-frame decode), list parallel to frames
     # (None entries on failure), or None if no player is open.
-    player = _player_for(project_path, sequence_id)
+    # BUILD 141: with no player open, the headless GPU composite
+    # (sequence_preview_gpu); None only when that cannot start either.
+    player = _generator_for(project_path, sequence_id)
     if player is None:
         return None
     return player.frames_jpeg_batch([int(f) for f in frames],
@@ -225,6 +227,7 @@ def FrameGenerate(project_path, sequence_id, frame_num, snapshot=None, worker=Fa
     # Sequence frame as JPEG bytes (quality 90), or None. Uses the open
     # Sequence Player's GPU context and composite; never opens a window,
     # so with no player open for this sequence it returns None.
+    # BUILD 141: worker=True with no player open: headless GPU composite.
     try:
         import sequence_timeline
         timeline = sequence_timeline._open_windows.get(int(sequence_id))
@@ -232,10 +235,41 @@ def FrameGenerate(project_path, sequence_id, frame_num, snapshot=None, worker=Fa
         return None
     player = getattr(timeline, "_player", None)
     if player is None or player.closed:
-        return None
+        # BUILD 141: the worker composites headless when no player is open
+        # (the GUI path still needs the player)
+        player = _generator_for(project_path, sequence_id) if worker else None
+        if player is None:
+            return None
+        return player.frame_jpeg(int(frame_num), preview_jpeg_quality(), snapshot, worker)
     if os.path.abspath(project_path) != os.path.abspath(timeline._project_db()):
         return None
+    if worker:
+        _release_headless()
     return player.frame_jpeg(int(frame_num), preview_jpeg_quality(), snapshot, worker)
+
+
+def _release_headless():
+    try:
+        from sequence_preview_gpu import release_headless
+        release_headless()
+    except Exception as e:
+        print(f"Preview headless GPU release failed: {e}")
+
+
+def _generator_for(project_path, sequence_id):
+    # BUILD 141, worker thread: the open player for this sequence (its
+    # decoders stay warm; the headless composer is freed so one set of
+    # decoders runs), else the headless GPU composer, else None
+    player = _player_for(project_path, sequence_id)
+    if player is not None:
+        _release_headless()
+        return player
+    try:
+        from sequence_preview_gpu import headless_for
+        return headless_for(project_path, sequence_id)
+    except Exception as e:
+        print(f"Preview headless GPU failed: {e}")
+        return None
 
 
 def preview_jpeg_quality():

@@ -3084,6 +3084,10 @@ class SequenceTimeline(QMainWindow):
                 self._preview_remark = []
                 from sequence_preview import FramesMarkDirty
                 FramesMarkDirty(self._project_db(), self.sequence_id, remark)
+            if force and (diff or pending or remark):
+                # BUILD 141: the marks came after the retarget: wake the
+                # worker so it sees them (no player needed to retrigger it)
+                get_worker().wake(self.sequence_id)
         except Exception as e:
             print(f"Preview worker retarget failed: {e}")
 
