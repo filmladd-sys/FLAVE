@@ -245,6 +245,12 @@ class PlayheadOverlay(QWidget):
             painter = QPainter(self)
             painter.fillRect(sx, 0, 1, self.height(), QColor(255, 80, 80))
             painter.end()
+        # BUILD 125: footage drop preview boxes
+        if getattr(tl, "_drop_preview", None):
+            from sequence_timeline_droppreview import paint_preview
+            painter = QPainter(self)
+            paint_preview(tl, painter)
+            painter.end()
         # Snap line (white) through every track while a drag snaps
         snap = getattr(tl, "_snap_frame", None)
         if snap is not None:

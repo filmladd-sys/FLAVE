@@ -1051,16 +1051,40 @@ class SequenceTimeline(QMainWindow):
                 self.wheel_pan(event)
                 return True
             if etype in (QEvent.DragEnter, QEvent.DragMove):
+                # BUILD 125: footage drop preview (sequence drops: none)
+                from sequence_timeline_droppreview import drag_enter, drag_move, drag_end
                 if sequence_id_from_mime(event.mimeData()) is not None:
+                    drag_end(self)
                     event.setDropAction(Qt.CopyAction)
                     event.accept()
-                elif self._footage_id_from_mime(event.mimeData()) is not None:
-                    event.acceptProposedAction()
                 else:
-                    event.ignore()
+                    fid = self._footage_id_from_mime(event.mimeData())
+                    if fid is not None:
+                        event.acceptProposedAction()
+                        try:
+                            pos = event.position().toPoint()
+                            if etype == QEvent.DragEnter or getattr(self, "_drop_info", None) is None:
+                                drag_enter(self, fid, pos)
+                            else:
+                                drag_move(self, pos)
+                        except Exception:
+                            drag_end(self)
+                    else:
+                        drag_end(self)
+                        event.ignore()
                 return True
+            if etype == QEvent.DragLeave:
+                # BUILD 125: leave / Esc cancel: no stale preview box
+                from sequence_timeline_droppreview import drag_end
+                drag_end(self)
+                return False
             if etype == QEvent.Drop:
-                self._handle_drop(event)
+                from sequence_timeline_droppreview import drag_end
+                drag_end(self)
+                try:
+                    self._handle_drop(event)
+                finally:
+                    drag_end(self)
                 return True
             if etype == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 # Double-click a key box: edit value only (no clip actions)
