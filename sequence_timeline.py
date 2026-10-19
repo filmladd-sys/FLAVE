@@ -912,20 +912,28 @@ class SequenceTimeline(QMainWindow):
         # BUILD 156: Copy / Cut / Paste on a clip's right-click menu. Paste
         # only when this sequence's clipboard has something (hidden, not
         # disabled). Returns (copy, cut, paste or None).
+        # BUILD 159: called first on a new menu: Copy, Cut, Paste at the top,
+        # then one separator before the rest of the menu
         from timeline_clipboard import has_clipboard
         copy_action = menu.addAction("Copy")
         cut_action = menu.addAction("Cut")
         paste_action = menu.addAction("Paste") if has_clipboard(self) else None
+        menu.addSeparator()
         return copy_action, cut_action, paste_action
 
     def _add_empty_paste_action(self, menu):
         # BUILD 157: Paste on the empty-space / empty track menus, after a
         # separator at the end; None (not added) when the clipboard is empty
+        # BUILD 159: called first on a new menu: Paste at the top, then a
+        # separator; nothing at all (no separator) when the clipboard is empty
         from timeline_clipboard import has_clipboard
         if not has_clipboard(self):
             return None
+        # menu.addSeparator()
+        # return menu.addAction("Paste")
+        paste_action = menu.addAction("Paste")
         menu.addSeparator()
-        return menu.addAction("Paste")
+        return paste_action
 
     def _run_clipboard_action(self, action, acts, clip):
         # BUILD 156: True when action was one of acts. Copy / Cut use the
@@ -980,9 +988,11 @@ class SequenceTimeline(QMainWindow):
         # Right-click below the last track (or in a sequence with no
         # tracks): only the Tracks menu items
         menu = QMenu(self)
-        acts = self._add_track_actions(menu)
         # BUILD 157: Paste (at the playhead) when the clipboard has items
+        # BUILD 159: first item
         paste_action = self._add_empty_paste_action(menu)
+        acts = self._add_track_actions(menu)
+        # paste_action = self._add_empty_paste_action(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if paste_action is not None and action == paste_action:
             self._clip_paste_tic()
@@ -1022,6 +1032,13 @@ class SequenceTimeline(QMainWindow):
         enabled = bool(name_item.data(Qt.UserRole + 1))
 
         menu = QMenu(self)
+        # BUILD 157: empty track space: Paste (at the playhead, same as
+        # Ctrl+V) when the clipboard has items, hidden when empty
+        # BUILD 159: Paste first (then a separator), same empty-clip-area
+        # rule as the Tracks items below
+        paste_action = None
+        if self._x_in_clips(pos) >= 0 and self._clip_edge_at(pos) is None:
+            paste_action = self._add_empty_paste_action(menu)
         # BUILD 124: Move > Up / Down / To Top / To Bottom (Up = toward the
         # top row, smaller sort_order). Never disabled, like the old Move
         # Up / Move Down items; at an end they do nothing.
@@ -1054,13 +1071,13 @@ class SequenceTimeline(QMainWindow):
         # edge; key boxes / markers / clips returned above) also lists the
         # Tracks menu items. The Name / Type header cells do not.
         add_track_acts = {}
-        paste_action = None
+        # paste_action = None
         if x_in_clips >= 0 and self._clip_edge_at(pos) is None:
             menu.addSeparator()
             add_track_acts = self._add_track_actions(menu)
             # BUILD 157: empty track space: Paste (at the playhead, same as
             # Ctrl+V) when the clipboard has items, hidden when empty
-            paste_action = self._add_empty_paste_action(menu)
+            # paste_action = self._add_empty_paste_action(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if paste_action is not None and action == paste_action:
             self._clip_paste_tic()
@@ -2208,6 +2225,7 @@ class SequenceTimeline(QMainWindow):
         from keyframe import is_keyframe_clip_id, add_key as _add_key
         if is_keyframe_clip_id(clip[0]):
             menu = QMenu(self)
+            clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
             key_menu = menu.addMenu("Key")
             key_click_action = key_menu.addAction("At Mouse Click")
             key_tick_action = key_menu.addAction("At Timeline Tick")
@@ -2215,8 +2233,8 @@ class SequenceTimeline(QMainWindow):
             # BUILD 133: Link / Unlink from the whole selection
             link_action, unlink_action = self._add_link_actions(menu, clip)
             menu.addSeparator()
-            clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
-            menu.addSeparator()
+            # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+            # menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
             if action is None:
@@ -2243,12 +2261,13 @@ class SequenceTimeline(QMainWindow):
             # Caption clip menu: Edit, Slice, Link or Unlink, Delete
             # (BUILD 133: one of the two, same rule as the other clip menus)
             menu = QMenu(self)
+            clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
             edit_action = menu.addAction("Edit")
             slice_action = menu.addAction("Slice")
             link_action, unlink_action = self._add_link_actions(menu, clip)
             menu.addSeparator()
-            clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
-            menu.addSeparator()
+            # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+            # menu.addSeparator()
             delete_action = menu.addAction("Delete")
             action = menu.exec(self.table.viewport().mapToGlobal(pos))
             if self._run_clipboard_action(action, clip_acts, clip):
@@ -2266,6 +2285,7 @@ class SequenceTimeline(QMainWindow):
             return
         enabled = bool(clip[5])
         menu = QMenu(self)
+        clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
         # Gain... on audio-track clips only (the only rows the preview audio
         # mixes); right-clicked clip only, like Enable / Solo
         gain_action = None
@@ -2292,8 +2312,8 @@ class SequenceTimeline(QMainWindow):
             from clip_proxy import add_clip_proxy_submenu
             proxy_actions = add_clip_proxy_submenu(self, menu, clip)
         menu.addSeparator()
-        clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
-        menu.addSeparator()
+        # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+        # menu.addSeparator()
         delete_action = menu.addAction("Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if self._run_clipboard_action(action, clip_acts, clip):
