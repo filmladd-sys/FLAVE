@@ -125,6 +125,7 @@ def check_audio_source(project_db, sequence_id):
             st["dirty"] = True
             st["stale"] = None
             st["bar"] = False
+            st["dirty_frames"] = None   # BUILD 140: re-import, ranges unknown
         return seen
     except Exception:
         return False
@@ -153,7 +154,9 @@ def audio_bar_ranges(project_db, sequence_id):
     try:
         st = _STATE.get(_state_key(project_db, sequence_id))
         frames = None if st is None else st.get("dirty_frames")
-        return list(frames) if frames else None
+        # BUILD 140: [] (nothing to remix, e.g. a pure move: a sample copy)
+        # is green, not all red
+        return None if frames is None else list(frames)
     except Exception:
         return None
 
@@ -179,16 +182,74 @@ def settle_audio_state(project_db, sequence_id, fps, total_frames):
         # bar; None = all (no usable layout: full remix)
         st["dirty_frames"] = None
         if not ok and inputs is not None:
-            try:
-                plan = plan_partial(
-                    _read_layout(project_db, sequence_id),
-                    _layout_of(inputs, fps, total_frames, sig))
-                if plan is not None:
-                    st["dirty_frames"] = plan["frames"]
-            except Exception:
-                st["dirty_frames"] = None
+            st["dirty_frames"] = _plan_frames(project_db, sequence_id, inputs,
+                                              fps, total_frames, sig)
+        elif ok and not running and inputs is not None:
+            # BUILD 140: a current WAV without a usable layout (made before
+            # BUILD 139, or by the synchronous rebuild) gets its layout now,
+            # so the next edit is range-based instead of a full remix
+            _ensure_layout(project_db, sequence_id, inputs, fps, total_frames, sig)
         return ok and not running
     except Exception:
+        return False
+
+
+def audio_edit_ranges(project_db, sequence_id, fps, total_frames):
+    # BUILD 140, GUI thread, at a completed edit (refresh): the bar's dirty
+    # frame ranges at once (one signature check + the layout plan, a few
+    # small queries), instead of all red until the settle check. Only
+    # dirty_frames changes: the dirty / stale / bar flags, the debounce and
+    # the auto mix stay as they were.
+    try:
+        st = _state(project_db, sequence_id)
+        inputs = _mix_inputs(project_db, sequence_id)
+        sig = _signature_of(inputs, fps, total_frames)
+        have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
+        if sig and have == sig and os.path.isfile(
+                preview_audio_wav_path(project_db, sequence_id)):
+            st["dirty_frames"] = []         # the audio did not change
+        else:
+            st["dirty_frames"] = _plan_frames(project_db, sequence_id, inputs,
+                                              fps, total_frames, sig)
+        return st["dirty_frames"]
+    except Exception:
+        return None
+
+
+def _plan_frames(project_db, sequence_id, inputs, fps, total_frames, sig):
+    # BUILD 140: frames the next mix must remix (red), from the layout plan;
+    # copied / zeroed samples of a pure move are not red. None = full mix.
+    try:
+        plan = plan_partial(_read_layout(project_db, sequence_id),
+                            _layout_of(inputs, fps, total_frames, sig))
+    except Exception:
+        return None
+    if plan is None:
+        return None
+    return list(plan["remix_frames"])
+
+
+def _ensure_layout(project_db, sequence_id, inputs, fps, total_frames, sig):
+    # BUILD 140: write the layout of a current WAV when missing / stale.
+    # Under the swap lock, re-checked there (no mix can swap meanwhile).
+    try:
+        if not _HAS_NP or _read_layout(project_db, sequence_id, check_wav=True):
+            return False
+        with _SWAP_LOCK:
+            if running_mix(project_db, sequence_id) is not None:
+                return False
+            if _read_sig(preview_audio_sig_path(project_db, sequence_id)) != sig:
+                return False
+            layout = _layout_of(inputs, fps, total_frames, sig)
+            with wave.open(preview_audio_wav_path(project_db, sequence_id), "rb") as w:
+                if (w.getnchannels() != 1 or w.getsampwidth() != 2
+                        or w.getframerate() != SAMPLE_RATE
+                        or w.getnframes() != int(layout["n"])):
+                    return False
+            _write_layout(project_db, sequence_id, layout)
+        return True
+    except Exception as e:
+        print("Preview audio layout write failed: %s" % e)
         return False
 
 
@@ -900,6 +961,7 @@ def collect_mix(job):
     else:
         st["bar"] = False
         if job.status == "failed":
+            st["dirty_frames"] = None   # BUILD 140: failed: all red
             print("Preview audio mix failed: %s" % job.error)
     return job.status
 
@@ -933,11 +995,15 @@ def cancel_mix(project_db, sequence_id):
 #             mix (_mix_pcm), so the result is byte-identical to a full mix
 #             and the .sig signature stays exact.
 # No usable layout (missing, other signature, WAV size differs), an fps
-# change, a track reorder, or more than PARTIAL_MAX_FRACTION of the sequence
-# to remix: full mix.
+# change or a track reorder: full mix. (BUILD 139 also fell back to a full
+# mix for more than half the sequence to remix; BUILD 140 does not.)
 
 LAYOUT_VERSION = 1
-PARTIAL_MAX_FRACTION = 0.5
+# PARTIAL_MAX_FRACTION = 0.5
+# BUILD 140: no full-mix fallback for a large remix: a partial remix of the
+# changed ranges is never slower than a full mix, and the rest of the WAV
+# (and of the bar) stays as it was
+PARTIAL_MAX_FRACTION = 1.0
 _LAYOUT_CACHE = {}          # path -> ((size, mtime_ns), layout)
 
 
@@ -1134,15 +1200,23 @@ def plan_partial(old, new):
         return None
     touched = _merge_ranges(remix + zero + [(d, d + ln) for _s, d, ln in copies],
                             n_new)
+    return {"n_old": n_old, "n_new": n_new, "copies": copies, "zero": zero,
+            "remix": remix, "remix_len": remix_len,
+            "copy_len": sum(ln for _s, _d, ln in copies),
+            "frames": _sample_frames(touched, fps),
+            # BUILD 140: the bar's red = remixed ranges only
+            "remix_frames": _sample_frames(remix, fps)}
+
+
+def _sample_frames(ranges, fps):
+    # [a, b) sample ranges -> inclusive frame ranges covering them
     per = fps / float(SAMPLE_RATE)
     frames = []
-    for a, b in touched:
+    for a, b in ranges:
         f0 = int(a * per)
         f1 = int(math.ceil(b * per)) - 1
         frames.append((f0, max(f0, f1)))
-    return {"n_old": n_old, "n_new": n_new, "copies": copies, "zero": zero,
-            "remix": remix, "remix_len": remix_len,
-            "copy_len": sum(ln for _s, _d, ln in copies), "frames": frames}
+    return frames
 
 
 def _multiset_minus(a, b):

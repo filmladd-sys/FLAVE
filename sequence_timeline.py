@@ -2433,9 +2433,15 @@ class SequenceTimeline(QMainWindow):
         # stale (the scrub burst rechecks the signature; Play always does).
         # Drags never get here before the drop.
         try:
-            from sequence_preview_audio import mark_preview_audio_dirty
+            from sequence_preview_audio import (mark_preview_audio_dirty,
+                                                audio_edit_ranges)
             if self.sequence_id is not None and self._project_db():
                 mark_preview_audio_dirty(self._project_db(), self.sequence_id)
+                # BUILD 140: the bar shows the edit's dirty ranges at once
+                # (only what the next mix remixes; a pure move copies
+                # samples and stays green), not all red until the settle
+                audio_edit_ranges(self._project_db(), self.sequence_id,
+                                  float(self.fps or 30), int(self.total_frames()))
                 # BUILD 137: audio bar red now; settle the true state with
                 # one signature check AUDIO_SETTLE_MS after the last refresh.
                 # BUILD 138: that check also starts the background mix.
