@@ -19,6 +19,73 @@ from peaks import PEAKS_SAMPLE_RATE, audiotmp_db_path, load_audiotmp
 
 SAMPLE_RATE = PEAKS_SAMPLE_RATE  # 48000
 
+# BUILD 135: per (project, sequence) mix state in this process.
+#   gen   -- bumped on every rebuild; players reload their in-memory PCM
+#            when it changes (the file stamp alone can repeat: a move keeps
+#            the size, and a network share may report a cached / coarse
+#            mtime right after os.replace)
+#   dirty -- an edit happened (or nothing checked yet this session); the
+#            scrub burst compares the signature once before it sounds
+#   stale -- signature compared and differs: scrub stays silent until the
+#            next Play rebuilds the WAV
+_STATE = {}
+
+
+def _state_key(project_db, sequence_id):
+    return (os.path.normcase(os.path.abspath(project_db)), int(sequence_id))
+
+
+def _state(project_db, sequence_id):
+    return _STATE.setdefault(_state_key(project_db, sequence_id),
+                             {"gen": 0, "dirty": True, "stale": None})
+
+
+def mark_preview_audio_dirty(project_db, sequence_id=None):
+    # Completed edit. sequence_id None = every sequence of the project
+    # (e.g. source audio re-imported into AudioTmp). Cheap, never raises.
+    try:
+        if not project_db:
+            return
+        if sequence_id is not None:
+            st = _state(project_db, sequence_id)
+            st["dirty"] = True
+            st["stale"] = None
+            return
+        db = os.path.normcase(os.path.abspath(project_db))
+        for key, st in _STATE.items():
+            if key[0] == db:
+                st["dirty"] = True
+                st["stale"] = None
+    except Exception:
+        pass
+
+
+def preview_audio_generation(project_db, sequence_id):
+    try:
+        return _state(project_db, sequence_id)["gen"]
+    except Exception:
+        return None
+
+
+def preview_audio_scrub_ok(project_db, sequence_id, fps, total_frames):
+    # Scrub burst gate: True when the WAV matches the timeline. While dirty
+    # the signature is compared once; a mismatch keeps scrub silent (no
+    # rebuild here, Play rebuilds) until the next edit / rebuild.
+    try:
+        st = _state(project_db, sequence_id)
+        if not st["dirty"]:
+            return True
+        if st["stale"] is None:
+            wav = preview_audio_wav_path(project_db, sequence_id)
+            have = _read_sig(preview_audio_sig_path(project_db, sequence_id))
+            want = audio_timeline_signature(project_db, sequence_id, fps, total_frames)
+            st["stale"] = not (os.path.isfile(wav) and want and have == want)
+            if not st["stale"]:
+                st["dirty"] = False
+        return not st["stale"]
+    except Exception:
+        return False
+
 
 def preview_audio_wav_path(project_db, sequence_id):
     folder = os.path.dirname(os.path.abspath(project_db))
@@ -231,8 +298,37 @@ def audio_timeline_signature(project_db, sequence_id, fps, total_frames):
                 r["basename"],
             )
         )
+    # BUILD 135: the source PCM each row reads (AudioTmp row id + byte
+    # length per basename: a re-import replaces the row) and the rate
+    parts.append("rate=%d" % SAMPLE_RATE)
+    for name, ident in _audiotmp_idents(
+            project_db, sorted(set(r["basename"] for r in rows if r["basename"]))):
+        parts.append("src=%s %s" % (name, ident))
     blob = "\n".join(parts).encode("ascii", "replace")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _audiotmp_idents(project_db, names):
+    # [(basename, "id:len")] from the sibling .audiotmp.db, one query; the
+    # blob length comes from the record header (no blob read)
+    if not names:
+        return []
+    path = audiotmp_db_path(project_db)
+    if not os.path.isfile(path):
+        return [(n, "none") for n in names]
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            rows = conn.execute(
+                "SELECT originalfilename, MAX(id), length(audioblob) FROM AudioTmp "
+                "WHERE originalfilename IN (%s) GROUP BY originalfilename"
+                % ",".join("?" * len(names)), list(names)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return [(n, "err") for n in names]
+    got = dict((r[0], "%s:%s" % (r[1], r[2])) for r in rows)
+    return [(n, got.get(n, "none")) for n in names]
 
 
 def _read_sig(path):
@@ -353,24 +449,49 @@ def build_preview_audio_wav(project_db, sequence_id, fps, total_frames):
         _write_wav(wav_path, pcm)
         _write_sig(sig_path, audio_timeline_signature(
             project_db, sequence_id, fps, total_frames))
+        st = _state(project_db, sequence_id)
+        st["gen"] += 1
+        st["dirty"] = False
+        st["stale"] = None
         return wav_path
-    except Exception:
+    except Exception as e:
         # print("build_preview_audio_wav failed")
+        # BUILD 135: no longer silent (a locked WAV on Windows / a share
+        # makes os.replace fail and Play would run without the new mix)
+        print("Preview audio rebuild failed: %s" % e)
         return None
 
 
 def ensure_preview_audio_wav(project_db, sequence_id, fps, total_frames):
     # Rebuild only when the WAV or signature is missing or the timeline changed.
+    return ensure_preview_audio_wav_status(
+        project_db, sequence_id, fps, total_frames)[0]
+
+
+def ensure_preview_audio_wav_status(project_db, sequence_id, fps, total_frames,
+                                    on_rebuild=None):
+    # BUILD 135: (wav path or None, rebuilt). on_rebuild() runs just before
+    # a rebuild (status / wait cursor). The signature is compared on every
+    # call (Play), whatever the dirty flag says.
     try:
         if not project_db or sequence_id is None:
-            return None
+            return None, False
         wav_path = preview_audio_wav_path(project_db, sequence_id)
         sig_path = preview_audio_sig_path(project_db, sequence_id)
         want = audio_timeline_signature(project_db, sequence_id, fps, total_frames)
         have = _read_sig(sig_path)
         if os.path.isfile(wav_path) and have == want and want:
-            return wav_path
-        return build_preview_audio_wav(project_db, sequence_id, fps, total_frames)
-    except Exception:
+            st = _state(project_db, sequence_id)
+            st["dirty"] = False
+            st["stale"] = None
+            return wav_path, False
+        if on_rebuild is not None:
+            try:
+                on_rebuild()
+            except Exception:
+                pass
+        return build_preview_audio_wav(project_db, sequence_id, fps, total_frames), True
+    except Exception as e:
         # print("ensure_preview_audio_wav failed")
-        return None
+        print("Preview audio check failed: %s" % e)
+        return None, False

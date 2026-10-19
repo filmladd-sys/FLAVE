@@ -2421,6 +2421,15 @@ class SequenceTimeline(QMainWindow):
         # keep the Sequence Manager counts current (no timer)
         self._refresh_sequence_manager()
         self._update_player()
+        # BUILD 135: completed edit / undo / reload: the audio mix may be
+        # stale (the scrub burst rechecks the signature; Play always does).
+        # Drags never get here before the drop.
+        try:
+            from sequence_preview_audio import mark_preview_audio_dirty
+            if self.sequence_id is not None and self._project_db():
+                mark_preview_audio_dirty(self._project_db(), self.sequence_id)
+        except Exception:
+            pass
         # Edit: new snapshot, wake the preview worker
         self._retarget_preview(force=True)
 

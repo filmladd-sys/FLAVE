@@ -1408,18 +1408,43 @@ class SequencePlayer(QWindow):
         except Exception:
             pass
         try:
-            from sequence_preview_audio import ensure_preview_audio_wav
+            from sequence_preview_audio import (ensure_preview_audio_wav_status,
+                                                preview_audio_generation)
             from sequence_player_audio import PreviewAudioPlayer
             project_db = self.timeline._project_db()
             fps = float(getattr(self.timeline, "fps", 30) or 30)
             total = int(self.timeline.total_frames())
-            wav = ensure_preview_audio_wav(
-                project_db, self.sequence_id, fps, total)
+            # BUILD 135: signature checked on every Play; a stale mix is
+            # rebuilt here, synchronously as before, with a status line and
+            # a wait cursor while it mixes
+            busy = []
+
+            def _on_rebuild():
+                from PySide6.QtWidgets import QApplication
+                from PySide6.QtCore import Qt
+                try:
+                    self.timeline.status_bar.showMessage("Rebuilding preview audio...")
+                except Exception:
+                    pass
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                busy.append(1)
+            try:
+                wav, _rebuilt = ensure_preview_audio_wav_status(
+                    project_db, self.sequence_id, fps, total, _on_rebuild)
+            finally:
+                if busy:
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.restoreOverrideCursor()
+                    try:
+                        self.timeline.status_bar.clearMessage()
+                    except Exception:
+                        pass
             if not wav:
                 return
             if self._preview_audio is None:
                 self._preview_audio = PreviewAudioPlayer()
-            if not self._preview_audio.prepare(wav, fps):
+            gen = preview_audio_generation(project_db, self.sequence_id)
+            if not self._preview_audio.prepare(wav, fps, gen):
                 return
             self._preview_audio.start(int(frame))
             try:

@@ -81,6 +81,7 @@ class PreviewAudioPlayer(object):
     def __init__(self):
         self.wav_path = None
         self._wav_stamp = None
+        self._wav_gen = None     # BUILD 135: mix generation of the PCM
         self.fps = 29.97
         self._pcm = b""
         self._qba = None
@@ -97,7 +98,9 @@ class PreviewAudioPlayer(object):
     def has_audio(self):
         return bool(self._pcm) and self.wav_path is not None
 
-    def prepare(self, wav_path, fps):
+    def prepare(self, wav_path, fps, gen=None):
+        # gen (BUILD 135): sequence_preview_audio generation; a different
+        # value reloads the PCM even when path / size / mtime look equal
         self.fps = float(fps) if fps and float(fps) > 0 else 29.97
         path = os.path.abspath(wav_path) if wav_path else None
         if not path or not os.path.isfile(path):
@@ -116,7 +119,8 @@ class PreviewAudioPlayer(object):
         except OSError:
             stamp = None
         if (path == self.wav_path and self._pcm and self._buffer is not None
-                and stamp is not None and stamp == self._wav_stamp):
+                and stamp is not None and stamp == self._wav_stamp
+                and (gen is None or gen == self._wav_gen)):
             return True
         loaded = _read_wav_pcm(path)
         if not loaded:
@@ -145,6 +149,7 @@ class PreviewAudioPlayer(object):
         self._format = fmt
         self.wav_path = path
         self._wav_stamp = stamp
+        self._wav_gen = gen
         self._start_offset_ms = 0
         return True
 
@@ -346,6 +351,7 @@ class ScrubBurst(object):
     def __init__(self):
         self.path = None
         self._stamp = None
+        self._gen = None                # BUILD 135: mix generation
         self._pcm = b""
         self._rate = SAMPLE_RATE
         self._ch = CHANNELS
@@ -365,7 +371,7 @@ class ScrubBurst(object):
         self.started = 0                # bursts actually started (tests)
         self.frames = []                # started frames, kept short (tests)
 
-    def load(self, wav_path, shared=None):
+    def load(self, wav_path, shared=None, gen=None):
         # Cached PCM, reloaded only when path / size / mtime change (BUILD
         # 79 rule). shared: a PreviewAudioPlayer whose PCM can be reused.
         path = os.path.abspath(wav_path) if wav_path else None
@@ -376,10 +382,12 @@ class ScrubBurst(object):
             stamp = (st.st_size, st.st_mtime_ns)
         except OSError:
             return False
-        if path == self.path and stamp == self._stamp and self._pcm:
+        if (path == self.path and stamp == self._stamp and self._pcm
+                and (gen is None or gen == self._gen)):
             return True
         if (shared is not None and getattr(shared, "wav_path", None) == path
                 and getattr(shared, "_wav_stamp", None) == stamp
+                and (gen is None or getattr(shared, "_wav_gen", None) == gen)
                 and getattr(shared, "_pcm", b"")):
             self._pcm = shared._pcm
             self._rate, self._ch, self._width = (
@@ -391,6 +399,7 @@ class ScrubBurst(object):
             self._pcm, self._rate, self._ch, self._width = loaded
         self.path = path
         self._stamp = stamp
+        self._gen = gen
         return True
 
     def slice_for(self, frame, fps):
@@ -584,17 +593,26 @@ def scrub_burst(timeline):
         if player is None or getattr(player, "closed", True):
             return False
         frame = int(timeline.current_frame)
-        from sequence_preview_audio import preview_audio_wav_path
-        wav = preview_audio_wav_path(timeline._project_db(), timeline.sequence_id)
+        from sequence_preview_audio import (preview_audio_wav_path,
+                                            preview_audio_scrub_ok,
+                                            preview_audio_generation)
+        project_db = timeline._project_db()
+        fps = float(getattr(timeline, "fps", 30) or 30)
+        wav = preview_audio_wav_path(project_db, timeline.sequence_id)
         if not wav or not os.path.isfile(wav):
             return False
+        # BUILD 135: silent while the mix is stale (Play rebuilds it)
+        if not preview_audio_scrub_ok(project_db, timeline.sequence_id, fps,
+                                      int(timeline.total_frames())):
+            stop_scrub_burst(player)
+            return False
+        gen = preview_audio_generation(project_db, timeline.sequence_id)
         burst = getattr(player, "_scrub_burst", None)
         if burst is None:
             burst = ScrubBurst()
             player._scrub_burst = burst
-        if not burst.load(wav, getattr(player, "_preview_audio", None)):
+        if not burst.load(wav, getattr(player, "_preview_audio", None), gen):
             return False
-        fps = float(getattr(timeline, "fps", 30) or 30)
         return burst.play(frame, fps)
     except Exception as e:
         # print("scrub burst failed: %s" % e)
