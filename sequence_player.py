@@ -1123,9 +1123,17 @@ class SequencePlayer(QWindow):
         jpeg = item[1] if item is not None else None
         if jpeg is None:
             try:
-                from sequence_preview import FrameRetrieve
+                from sequence_preview import FrameRetrieve, clean_set
+                # BUILD 153: a frame an edit just marked dirty is a miss
+                # (the database mark is queued for the worker thread, so
+                # its old row still reads clean until then)
+                if frame not in clean_set(self.timeline._project_db(),
+                                          self.sequence_id):
+                    raise LookupError
                 jpeg = FrameRetrieve(self.timeline._project_db(),
                                      self.sequence_id, frame)
+            except LookupError:
+                jpeg = None
             except Exception as e:
                 print(f"Sequence Player preview read failed: {e}")
                 jpeg = None
@@ -1147,6 +1155,33 @@ class SequencePlayer(QWindow):
                 print(f"Sequence Player preview ask failed: {e}")
         self._present(dark, self.shown_frame is not None)
         self._arm_retry()
+
+    def redraw_edited(self, frame, snapshot):
+        # BUILD 153: an edit dirtied the shown frame: compose it now from
+        # the edit's snapshot (one frame, same composite as the worker) and
+        # draw it; the worker rebuilds its JPEG. Not while playing (the
+        # reader owns the picture) or hidden. A failure waits for the worker.
+        if self.closed or not self.isExposed() or not self.ready:
+            return False
+        if self._reader.running():
+            return False
+        dark = _dark_mode()
+        try:
+            with _GuiGen():
+                self._tm = _new_tm()
+                self._build_dst(frame, dark, snapshot=snapshot)
+                self._expand(self.dst)
+                self._copy_to_texture()
+        except Exception as e:
+            print(f"Sequence Player edit redraw failed: {e}")
+            self._set_wait(frame)
+            self._present(dark, self.shown_frame is not None)
+            self._arm_retry()
+            return False
+        self._clear_wait()
+        self.shown_frame = frame
+        self._present(dark, True)
+        return True
 
     def _check_behind(self, frame):
         # Once a second: how far the picture is behind the clock

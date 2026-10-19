@@ -2450,7 +2450,10 @@ class SequenceTimeline(QMainWindow):
         # Every clip / track change and undo-redo reload comes through here:
         # keep the Sequence Manager counts current (no timer)
         self._refresh_sequence_manager()
-        self._update_player()
+        # BUILD 153: no player request here: it ran before the diff marked
+        # anything, so it re-read the old clean JPEG. The retarget below
+        # redraws the shown frame when a dirty span covers it.
+        # self._update_player()
         # BUILD 135: completed edit / undo / reload: the audio mix may be
         # stale (the scrub burst rechecks the signature; Play always does).
         # Drags never get here before the drop.
@@ -3094,6 +3097,7 @@ class SequenceTimeline(QMainWindow):
             pass
         if not force and frame == getattr(self, "_preview_center", None):
             return
+        cap_redraw = False      # BUILD 153: caption change seen
         try:
             from sequence_preview_worker import get_worker
             from sequence_player import timeline_snapshot
@@ -3119,7 +3123,9 @@ class SequenceTimeline(QMainWindow):
                     self._caption_snapshot = None
                 if (self._caption_snapshot or []) != (old_caps or []):
                     # Redraw the shown frame so a caption edit appears now
-                    self._update_player()
+                    # BUILD 153: after the dirty marks (below), once
+                    # self._update_player()
+                    cap_redraw = True
             get_worker().retarget(self._project_db(), self.sequence_id, frame,
                                   self.total_frames(), snap,
                                   getattr(self, "fps", None))
@@ -3208,8 +3214,32 @@ class SequenceTimeline(QMainWindow):
                 # BUILD 141: the marks came after the retarget: wake the
                 # worker so it sees them (no player needed to retrigger it)
                 get_worker().wake(self.sequence_id)
+            # BUILD 153: one hook after the diff: a dirty span (marker diff,
+            # remarks, relocated targets) covering the tick redraws the
+            # player now with the new composite. The worker was centered on
+            # the tick above, so its JPEG is rebuilt first.
+            if force:
+                spans = list(diff) + list(remark or [])
+                spans += [(a + d, b + d) for a, b, d in relocs]
+                if any(int(a) <= frame <= int(b) for a, b in spans):
+                    cap_redraw = False
+                    self._redraw_tick(frame, snap)
         except Exception as e:
             print(f"Preview worker retarget failed: {e}")
+        if cap_redraw:
+            self._update_player()
+
+    def _redraw_tick(self, frame, snap):
+        # BUILD 153: the shown frame changed: compose it in the open player
+        # now (one frame, the GPU composite path). No player: nothing to
+        # draw; the worker already starts at the tick.
+        player = getattr(self, "_player", None)
+        if player is None or getattr(player, "closed", False):
+            return
+        try:
+            player.redraw_edited(frame, snap)
+        except Exception as e:
+            print(f"Player tick redraw failed: {e}")
 
     def _preview_tick(self):
         # Ruler repaint only when the worker saved rows for this timeline
