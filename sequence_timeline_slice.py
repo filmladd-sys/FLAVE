@@ -4,6 +4,9 @@
 # under the mouse and its link-group partners; left-click cuts through the
 # existing slice path (slice_clip, the right-click Slice item). Functions
 # take the SequenceTimeline as tl. ASCII only.
+# BUILD 132: keyframe clips slice too (slice_clip -> keyframe.
+# slice_keyframe_clip_db). Every tl attribute is read with getattr so a
+# call before SequenceTimeline.__init__ finishes cannot raise.
 
 from PySide6.QtCore import Qt, QRect, QEvent
 from PySide6.QtGui import QColor
@@ -14,11 +17,10 @@ SLICE_CURSOR = Qt.CrossCursor
 
 def slice_split_frame(clip, x_in_clips, view_start, ppf):
     # The frame slice_clip cuts at for this clips-column x, or None when
-    # slice_clip would do nothing (same math and guards: keyframe clips,
-    # length < 2, mark outside the clip; inside, never the first frame and
-    # the right part keeps at least one frame)
-    from keyframe import is_keyframe_clip_id
-    if clip is None or is_keyframe_clip_id(clip[0]):
+    # slice_clip would do nothing (same math and guards: length < 2, mark
+    # outside the clip; inside, never the first frame and the right part
+    # keeps at least one frame). BUILD 132: keyframe clips included.
+    if clip is None or len(clip) < 4:
         return None
     start, length = clip[2], clip[3]
     if length < 2 or not ppf:
@@ -32,7 +34,8 @@ def slice_split_frame(clip, x_in_clips, view_start, ppf):
 def slice_members(tl, clip, split):
     # Clips slice_clip would cut at split: the clip and its link partners
     # (only the clip under selection solo), each strictly containing split
-    if tl._selection_solo and clip[0] in tl._selected_clip_ids:
+    if (getattr(tl, "_selection_solo", False)
+            and clip[0] in (getattr(tl, "_selected_clip_ids", None) or ())):
         members = [clip]
     else:
         members = [clip] + tl._linked_clips(clip)
@@ -42,20 +45,22 @@ def slice_members(tl, clip, split):
 
 def slice_clip_at(tl, pos):
     # Clip under pos for slicing: the whole clip rect (edges too; trims are
-    # off in slice mode), track types with clips, not keyframe clips
-    from keyframe import is_keyframe_clip_id
+    # off in slice mode), track types with clips incl. keyframe clips
+    if getattr(tl, "table", None) is None or getattr(tl, "ruler", None) is None:
+        return None
     name_item = tl._clip_image_track_row(pos)
     if name_item is None:
         return None
     x = tl._x_in_clips(pos)
     if x < 0:
         return None
-    ppf = tl.pixels_per_frame
-    for clip in reversed(tl.clips_by_track.get(name_item.data(Qt.UserRole), [])):
+    ppf = getattr(tl, "pixels_per_frame", 0)
+    by_track = getattr(tl, "clips_by_track", None) or {}
+    for clip in reversed(by_track.get(name_item.data(Qt.UserRole), [])):
         left = (clip[2] - tl.view_start_frame) * ppf
         right = left + clip[3] * ppf
         if left <= x < right:
-            return None if is_keyframe_clip_id(clip[0]) else clip
+            return clip
     return None
 
 
@@ -104,7 +109,7 @@ def slice_hover(tl, pos):
     # Recompute the line for the mouse at pos (viewport coordinates)
     if not getattr(tl, "_slice_mode", False):
         return
-    if tl.sequence_id is None:
+    if getattr(tl, "sequence_id", None) is None:
         exit_slice_mode(tl)
         return
     clip = slice_clip_at(tl, pos)
@@ -120,6 +125,8 @@ def slice_hover(tl, pos):
 def slice_click(tl, pos):
     # Left-click: the existing slice path at this x, stay in slice mode and
     # show the line on whatever piece is under the mouse now. True if cut.
+    if getattr(tl, "sequence_id", None) is None:
+        return False
     clip = slice_clip_at(tl, pos)
     if clip is None:
         return False
@@ -151,7 +158,9 @@ def text_input_focused(tl):
 
 def enter_slice_mode(tl):
     # C: only with the timeline focused (window shortcut) and no text input
-    if getattr(tl, "_slice_mode", False) or tl.sequence_id is None:
+    if getattr(tl, "_slice_mode", False) or getattr(tl, "sequence_id", None) is None:
+        return False
+    if getattr(tl, "table", None) is None:
         return False
     # Not in the middle of a clip / key / marker drag (its release would
     # be swallowed by slice mode)
@@ -193,6 +202,15 @@ def slice_event(tl, obj, event):
     # (the normal handling runs), None = not a slice-mode event
     if not getattr(tl, "_slice_mode", False):
         return None
+    try:
+        return _slice_event(tl, obj, event)
+    except AttributeError as e:
+        # BUILD 132: never let a half-built timeline crash the filter
+        print(f"Slice mode event skipped: {e}")
+        return None
+
+
+def _slice_event(tl, obj, event):
     etype = event.type()
     if etype == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
         # Exit, then the same event opens the normal right-click menu

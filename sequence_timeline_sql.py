@@ -756,9 +756,10 @@ def slice_clip(self, clip, x_in_clips):
     # Split clip in two at the mark x (clips-column x where the menu
     # opened). Linked partners are sliced at the same timeline frame; the
     # left pieces keep the old link_id, the right pieces share a new one.
-    if is_keyframe_clip_id(clip[0]):
-        self.status_bar.showMessage("Slice not available for keyframe clips", 3000)
-        return
+    # BUILD 132: keyframe clips (the clip itself or a linked partner) are
+    # split by keyframe.slice_keyframe_clip_db (keys by frame, a boundary
+    # key each side) instead of the footage path; captions' right pieces
+    # join the new right link too. Still one push_undo for the whole cut.
     start, length = clip[2], clip[3]
     if length < 2:
         return
@@ -781,6 +782,7 @@ def slice_clip(self, clip, x_in_clips):
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
         right_ids = []
+        right_other = []   # BUILD 132: right caption / keyframe mem ids
         has_gain = None
         has_seq_ref = None
         has_proxy = False
@@ -794,6 +796,12 @@ def slice_clip(self, clip, x_in_clips):
             left_length = split_frame - c_start
             right_length = c_len - left_length
             right_in = c_in + (split_frame - c_start)
+            if is_keyframe_clip_id(c[0]):
+                from keyframe import slice_keyframe_clip_db
+                new_mem = slice_keyframe_clip_db(cur, c[0], split_frame)
+                if new_mem is not None:
+                    right_other.append(new_mem)
+                continue
             if is_caption_id(c[0]):
                 # Caption: two rows, same text, font, position and scale
                 cap_id = -c[0]
@@ -806,6 +814,7 @@ def slice_clip(self, clip, x_in_clips):
                     "pos_x, pos_y, scale FROM captions WHERE id = ?",
                     (split_frame, right_length, cap_id)
                 )
+                right_other.append(-cur.lastrowid)
                 continue
             cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
                         (left_length, c[0]))
@@ -841,11 +850,28 @@ def slice_clip(self, clip, x_in_clips):
                 cur.execute(
                     "UPDATE clips SET sequence_id_ref = (SELECT sequence_id_ref "
                     "FROM clips WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
-        if linked and right_ids:
-            # New link_id for the right pieces: the first right clip's id
-            new_link = right_ids[0]
+        if linked and (right_ids or right_other):
+            # New link_id for the right pieces: the first right clip's id,
+            # else (no footage piece) the first right caption / keyframe
+            # piece's mem id, the same values link_selected_clips uses
+            new_link = right_ids[0] if right_ids else right_other[0]
             cur.executemany("UPDATE clips SET link_id = ? WHERE id = ?",
                             [(new_link, rid) for rid in right_ids])
+            from keyframe import persist_keyframe_link_id
+            from sequence_timeline_captions import persist_caption_link_id
+            for mid in right_other:
+                if is_keyframe_clip_id(mid):
+                    persist_keyframe_link_id(cur, mid, new_link)
+                else:
+                    persist_caption_link_id(cur, mid, new_link)
+        elif right_other:
+            # Unlinked cut: the new keyframe piece copied the old link_id
+            # (NULL for an unlinked clip, or a solo-sliced member's group);
+            # it stays out of any group like the footage right piece
+            from keyframe import persist_keyframe_link_id
+            for mid in right_other:
+                if is_keyframe_clip_id(mid):
+                    persist_keyframe_link_id(cur, mid, None)
         conn.commit()
         conn.close()
     except Exception as e:

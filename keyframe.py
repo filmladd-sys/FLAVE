@@ -514,6 +514,59 @@ def persist_keyframe_clip_time(cur, clip):
             ]
 
 
+def slice_keyframe_clip_db(cur, clip_mem_id, split):
+    # BUILD 132: split one keyframe clip at absolute sequence frame split
+    # (in_frame < split < out_frame). The clip keeps [in, split) and the
+    # keys before split; a new keyframe_clips row (same sequence, track,
+    # type, name and link_id) gets [split, out) and the keys at/after
+    # split. Keys store absolute frames, so nothing is re-based. A boundary
+    # key is added on each side holding the curve value there (left at
+    # split - 1, right at split) unless a key already sits on that frame,
+    # so evaluate_keyframes gives the same value on every frame as before.
+    # No commit / undo here (the caller owns the transaction and undo step).
+    # Returns the new piece's mem id, or None when not sliceable.
+    db_id = db_id_from_mem(clip_mem_id)
+    cur.execute(
+        "SELECT sequence_id, track_id, type, link_id, in_frame, out_frame, name "
+        "FROM keyframe_clips WHERE id = ?", (db_id,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    seq_id, track_id, ktype, link_id, in_f, out_f, name = row
+    split = int(split)
+    if not (int(in_f) < split < int(out_f)):
+        return None
+    cur.execute(
+        "SELECT id, frame, value FROM keyframes WHERE keyframe_clip_id = ? "
+        "ORDER BY frame, id", (db_id,))
+    keys = [(int(k), int(f), float(v)) for k, f, v in cur.fetchall()]
+    cur.execute(
+        "INSERT INTO keyframe_clips "
+        "(sequence_id, track_id, type, link_id, in_frame, out_frame, name) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (seq_id, track_id, ktype, link_id, split, int(out_f), name))
+    new_db = cur.lastrowid
+    cur.execute("UPDATE keyframe_clips SET out_frame = ? WHERE id = ?",
+                (split, db_id))
+    if keys:
+        left_val = evaluate_keyframes(keys, split - 1)
+        right_val = evaluate_keyframes(keys, split)
+        frames = set(k[1] for k in keys)
+        cur.execute(
+            "UPDATE keyframes SET keyframe_clip_id = ? "
+            "WHERE keyframe_clip_id = ? AND frame >= ?",
+            (new_db, db_id, split))
+        if (split - 1) not in frames:
+            cur.execute(
+                "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
+                "VALUES (?, ?, ?)", (db_id, split - 1, left_val))
+        if split not in frames:
+            cur.execute(
+                "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
+                "VALUES (?, ?, ?)", (new_db, split, right_val))
+    return mem_id_from_db(new_db)
+
+
 def persist_keyframe_clip_track(cur, clip, track_id):
     db_id = db_id_from_mem(clip[0])
     cur.execute(

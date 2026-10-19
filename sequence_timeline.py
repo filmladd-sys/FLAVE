@@ -546,6 +546,37 @@ class SequenceTimeline(QMainWindow):
 
     def __init__(self, parent=None, sequence_id=None):
         super().__init__(parent)
+        # BUILD 132: state read by eventFilter / the delegate / the overlay /
+        # the slice, marker, key and drop-preview modules, set before any
+        # widget exists. The viewport filter is installed mid-__init__ and
+        # Qt sends it events (setAcceptDrops, setMouseTracking, Resize ...)
+        # before the rest of __init__ runs. Later assignments below re-set
+        # the same defaults.
+        self.sequence_id = sequence_id
+        self._slice_mode = False      # BUILD 131 slice mode on
+        self._slice_lines = []        # BUILD 131 yellow line rects (viewport)
+        self._edge_drag = None
+        self._key_drag = None
+        self._marker_drag = None
+        self._hover_marker_id = None
+        self._snap_frame = None
+        self._drop_info = None        # BUILD 125 drop preview
+        self._drop_preview = []
+        self.clips_by_track = {}
+        self._selected_clip_ids = set()
+        self._selection_order = []
+        self._selection_solo = False
+        self._icon_cache = {}
+        self._peaks_cache = {}
+        self._out_paint_miss = {}
+        self._seq_refs = {}
+        self._markers = {}
+        self._filling = False
+        self._playing = False
+        self._play_filling = False
+        self._preview_center = None
+        self._preview_seen = -1
+        self._preview_status = None   # BUILD 129 label, created below
         name = _load_sequence_name(sequence_id)
         if name:
             self.setWindowTitle(f"Sequence Timeline: {name}: #{sequence_id}")
@@ -1244,7 +1275,7 @@ class SequenceTimeline(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
             etype = event.type()
-            if self._slice_mode:
+            if getattr(self, "_slice_mode", False):
                 # BUILD 131: slice mode takes the mouse first
                 from sequence_timeline_slice import slice_event
                 handled = slice_event(self, obj, event)
@@ -1388,11 +1419,11 @@ class SequenceTimeline(QMainWindow):
                     from markers import marker_drag_move
                     marker_drag_move(self, pos)
                     return True
-                if self._key_drag is not None:
+                if getattr(self, "_key_drag", None) is not None:
                     from keyframe import key_drag_move
                     key_drag_move(self, pos)
                     return True
-                if self._edge_drag is not None:
+                if getattr(self, "_edge_drag", None) is not None:
                     self._edge_drag_move(pos)
                     return True
                 if self._clip_edge_at(pos) is not None:
@@ -1408,11 +1439,11 @@ class SequenceTimeline(QMainWindow):
                     from markers import marker_drag_release
                     marker_drag_release(self)
                     return True
-                if self._key_drag is not None:
+                if getattr(self, "_key_drag", None) is not None:
                     from keyframe import key_drag_release
                     key_drag_release(self)
                     return True
-                if self._edge_drag is not None:
+                if getattr(self, "_edge_drag", None) is not None:
                     if self._edge_drag["edge"] == "move":
                         self._move_drag_release()
                     else:
@@ -2847,6 +2878,8 @@ class SequenceTimeline(QMainWindow):
                 text = status_text(_worker, self._project_db(), self.sequence_id)
         except Exception:
             text = ""
+        if getattr(self, "_preview_status", None) is None:
+            return
         if self._preview_status.text() != text:
             self._preview_status.setText(text)
 
