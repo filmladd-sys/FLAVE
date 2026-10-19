@@ -478,6 +478,52 @@ def _move_track(self, track_id, direction):
     self._after_track_change()
 
 
+def reorder_track_ids(ids, track_id, where):
+    # BUILD 124: ids in sort_order (index 0 = top row, smallest sort_order;
+    # 'Up' = toward index 0). where 'top' / 'bottom': track_id moved to that
+    # end, the others keep their relative order. Returns the new list, or
+    # None if track_id is missing or already there.
+    if track_id not in ids:
+        return None
+    rest = [t for t in ids if t != track_id]
+    new = [track_id] + rest if where == "top" else rest + [track_id]
+    return None if new == list(ids) else new
+
+
+def _move_track_to(self, track_id, where):
+    # BUILD 124: Move > To Top / To Bottom. Same undo label, renumbering
+    # (0..n-1) and refresh as _move_track (Up / Down); a no-op (already at
+    # that end) writes nothing and pushes no undo step.
+    project_db = self._project_db()
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            ids = [row[0] for row in conn.execute(
+                "SELECT id FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id",
+                (self.sequence_id,)).fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Move Track", f"Could not move track: {e}")
+        return
+    new = reorder_track_ids(ids, track_id, where)
+    if new is None:
+        return
+    from undo import push_undo
+    push_undo(project_db, "Reorder track")
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        for order, tid in enumerate(new):
+            cur.execute("UPDATE tracks SET sort_order = ? WHERE id = ?", (order, tid))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Move Track", f"Could not move track: {e}")
+        return
+    self._after_track_change()
+
+
 def _toggle_track_flag(self, track_id, column):
     if column not in ("enabled", "solo"):
         return

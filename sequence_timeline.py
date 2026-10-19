@@ -34,7 +34,7 @@ from sequence_timeline_sql import (
     _write_open_player_ids, get_open_player_ids,
     sequence_exists, _load_sequence_name, ensure_tracks_table, ensure_clips_table,
     _load_sequence_duration, _latest_clip_end, sequence_length_seconds, _load_sequence_fps,
-    _add_track, refresh, _save_track_display, _move_track,
+    _add_track, refresh, _save_track_display, _move_track, _move_track_to,
     _toggle_track_flag, drop_footage, _range_overlaps, delete_selected_clip,
     drop_sequence, sequence_id_from_mime, delete_track,
     slice_clip, ripple_delete, _toggle_clip_flag,
@@ -426,6 +426,7 @@ class SequenceTimeline(QMainWindow):
     _add_track = _add_track
     _save_track_display = _save_track_display
     _move_track = _move_track
+    _move_track_to = _move_track_to   # BUILD 124: Move > To Top / To Bottom
     _toggle_track_flag = _toggle_track_flag
     drop_footage = drop_footage
     drop_sequence = drop_sequence
@@ -723,8 +724,14 @@ class SequenceTimeline(QMainWindow):
         enabled = bool(name_item.data(Qt.UserRole + 1))
 
         menu = QMenu(self)
-        up_action = menu.addAction("Move Up")
-        down_action = menu.addAction("Move Down")
+        # BUILD 124: Move > Up / Down / To Top / To Bottom (Up = toward the
+        # top row, smaller sort_order). Never disabled, like the old Move
+        # Up / Move Down items; at an end they do nothing.
+        move_menu = menu.addMenu("Move")
+        up_action = move_menu.addAction("Up")
+        down_action = move_menu.addAction("Down")
+        top_action = move_menu.addAction("To Top")
+        bottom_action = move_menu.addAction("To Bottom")
         enable_action = menu.addAction("Disable" if enabled else "Enable")
         solo_action = menu.addAction("Solo")
         solo_action.setCheckable(True)
@@ -772,6 +779,10 @@ class SequenceTimeline(QMainWindow):
             self._move_track(track_id, -1)
         elif action == down_action:
             self._move_track(track_id, 1)
+        elif action == top_action:
+            self._move_track_to(track_id, "top")
+        elif action == bottom_action:
+            self._move_track_to(track_id, "bottom")
         elif action == enable_action:
             self._toggle_track_flag(track_id, "enabled")
         elif action == solo_action:
