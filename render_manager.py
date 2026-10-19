@@ -7,6 +7,8 @@
 # Video: the preview composite (timeline_snapshot(tl, use_proxies=False),
 # same CUDA blend_layer, scale / position / opacity keyframes) run on the
 # open Sequence Player's CUDA context from a render thread, raw RGB frames
+# (BUILD 142: on the render's own headless composer, sequence_preview_gpu,
+# through the preview's batch loop composite_batch; no player window)
 # copied to the host and piped to ffmpeg (rawvideo rgb24); ffmpeg converts
 # to yuv420p. Captions are not burned in.
 # Audio: the preview mix code (audio tracks, gain_db, volume keyframes)
@@ -31,7 +33,7 @@ from fractions import Fraction
 SAMPLE_RATE = 48000
 AAC_STEREO = "192k"
 AAC_MONO = "128k"
-PLAYER_WAIT_S = 15.0        # wait for the Sequence Player GPU setup
+PLAYER_WAIT_S = 15.0        # wait for the Sequence Player GPU setup (unused since BUILD 142)
 DEFAULT_GOP = 15
 DEFAULT_TARGET_MBPS = 5.0
 DEFAULT_BURST_MBPS = 10.0
@@ -362,17 +364,15 @@ def mix_mono_pcm(project_db, sequence_id, fps, total_frames):
 # ---------------------------------------------------------------- GPU frames
 
 class _RenderGpu(object):
-    # Render-owned decoders and device buffers, swapped into the player
-    # only while the render holds _GEN_LOCK, so the preview / play
-    # decoders (proxy paths) and the render decoders (originals) never
-    # prune each other.
+    # BUILD 142: the render's own headless GPU composer
+    # (sequence_preview_gpu.new_composer: shared CUDA context, own decoders,
+    # images and device buffers; no Sequence Player, no OpenGL). Frames go
+    # through the same batch loop as the preview fill
+    # (sequence_player_preview.composite_batch) with the host RGB sink.
+    # Was (BUILD 116-141): render decoders swapped into the open player.
 
-    def __init__(self, player):
-        self.player = player
-        self.decoders = {}
-        self.dec_next = {}
-        self.dec_used = {}
-        self.dec_last = {}      # BUILD 120: repeat-frame reuse (frame-mapped proxies)
+    def __init__(self, composer):
+        self.comp = composer
         self.bufs = []
 
     def _acquire(self):
@@ -384,71 +384,43 @@ class _RenderGpu(object):
         _GEN_LOCK.acquire()
         return _GEN_LOCK
 
-    def _swap(self):
-        p = self.player
-        saved = (p.decoders, p.dec_next, p.dec_used, getattr(p, "dec_last", {}))
-        p.decoders, p.dec_next, p.dec_used = self.decoders, self.dec_next, self.dec_used
-        p.dec_last = self.dec_last
-        return saved
-
-    def _unswap(self, saved):
-        p = self.player
-        self.decoders, self.dec_next, self.dec_used = p.decoders, p.dec_next, p.dec_used
-        self.dec_last = p.dec_last
-        p.decoders, p.dec_next, p.dec_used, p.dec_last = saved
-        p._target = None
-
     def frames_rgb(self, frames, snapshot):
         # Host RGB24 bytes per frame (black background), one card pass
         import ctypes
-        from sequence_player_gpu import _libs, _check, _new_tm
+        from sequence_player_gpu import _libs, _check
+        from sequence_player_preview import composite_batch, host_rgb
         lock = self._acquire()
         try:
-            p = self.player
+            p = self.comp
             if p.closed or not p.ready:
-                raise RuntimeError("The Sequence Player was closed during the render.")
-            cudart, nvcuda = _libs()[0], _libs()[1]
-            saved = self._swap()
+                raise RuntimeError("The render GPU compositor was released.")
+            cudart = _libs()[0]
+            _check(_libs()[1].cuCtxSetCurrent(p.cuda_ctx), "ctx")
+            size = p.row * p.seq_h
+            while len(self.bufs) < len(frames):
+                ptr = ctypes.c_void_p()
+                _check(cudart.cudaMalloc(ctypes.byref(ptr), size), "render buffer malloc")
+                self.bufs.append(ptr)
             try:
-                _check(nvcuda.cuCtxSetCurrent(p.cuda_ctx), "ctx")
-                size = p.row * p.seq_h
-                while len(self.bufs) < len(frames):
-                    ptr = ctypes.c_void_p()
-                    _check(cudart.cudaMalloc(ctypes.byref(ptr), size), "render buffer malloc")
-                    self.bufs.append(ptr)
-                p._tm = _new_tm()
-                pre = p._prefetch(frames, snapshot)
-                for k, fr in enumerate(frames):
-                    p._build_dst(fr, True, self.bufs[k], snapshot, False, pre, sync=False)
-                _check(cudart.cudaStreamSynchronize(p.stream), "render sync")
-                out = []
-                for k in range(len(frames)):
-                    host = ctypes.create_string_buffer(size)
-                    _check(cudart.cudaMemcpy(host, self.bufs[k], size, 2), "render to host")
-                    out.append(host.raw)
-                del pre
-                return out
+                return composite_batch(p, frames, snapshot, True,
+                                       self.bufs[:len(frames)], host_rgb,
+                                       sync_name="render sync")
             finally:
-                self._unswap(saved)
+                p._target = None
         finally:
             lock.release()
 
     def close(self):
-        # Render decoders and buffers freed (player still holds the context)
+        # Render buffers and the render's composer (decoders) freed; the
+        # shared context stays
         lock = self._acquire()
         try:
             from sequence_player_gpu import _libs
-            p = self.player
             try:
-                if p.ready:
-                    _libs()[1].cuCtxSetCurrent(p.cuda_ctx)
+                if self.comp.cuda_ctx.value:
+                    _libs()[1].cuCtxSetCurrent(self.comp.cuda_ctx)
             except Exception:
                 pass
-            for key in list(self.decoders.keys()):
-                self.decoders.pop(key, None)
-            self.dec_next.clear()
-            self.dec_used.clear()
-            self.dec_last.clear()
             try:
                 cudart = _libs()[0]
                 for b in self.bufs:
@@ -457,6 +429,8 @@ class _RenderGpu(object):
             except Exception:
                 pass
             self.bufs = []
+            from sequence_preview_gpu import free_composer
+            free_composer(self.comp)
         finally:
             lock.release()
 
@@ -743,36 +717,21 @@ def _make_window_class():
         def _render(self):
             if self.job is not None:
                 return
-            from sequence_player import open_player_for
-            tl = self.timeline
-            self._set_busy(True, "Waiting for the Sequence Player...")
+            # BUILD 142: no Sequence Player and no OpenGL wait: the render
+            # composites on its own headless GPU composer
+            # from sequence_player import open_player_for
+            self._set_busy(True, "Starting the GPU compositor...")
             try:
-                player = getattr(tl, "_player", None)
-                if player is None or player.closed or not player.ready:
-                    player = open_player_for(tl)
+                from sequence_preview_gpu import new_composer
+                comp = new_composer(self.timeline._project_db(), self.sequence_id)
             except Exception as e:
-                self._fail("Could not open the Sequence Player: %s" % e)
+                self._fail("Could not start the GPU compositor: %s" % e)
                 return
-            self._wait_t0 = time.perf_counter()
-            self._wait_player(player)
-
-        def _wait_player(self, player):
-            # The composite needs the player's CUDA context and kernel
-            # (set up on its first expose)
-            if self._closing:
-                return
-            if player.closed or player.failed:
-                self._fail("The Sequence Player could not start its GPU setup.")
-                return
-            if not player.ready:
-                if time.perf_counter() - self._wait_t0 > PLAYER_WAIT_S:
-                    self._fail("Timed out waiting for the Sequence Player GPU setup.")
-                    return
-                QTimer.singleShot(100, lambda: self._wait_player(player))
-                return
-            self._start(player)
+            self._start(comp)
 
         def _start(self, player):
+            # player: the render's headless composer (BUILD 142; seq_w /
+            # seq_h, freed by _RenderGpu.close)
             from sequence_player import timeline_snapshot
             tl = self.timeline
             try:
@@ -803,6 +762,11 @@ def _make_window_class():
                     "chunk": chunk, "cuda": True,
                 }
             except Exception as e:
+                try:
+                    from sequence_preview_gpu import free_composer
+                    free_composer(player)
+                except Exception:
+                    pass
                 self._fail("Could not prepare the render: %s" % e)
                 return
             gpu = _RenderGpu(player)

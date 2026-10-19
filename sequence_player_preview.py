@@ -124,45 +124,72 @@ def _frames_locked(self, frames, snapshot, quality):
     # One GPU pass: decode all N (one get_batch_frames per in-order
     # source), composite all N into N device buffers, nvJPEG-encode all
     # N from those buffers; only the JPEG bytes come back to the host.
+    # BUILD 142: the pass itself is composite_batch (shared with the
+    # render); this is its preview JPEG sink.
     if self.closed or not self.ready:
         return None
-    cudart = _libs()[0]
-    nvcuda = _libs()[1]
-    self._tm = _new_tm()
-    dark = _dark_mode()
     n = len(frames)
     try:
-        _check(nvcuda.cuCtxSetCurrent(self.cuda_ctx), "ctx")
-        # 1) decode
-        pre = self._prefetch(frames, snapshot)
-        bufs = self._gen_buffers(n)
-        # 2) composite all N on the card (prefetched blends are stream
-        # ordered, no host sync between frames)
-        for k, fr in enumerate(frames):
-            self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False)
-        _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
-        # 3) encode all N from the device buffers
-        lib = _nvjpeg_lib()
-        if lib is not None:
-            if self.nvj is None:
-                self.nvj = _NvJpegEncoder(lib, self.stream)
-            jpegs = self.nvj.encode_many(bufs, self.seq_w, self.seq_h,
-                                         self.row, quality)
-            items = [("jpeg", b) for b in jpegs]
-        else:
-            # Qt fallback needs host pixels (no nvJPEG on this machine)
-            size = self.row * self.seq_h
-            items = []
-            for b in bufs:
-                host = ctypes.create_string_buffer(size)
-                _check(cudart.cudaMemcpy(host, b, size, 2), "dst to host")
-                items.append(("raw", host.raw))
+        items = composite_batch(self, frames, snapshot, _dark_mode(),
+                                self._gen_buffers(n), _jpeg_sink(quality))
         self._target = None
     except Exception as e:
         self._target = None
         print(f"Sequence Player frame_jpeg failed: {e}")
         items = [("jpeg", None)] * n
     return items
+
+
+def composite_batch(self, frames, snapshot, dark, bufs, sink,
+                    sync_name="composite sync"):
+    # BUILD 142: the one frame-batch loop of the preview fill and the
+    # render. Caller holds _GEN_LOCK. Decode (one get_batch_frames per
+    # in-order source), composite every frame into its device buffer
+    # (stream ordered, no host sync between frames), one stream sync, then
+    # sink(self, bufs) turns the N device buffers into the result list.
+    # self: a SequencePlayer or a HeadlessComposer. Raises on CUDA errors.
+    cudart = _libs()[0]
+    nvcuda = _libs()[1]
+    self._tm = _new_tm()
+    _check(nvcuda.cuCtxSetCurrent(self.cuda_ctx), "ctx")
+    # 1) decode
+    pre = self._prefetch(frames, snapshot)
+    # 2) composite all N on the card (prefetched blends are stream
+    # ordered, no host sync between frames)
+    for k, fr in enumerate(frames):
+        self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False)
+    _check(cudart.cudaStreamSynchronize(self.stream), sync_name)
+    # 3) sink: encode / copy out from the device buffers
+    out = sink(self, bufs)
+    del pre
+    return out
+
+
+def host_rgb(self, bufs):
+    # BUILD 142 sink: each device buffer copied to host RGB24 bytes
+    cudart = _libs()[0]
+    size = self.row * self.seq_h
+    out = []
+    for b in bufs:
+        host = ctypes.create_string_buffer(size)
+        _check(cudart.cudaMemcpy(host, b, size, 2), "dst to host")
+        out.append(host.raw)
+    return out
+
+
+def _jpeg_sink(quality):
+    # BUILD 142 sink of the preview fill: ("jpeg", bytes) from nvJPEG, or
+    # ("raw", host RGB) for the Qt fallback (no nvJPEG on this machine)
+    def sink(self, bufs):
+        lib = _nvjpeg_lib()
+        if lib is not None:
+            if self.nvj is None:
+                self.nvj = _NvJpegEncoder(lib, self.stream)
+            jpegs = self.nvj.encode_many(bufs, self.seq_w, self.seq_h,
+                                         self.row, quality)
+            return [("jpeg", b) for b in jpegs]
+        return [("raw", raw) for raw in host_rgb(self, bufs)]
+    return sink
 
 def _frame_locked(self, frame, snapshot, worker, quality):
     # Composite under _GEN_LOCK. ("jpeg", bytes) from nvJPEG, or

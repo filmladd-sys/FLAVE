@@ -11,6 +11,8 @@
 # _GEN_LOCK; released when a player for the sequence is open (one set of
 # decoders / NVDEC sessions), when the worker goes idle on a closed
 # timeline, or when it switches sequence. ASCII only.
+# BUILD 142: the render uses its own composer of this class (new_composer /
+# free_composer): own decoders and buffers, no Sequence Player, no GL.
 
 import ctypes
 import os
@@ -198,3 +200,30 @@ def release_headless():
         _COMPOSER[0] = None
         if cur is not None:
             cur.release_locked()
+
+
+def new_composer(project, sequence_id):
+    # BUILD 142: a private headless composer (the render's), not the
+    # preview worker's slot: own decoders, images and buffers on the shared
+    # context. Raises when the GPU setup fails (nothing left allocated).
+    w, h = _sequence_size(project, sequence_id)
+    with _GEN_LOCK:
+        if "frame_jpeg" not in HeadlessComposer.__dict__:
+            _borrow()
+        comp = HeadlessComposer(project, sequence_id, w, h)
+        try:
+            comp.setup()
+        except Exception:
+            comp.failed = True
+            comp.release_locked()
+            raise
+        return comp
+
+
+def free_composer(comp):
+    # BUILD 142: free a composer from new_composer (any thread)
+    if comp is None:
+        return
+    with _GEN_LOCK:
+        if not comp.closed:
+            comp.release_locked()
