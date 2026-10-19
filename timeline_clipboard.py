@@ -274,7 +274,10 @@ def paste(tl, anchor, make_room):
             # if it["link_id"] is not None:
             # BUILD 155: a pasted keyframe clip is always unlinked (link_id
             # stays NULL); it does not rejoin its pasted link partners
-            if it["link_id"] is not None and table != "keyframe_clips":
+            # if it["link_id"] is not None and table != "keyframe_clips":
+            # BUILD 157: every type (keyframe clips too) rejoins its pasted
+            # partners of the same original group
+            if it["link_id"] is not None:
                 groups.setdefault(it["link_id"], []).append((table, new_id, mem))
             ranges.append((s, s + it["length"] - 1))
         # BUILD 106: pasted sequence clips get their sequence_children row;
@@ -295,6 +298,23 @@ def paste(tl, anchor, make_room):
         #         if "link_id" in cols_by_table.get(table, ()):
         #             cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
         #                         (new_link, new_id))
+        # BUILD 157: a group of two or more pasted members (of one original
+        # link_id) gets one NEW shared link_id; each original group its own.
+        # A lone pasted member (only one copied, or the only one whose track
+        # still exists) stays unlinked. The new id is a pasted member's mem
+        # id as Link does, preferring a clips row (clips.id is AUTOINCREMENT,
+        # never reused), then a keyframe clip, then a caption.
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            pick = ([m for m in members if m[0] == "clips"]
+                    or [m for m in members if m[0] == "keyframe_clips"]
+                    or members)
+            new_link = pick[0][2]
+            for table, new_id, _mem in members:
+                if "link_id" in cols_by_table.get(table, ()):
+                    cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
+                                (new_link, new_id))
         conn.commit()
         conn.close()
     except Exception as e:

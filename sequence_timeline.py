@@ -872,6 +872,15 @@ class SequenceTimeline(QMainWindow):
         paste_action = menu.addAction("Paste") if has_clipboard(self) else None
         return copy_action, cut_action, paste_action
 
+    def _add_empty_paste_action(self, menu):
+        # BUILD 157: Paste on the empty-space / empty track menus, after a
+        # separator at the end; None (not added) when the clipboard is empty
+        from timeline_clipboard import has_clipboard
+        if not has_clipboard(self):
+            return None
+        menu.addSeparator()
+        return menu.addAction("Paste")
+
     def _run_clipboard_action(self, action, acts, clip):
         # BUILD 156: True when action was one of acts. Copy / Cut use the
         # selection (the right-click already selected an unselected clicked
@@ -926,7 +935,12 @@ class SequenceTimeline(QMainWindow):
         # tracks): only the Tracks menu items
         menu = QMenu(self)
         acts = self._add_track_actions(menu)
+        # BUILD 157: Paste (at the playhead) when the clipboard has items
+        paste_action = self._add_empty_paste_action(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if paste_action is not None and action == paste_action:
+            self._clip_paste_tic()
+            return
         if action in acts:
             acts[action]()
 
@@ -994,10 +1008,17 @@ class SequenceTimeline(QMainWindow):
         # edge; key boxes / markers / clips returned above) also lists the
         # Tracks menu items. The Name / Type header cells do not.
         add_track_acts = {}
+        paste_action = None
         if x_in_clips >= 0 and self._clip_edge_at(pos) is None:
             menu.addSeparator()
             add_track_acts = self._add_track_actions(menu)
+            # BUILD 157: empty track space: Paste (at the playhead, same as
+            # Ctrl+V) when the clipboard has items, hidden when empty
+            paste_action = self._add_empty_paste_action(menu)
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if paste_action is not None and action == paste_action:
+            self._clip_paste_tic()
+            return
         if action in add_track_acts:
             add_track_acts[action]()
             return
