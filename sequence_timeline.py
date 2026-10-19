@@ -28,7 +28,9 @@ from sequence_timeline_captions import (
 )
 from sequence_timeline_sql import (
     EDGE_HIT_PX, OUT_ICON_MIN_PX, EMPTY_LENGTH_SECONDS, DEFAULT_FPS,
-    DEFAULT_TRACK_HEIGHT, CLIP_TRACK_TYPES, EDIT_TRACK_TYPES, TRACK_FOOTAGE_EXTENSIONS,
+    DEFAULT_TRACK_HEIGHT, COLLAPSE_COL, COLLAPSE_COL_WIDTH, COLLAPSED_ROW_HEIGHT,
+    ROLE_COLLAPSED,
+    ROLE_OPEN_HEIGHT, CLIP_TRACK_TYPES, EDIT_TRACK_TYPES, TRACK_FOOTAGE_EXTENSIONS,
     _global_db_path, _get_global_setting, _set_global_setting, _read_open_ids,
     _write_open_ids, _add_open_id, _remove_open_id, get_open_timeline_ids,
     _write_open_player_ids, get_open_player_ids,
@@ -65,6 +67,13 @@ class ClipDelegate(QStyledItemDelegate):
         self.timeline = timeline
 
     def paint(self, painter, option, index):
+        if index.column() == COLLAPSE_COL:
+            # BUILD 126: down triangle = open, right triangle = collapsed
+            super().paint(painter, option, index)
+            name_item = self.timeline.table.item(index.row(), 0)
+            coll = bool(name_item.data(ROLE_COLLAPSED)) if name_item is not None else False
+            paint_collapse_triangle(painter, option.rect, coll)
+            return
         if index.column() != CLIPS_COL:
             super().paint(painter, option, index)
             return
@@ -73,6 +82,7 @@ class ClipDelegate(QStyledItemDelegate):
         painter.save()
         painter.setClipRect(rect)
         name_item = tl.table.item(index.row(), 0)
+        collapsed = bool(name_item.data(ROLE_COLLAPSED)) if name_item is not None else False
         track_id = name_item.data(Qt.UserRole) if name_item is not None else None
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
         bg = name_item.data(Qt.UserRole + 3) if name_item is not None else ""
@@ -95,6 +105,14 @@ class ClipDelegate(QStyledItemDelegate):
             clip_rect = QRect(x, rect.top(), w, rect.height())
             # Disabled clips draw dimmer
             painter.setOpacity(1.0 if clip_enabled else 0.4)
+            if collapsed:
+                # BUILD 126: bar + outline + name only (no icons, waveform,
+                # key boxes or markers)
+                paint_collapsed_clip(painter, clip_rect, track_type,
+                                     clip_id in tl._selected_clip_ids,
+                                     (filename or "") + (" [S]" if clip_solo else ""))
+                painter.setOpacity(1.0)
+                continue
             if track_type == "keyframe":
                 from keyframe import paint_keyframe_clip
                 keys = clip[9] if len(clip) > 9 else []
@@ -214,6 +232,48 @@ class ClipDelegate(QStyledItemDelegate):
 
 
 _SEQ_ICON_CACHE = {}
+
+COLLAPSED_BAR_COLORS = {"audio": AUDIO_CLIP_BG, "caption": QColor(30, 110, 110),
+                        "keyframe": QColor(30, 110, 110)}
+
+
+def paint_collapse_triangle(painter, rect, collapsed):
+    # BUILD 126: small filled triangle centered in the cell
+    from PySide6.QtGui import QPolygon
+    from PySide6.QtCore import QPoint
+    s = max(4, min(10, rect.height() - 6, rect.width() - 6))
+    cx, cy = rect.center().x(), rect.center().y()
+    h = s // 2
+    if collapsed:
+        pts = [QPoint(cx - h // 2, cy - h), QPoint(cx - h // 2, cy + h), QPoint(cx + h, cy)]
+    else:
+        pts = [QPoint(cx - h, cy - h // 2), QPoint(cx + h, cy - h // 2), QPoint(cx, cy + h)]
+    painter.save()
+    painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(200, 200, 200))
+    painter.drawPolygon(QPolygon(pts))
+    painter.restore()
+
+
+def paint_collapsed_clip(painter, clip_rect, track_type, selected, label):
+    # BUILD 126: collapsed track clip: bar, outline, name in a font that
+    # fits the 16 px row (elided like caption text)
+    from PySide6.QtGui import QFont
+    painter.fillRect(clip_rect, COLLAPSED_BAR_COLORS.get(track_type, VIDEO_CLIP_BG))
+    painter.setPen(QColor(255, 255, 160) if selected else QColor(160, 180, 220))
+    painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
+    if clip_rect.width() <= 6:
+        return
+    font = QFont(painter.font())
+    font.setPixelSize(max(7, min(11, clip_rect.height() - 4)))
+    painter.save()
+    painter.setFont(font)
+    painter.setPen(QColor(230, 230, 230))
+    text = painter.fontMetrics().elidedText(" ".join(label.split()), Qt.ElideRight,
+                                            max(0, clip_rect.width() - 6))
+    painter.drawText(clip_rect, Qt.AlignCenter, text)
+    painter.restore()
 
 
 def moving_marker_frames(markers, group, drag_clip):
@@ -459,8 +519,9 @@ class SequenceTimeline(QMainWindow):
         self.table = QTableWidget()
         self.ruler = RulerHeader(self)
         self.table.setHorizontalHeader(self.ruler)
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Name", "Type", ""])
+        # BUILD 126: 4th logical column = collapse triangle, shown far left
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Name", "Type", "", ""])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         # Only Name items are editable (set per item in refresh)
         self.table.setEditTriggers(
@@ -483,6 +544,17 @@ class SequenceTimeline(QMainWindow):
         self.ruler.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         # Clips fills the remaining window width; the ruler is virtual
         self.ruler.setSectionResizeMode(CLIPS_COL, QHeaderView.Stretch)
+        # Fixed 18 px triangle column (the header's font-based minimum
+        # section size would widen it) and 16 px collapsed rows (same for
+        # the hidden vertical header). Both minimums only matter below the
+        # sizes the other columns / rows already use.
+        self.ruler.setMinimumSectionSize(min(self.ruler.minimumSectionSize(),
+                                             COLLAPSE_COL_WIDTH))
+        self.table.verticalHeader().setMinimumSectionSize(
+            min(self.table.verticalHeader().minimumSectionSize(), COLLAPSED_ROW_HEIGHT))
+        self.ruler.setSectionResizeMode(COLLAPSE_COL, QHeaderView.Fixed)
+        self.ruler.resizeSection(COLLAPSE_COL, COLLAPSE_COL_WIDTH)
+        self.ruler.moveSection(self.ruler.visualIndex(COLLAPSE_COL), 0)
         # Central area: track table on top, play control row pinned bottom left
         central = QWidget(self)
         central_layout = QVBoxLayout(central)
@@ -546,6 +618,7 @@ class SequenceTimeline(QMainWindow):
         self._selection_solo = False
         self._out_paint_miss = {}   # clip_id -> (frame, height) last printed miss
         self.table.setItemDelegateForColumn(CLIPS_COL, ClipDelegate(self))
+        self.table.setItemDelegateForColumn(COLLAPSE_COL, ClipDelegate(self))
         self.table.setAcceptDrops(True)
         self.table.viewport().setAcceptDrops(True)
         # Clip edge dragging: hover cursor needs mouse tracking
@@ -695,13 +768,13 @@ class SequenceTimeline(QMainWindow):
     def _track_context_menu(self, pos):
         # Key boxes first so right-click does not open the clip menu
         from keyframe import hit_test_key, key_context_menu
-        key_hit = hit_test_key(self, pos)
+        key_hit = self._hit_key(pos)
         if key_hit is not None:
             key_context_menu(self, key_hit, pos)
             return
         # Markers next: Edit / Delete instead of the clip menu
         from markers import hit_test_marker, marker_context_menu
-        marker_hit = hit_test_marker(self, pos)
+        marker_hit = self._hit_marker(pos)
         if marker_hit is not None:
             marker_context_menu(self, marker_hit, pos)
             return
@@ -907,12 +980,54 @@ class SequenceTimeline(QMainWindow):
         # QTableView trims the grid line (1px) off each cell's rect, so the
         # painted height is rowHeight - 1 when the grid is shown. Using plain
         # rowHeight here made the out icon cache key miss paint's key.
+        # BUILD 126: a collapsed track draws no icons; icons are made for
+        # its open height so they are ready when it opens
         grid = 1 if self.table.showGrid() else 0
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 0)
             if item is not None and item.data(Qt.UserRole) == track_id:
-                return max(0, self.table.rowHeight(r) - grid)
+                h = self.table.rowHeight(r)
+                if item.data(ROLE_COLLAPSED):
+                    h = int(item.data(ROLE_OPEN_HEIGHT) or DEFAULT_TRACK_HEIGHT)
+                return max(0, h - grid)
         return 0
+
+    def _row_collapsed(self, pos):
+        # BUILD 126: True if the track row under pos is collapsed
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return False
+        item = self.table.item(row, 0)
+        return bool(item is not None and item.data(ROLE_COLLAPSED))
+
+    def _hit_key(self, pos):
+        # Key boxes are not drawn on collapsed tracks: not hittable there
+        if self._row_collapsed(pos):
+            return None
+        from keyframe import hit_test_key
+        return hit_test_key(self, pos)
+
+    def _hit_marker(self, pos):
+        # Marker squares are not drawn on collapsed tracks: not hittable
+        if self._row_collapsed(pos):
+            return None
+        from markers import hit_test_marker
+        return hit_test_marker(self, pos)
+
+    def _toggle_collapse_at(self, pos):
+        # BUILD 126: click in the triangle cell -> toggle tracks.collapsed
+        # (same path as Disable / Solo: no undo step, refresh)
+        if self.table.columnAt(pos.x()) != COLLAPSE_COL:
+            return False
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return False
+        item = self.table.item(row, 0)
+        tid = item.data(Qt.UserRole) if item is not None else None
+        if tid is None:
+            return False
+        self._toggle_track_flag(tid, "collapsed")
+        return True
 
     def _read_icon_blob(self, footage_id, frame_number, height):
         # Stored resized icon for footage_id at frame_number that is exactly
@@ -1090,7 +1205,7 @@ class SequenceTimeline(QMainWindow):
                 # Double-click a key box: edit value only (no clip actions)
                 from keyframe import hit_test_key, edit_key
                 dbl_pos = event.position().toPoint()
-                key_hit = hit_test_key(self, dbl_pos)
+                key_hit = self._hit_key(dbl_pos)
                 if key_hit is not None:
                     edit_key(self, key_hit["clip"], key_hit["key_id"],
                              key_hit["frame"], key_hit["value"])
@@ -1101,10 +1216,13 @@ class SequenceTimeline(QMainWindow):
                 # that clip (selection solo), Shift = add to the selection,
                 # empty clip-area space = clear
                 press_pos = event.position().toPoint()
+                # BUILD 126: triangle cell toggles collapsed (nothing else)
+                if self._toggle_collapse_at(press_pos):
+                    return True
                 # Marker under the mouse: marker drag only (no clip select /
                 # drag, no edit popup)
                 from markers import hit_test_marker, marker_drag_start
-                marker_hit = hit_test_marker(self, press_pos)
+                marker_hit = self._hit_marker(press_pos)
                 if marker_hit is not None:
                     marker_drag_start(self, marker_hit, press_pos)
                     return True
@@ -1131,7 +1249,7 @@ class SequenceTimeline(QMainWindow):
                 else:
                     self._select_clip(hit_clip, "normal")
                 from keyframe import hit_test_key
-                key_hit = hit_test_key(self, press_pos)
+                key_hit = self._hit_key(press_pos)
                 if key_hit is not None:
                     self._key_drag = {
                         "clip": key_hit["clip"],
@@ -1192,7 +1310,7 @@ class SequenceTimeline(QMainWindow):
                     obj.unsetCursor()
                 # Hovered marker: 3 px line; repaint only when it changes
                 from markers import hit_test_marker
-                mh = hit_test_marker(self, pos)
+                mh = self._hit_marker(pos)
                 self._set_hover_marker(mh[1][0] if mh is not None else None)
             if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if getattr(self, "_marker_drag", None) is not None:

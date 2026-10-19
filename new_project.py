@@ -111,6 +111,8 @@ class NewProjectWindow(QMainWindow):
                 enabled INTEGER DEFAULT 1,
                 solo INTEGER DEFAULT 0,
                 height_px INTEGER DEFAULT 64,
+                -- BUILD 126: 0 = open, 1 = collapsed (16 px row, bars + names)
+                collapsed INTEGER NOT NULL DEFAULT 0,
                 bg_color TEXT,
                 language TEXT DEFAULT '',
                 -- BUILD 101: caption stream type for caption tracks.

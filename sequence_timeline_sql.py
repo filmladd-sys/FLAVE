@@ -24,6 +24,15 @@ OUT_ICON_MIN_PX = 4   # smallest visible out-icon block on narrow clips
 EMPTY_LENGTH_SECONDS = 60  # ruler length for an empty sequence; no maximum
 DEFAULT_FPS = 29.97
 DEFAULT_TRACK_HEIGHT = 64
+# BUILD 126: collapsible tracks. The triangle column is LOGICAL column 3,
+# moved to VISUAL position 0 (far left) with QHeaderView.moveSection, so
+# Name (0), Type (1) and Clips (CLIPS_COL = 2) keep their logical indexes
+# everywhere (items, delegates, sectionViewportPosition, columnAt).
+COLLAPSE_COL = 3
+COLLAPSE_COL_WIDTH = 18
+COLLAPSED_ROW_HEIGHT = 16
+ROLE_COLLAPSED = Qt.UserRole + 5     # on the Name item: 0 / 1
+ROLE_OPEN_HEIGHT = Qt.UserRole + 6   # on the Name item: height_px when open
 
 
 # Track types whose clips can be dropped, moved, trimmed and toggled.
@@ -329,13 +338,16 @@ def refresh(self):
         cur = conn.cursor()
         _tsel = ("SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
                  "COALESCE(height_px, 64), COALESCE(bg_color, ''), "
-                 "COALESCE(language, ''), %s "
+                 "COALESCE(language, ''), %s, %s "
                  "FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id")
+        # BUILD 126: collapsed; a DB without the column reads 0 (open)
+        has_collapsed = track_has_collapsed(cur)
+        coll = "COALESCE(collapsed, 0)" if has_collapsed else "0"
         try:
-            cur.execute(_tsel % "caption_type", (self.sequence_id,))
+            cur.execute(_tsel % ("caption_type", coll), (self.sequence_id,))
         except sqlite3.OperationalError:
             # Old DB without caption_type (BUILD 101): NULL shows as WebVTT
-            cur.execute(_tsel % "NULL", (self.sequence_id,))
+            cur.execute(_tsel % ("NULL", coll), (self.sequence_id,))
         rows = cur.fetchall()
         cur.execute(
             "SELECT c.id, c.track_id, c.footage_id, c.start_frame, c.length_frames, "
@@ -380,7 +392,7 @@ def refresh(self):
         read_only = Qt.ItemIsSelectable | Qt.ItemIsEnabled
         dim = QColor(130, 130, 130)
         for i, (track_id, name, track_type, enabled, solo, height_px, bg_color,
-                language, caption_type) in enumerate(rows):
+                language, caption_type, collapsed) in enumerate(rows):
             name_item = QTableWidgetItem(name or "")
             name_item.setData(Qt.UserRole, track_id)
             name_item.setData(Qt.UserRole + 1, int(enabled))
@@ -411,11 +423,20 @@ def refresh(self):
             self.table.setItem(i, 0, name_item)
             self.table.setItem(i, 1, type_item)
             self.table.setItem(i, CLIPS_COL, clips_item)
+            # BUILD 126: triangle cell (painted by ClipDelegate)
+            coll_item = QTableWidgetItem("")
+            coll_item.setFlags(read_only)
+            coll_item.setToolTip("Collapse / expand track")
+            self.table.setItem(i, COLLAPSE_COL, coll_item)
             try:
                 row_h = int(height_px)
             except (TypeError, ValueError):
                 row_h = DEFAULT_TRACK_HEIGHT
-            self.table.setRowHeight(i, row_h if row_h > 0 else DEFAULT_TRACK_HEIGHT)
+            row_h = row_h if row_h > 0 else DEFAULT_TRACK_HEIGHT
+            is_coll = 1 if collapsed else 0
+            name_item.setData(ROLE_COLLAPSED, is_coll)
+            name_item.setData(ROLE_OPEN_HEIGHT, row_h)
+            self.table.setRowHeight(i, track_row_height(row_h, is_coll))
     finally:
         self._filling = False
     self._update_clips_width()
@@ -524,14 +545,40 @@ def _move_track_to(self, track_id, where):
     self._after_track_change()
 
 
+def track_row_height(open_height, collapsed):
+    # BUILD 126: the one row-height rule. Every y position (clip paint,
+    # hit tests, key boxes, markers, drop preview, header cells) comes from
+    # QTableView rowViewportPosition / rowHeight / rowAt / visualRect, which
+    # follow these per-row heights.
+    if collapsed:
+        return COLLAPSED_ROW_HEIGHT
+    try:
+        h = int(open_height)
+    except (TypeError, ValueError):
+        h = DEFAULT_TRACK_HEIGHT
+    return h if h > 0 else DEFAULT_TRACK_HEIGHT
+
+
+def track_has_collapsed(cur):
+    try:
+        return "collapsed" in [r[1] for r in cur.execute("PRAGMA table_info(tracks)")]
+    except Exception:
+        return False
+
+
 def _toggle_track_flag(self, track_id, column):
-    if column not in ("enabled", "solo"):
+    # BUILD 126: 'collapsed' too (no undo, like enabled / solo); an older
+    # DB without the column refuses quietly
+    if column not in ("enabled", "solo", "collapsed"):
         return
     default = 1 if column == "enabled" else 0
     project_db = self._project_db()
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
+        if column == "collapsed" and not track_has_collapsed(cur):
+            conn.close()
+            return
         cur.execute(
             f"UPDATE tracks SET {column} = CASE WHEN COALESCE({column}, ?) = 0 "
             "THEN 1 ELSE 0 END WHERE id = ?",
