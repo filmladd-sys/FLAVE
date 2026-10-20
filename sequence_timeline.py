@@ -474,10 +474,47 @@ class SequenceTimeline(QMainWindow):
         render_action.triggered.connect(lambda checked=False: self.open_render_manager())
         menubar.addAction(render_action)
 
-        # BUILD 166: Refresh Preview (also F5, the QShortcut above)
-        refresh_action = QAction("Refresh Preview (F5)", self)
+        # BUILD 166: Refresh Preview (also F5, the QShortcut above).
+        # BUILD 178: under a Preview menu, with Clear Video / Clear Audio
+        # (mark everything dirty, no refresh; for timing refreshes)
+        preview_menu = menubar.addMenu("Preview")
+        refresh_action = QAction("Refresh (F5)", self)
         refresh_action.triggered.connect(lambda checked=False: self.refresh_preview())
-        menubar.addAction(refresh_action)
+        preview_menu.addAction(refresh_action)
+        clear_video_action = QAction("Clear Video", self)
+        clear_video_action.triggered.connect(lambda checked=False: self.clear_preview_video())
+        preview_menu.addAction(clear_video_action)
+        clear_audio_action = QAction("Clear Audio", self)
+        clear_audio_action.triggered.connect(lambda checked=False: self.clear_preview_audio())
+        preview_menu.addAction(clear_audio_action)
+
+    def clear_preview_video(self):
+        # BUILD 178: every preview frame dirty (0 .. last frame); the next
+        # refresh rebuilds them all. Starts no refresh.
+        if self.sequence_id is None or not self._project_db():
+            return
+        try:
+            from sequence_preview import FramesMarkDirty
+            from sequence_preview_worker import get_worker
+            FramesMarkDirty(self._project_db(), self.sequence_id,
+                            [(0, max(0, int(self.total_frames()) - 1))])
+            get_worker().wake(self.sequence_id)
+            self.ruler.viewport().update()
+        except Exception as e:
+            print(f"Clear preview video failed: {e}")
+
+    def clear_preview_audio(self):
+        # BUILD 178: preview audio dirty; the next refresh mixes it in full
+        # (no partial mix). Starts no refresh.
+        if self.sequence_id is None or not self._project_db():
+            return
+        try:
+            from sequence_preview_audio import clear_preview_audio
+            # a running mix is cancelled; the 50 ms poll collects it
+            clear_preview_audio(self._project_db(), self.sequence_id)
+            self.ruler.viewport().update()
+        except Exception as e:
+            print(f"Clear preview audio failed: {e}")
 
     def refresh_preview(self):
         # BUILD 166: explicit refresh. The worker builds every not-clean

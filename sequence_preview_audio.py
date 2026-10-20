@@ -68,6 +68,21 @@ def mark_preview_audio_dirty(project_db, sequence_id=None):
         pass
 
 
+def clear_preview_audio(project_db, sequence_id):
+    # BUILD 178: Preview > Clear Audio. Cancel a running mix, drop the
+    # signature and layout files (the WAV no longer counts as current and
+    # no partial mix can reuse it) and mark the audio dirty: the next
+    # refresh runs a full mix.
+    cancel_mix(project_db, sequence_id)
+    for path in (preview_audio_sig_path(project_db, sequence_id),
+                 preview_audio_layout_path(project_db, sequence_id)):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    mark_preview_audio_dirty(project_db, sequence_id)
+
+
 def preview_audio_generation(project_db, sequence_id):
     try:
         return _state(project_db, sequence_id)["gen"]
