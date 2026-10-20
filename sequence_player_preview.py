@@ -857,8 +857,10 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
             # (row x height each); never grow into the margin
             fv = free_vram()
             if fv is not None:
-                held = len(gen.gen_bufs)
-                room = fv[0] + held * int(gen.row) * int(gen.seq_h) - still \
+                # BUILD 194: buffer count was in held (the pulls' decode
+                # bytes), so the fit and short check counted no decode
+                nbufs = len(gen.gen_bufs)
+                room = fv[0] + nbufs * int(gen.row) * int(gen.seq_h) - still \
                     - _refresh_keep(fv[1])
                 fit = max(1, int((room - held) // (per + int(gen.row) * int(gen.seq_h))))
                 n = min(n, fit)
