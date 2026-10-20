@@ -202,7 +202,9 @@ class PreviewWorker(object):
             # BUILD 170: card pass size from free VRAM (BUILD 173: once)
             from sequence_player_preview import refresh_batch_frames
             import sequence_player_gpu as spg
-            gpu_low = gpu_n
+            # BUILD 177: N cap from the Preview Frame Cap setting
+            cap = _setting_int("previewFrameCap", REFRESH_GPU_MAX, 1, 10000)
+            gpu_low = min(gpu_n, cap)
             spg._worker_fast[0] = True
             sp._worker_burst[0] = True
             # BUILD 173: N from one free-VRAM query at the start of the
@@ -218,7 +220,7 @@ class PreviewWorker(object):
                 self._pool_n = 0        # composer replaced / released
             if not self._pool_n:
                 n = refresh_batch_frames(project, sequence_id, snapshot,
-                                         gpu_low, REFRESH_GPU_MAX,
+                                         gpu_low, cap,
                                          headroom=REFRESH_NVDEC_HEADROOM)
                 from sequence_player_preview import reserve_refresh_pool
                 self._pool_n = reserve_refresh_pool(project, sequence_id, n)
@@ -389,7 +391,8 @@ WORKER_PASS_SEC = 0.25
 # BUILD 174: one fixed N per refresh, with REFRESH_NVDEC_HEADROOM kept
 # free beyond the margin for decode surfaces. BUILD 175: REFRESH_GPU_MAX 0
 # = no cap: N is the full VRAM fit (at least previewGpuBatchFrames).
-# BUILD 176: capped at 120 (VRAM fit still computed, N never above it)
+# BUILD 176: capped at 120 (VRAM fit still computed, N never above it).
+# BUILD 177: the cap is the Preview Frame Cap setting; this is its default
 REFRESH_GPU_MAX = 120
 REFRESH_NVDEC_HEADROOM = 1 << 30
 REFRESH_GUI_STALL_SEC = 0.3

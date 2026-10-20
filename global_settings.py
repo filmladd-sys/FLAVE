@@ -190,29 +190,14 @@ class GlobalSettingsWindow(QMainWindow):
         self.jpeg_q_edit.setPlaceholderText("90")
         layout.addWidget(self.jpeg_q_edit)
 
-        burst_label = QLabel("Preview burst frames")
-        layout.addWidget(burst_label)
-        self.burst_edit = QLineEdit()
-        self.burst_edit.setPlaceholderText("15")
-        layout.addWidget(self.burst_edit)
-
-        idle_label = QLabel("Preview idle (ms)")
-        layout.addWidget(idle_label)
-        self.idle_edit = QLineEdit()
-        self.idle_edit.setPlaceholderText("250")
-        layout.addWidget(self.idle_edit)
-
-        batch_label = QLabel("Preview batch (seconds)")
-        layout.addWidget(batch_label)
-        self.batch_edit = QLineEdit()
-        self.batch_edit.setPlaceholderText("1")
-        layout.addWidget(self.batch_edit)
-
-        gpu_batch_label = QLabel("Preview GPU batch frames")
-        layout.addWidget(gpu_batch_label)
-        self.gpu_batch_edit = QLineEdit()
-        self.gpu_batch_edit.setPlaceholderText("8")
-        layout.addWidget(self.gpu_batch_edit)
+        # BUILD 177: preview burst / idle / batch seconds / GPU batch frames
+        # fields removed (their code defaults apply); Preview Frame Cap: the
+        # largest N of the explicit preview refresh (F5 / Play on dirty)
+        frame_cap_label = QLabel("Preview Frame Cap")
+        layout.addWidget(frame_cap_label)
+        self.frame_cap_edit = QLineEdit()
+        self.frame_cap_edit.setPlaceholderText("120")
+        layout.addWidget(self.frame_cap_edit)
 
         undo_max_label = QLabel("Undo stack max")
         layout.addWidget(undo_max_label)
@@ -253,10 +238,7 @@ class GlobalSettingsWindow(QMainWindow):
 
         jq = _get_global_setting("previewJPEG_quality", "90")
         self.jpeg_q_edit.setText(jq or "90")
-        self.burst_edit.setText(_get_global_setting("previewBurstFrames", "15") or "15")
-        self.idle_edit.setText(_get_global_setting("previewIdleMs", "250") or "250")
-        self.batch_edit.setText(_get_global_setting("previewBatchSeconds", "1") or "1")
-        self.gpu_batch_edit.setText(_get_global_setting("previewGpuBatchFrames", "8") or "8")
+        self.frame_cap_edit.setText(_get_global_setting("previewFrameCap", "120") or "120")
         self.undo_max_edit.setText(_get_global_setting("UndoStackMax", "50") or "50")
         self.snap_px_edit.setText(_get_global_setting("Pixel Snap-To", "2") or "2")
 
@@ -305,10 +287,7 @@ class GlobalSettingsWindow(QMainWindow):
         _set_global_setting("previewJPEG_quality", str(jq))
 
         for edit, key, default, lo, hi in (
-                (self.burst_edit, "previewBurstFrames", 15, 1, 300),
-                (self.idle_edit, "previewIdleMs", 250, 0, 5000),
-                (self.batch_edit, "previewBatchSeconds", 1, 1, 10),
-                (self.gpu_batch_edit, "previewGpuBatchFrames", 8, 1, 30),
+                (self.frame_cap_edit, "previewFrameCap", 120, 1, 10000),
                 (self.undo_max_edit, "UndoStackMax", 50, 1, 1000000000),
                 (self.snap_px_edit, "Pixel Snap-To", 2, 0, 1000)):
             try:
