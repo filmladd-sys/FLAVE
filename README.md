@@ -173,8 +173,9 @@ composer (its own decoders, original footage instead of proxies).
 **Threads and locks.**
 - GUI thread: windows, timeline, player presenting.
 - Preview worker thread, play reader thread, audio mix thread (it
-  coordinates a pool of 2-3 range mix threads, `MIX_POOL_SIZE` in
-  `sequence_preview_audio.py`), render thread.
+  coordinates a pool of range mix threads, half the logical processors,
+  `MIX_POOL_SIZE` in `sequence_preview_audio.py`, sharing one locked
+  source cache per mix), render thread.
 - `_GEN_LOCK` (an RLock in `sequence_player_gpu.py`) is held for every
   composite. The GUI takes it first (`_GuiGen`, bumps `_gui_wants`); the
   worker waits for GUI quiet unless a refresh is running (`_worker_fast`).
