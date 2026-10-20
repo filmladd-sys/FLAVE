@@ -137,6 +137,7 @@ def _setup_collapse_column(self):
 def _toggle_collapse_at(self, pos):
     # BUILD 126: click in the triangle cell -> toggle tracks.collapsed
     # (same path as Disable / Solo: no undo step, refresh)
+    # On a selected track it inverts all selected tracks instead
     if self.table.columnAt(pos.x()) != COLLAPSE_COL:
         return False
     row = self.table.rowAt(pos.y())
@@ -146,6 +147,10 @@ def _toggle_collapse_at(self, pos):
     tid = item.data(Qt.UserRole) if item is not None else None
     if tid is None:
         return False
+    if tid in getattr(self, "_selected_track_ids", ()):
+        # Triangle of a selected track: invert every selected track
+        _set_selected_tracks_collapsed(self, "invert")
+        return True
     self._toggle_track_flag(tid, "collapsed")
     return True
 
