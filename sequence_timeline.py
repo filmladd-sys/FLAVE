@@ -1021,11 +1021,15 @@ class SequenceTimeline(QMainWindow):
     def wheel_pan(self, event):
         # Wheel up pans earlier, wheel down pans later. About one second per notch.
         dy = event.angleDelta().y()
+        alt = bool(event.modifiers() & Qt.AltModifier)
+        if alt and dy == 0:
+            # Qt may turn Alt+wheel into a horizontal wheel; use that delta
+            dy = event.angleDelta().x()
         if dy == 0:
             event.ignore()
             return
-        if event.modifiers() & Qt.ControlModifier:
-            # Ctrl+wheel zooms: up = zoom in, down = zoom out, keeping the
+        if alt:
+            # Alt+wheel zooms: up = zoom in, down = zoom out, keeping the
             # frame under the mouse in place
             x_in_clips = event.position().x() - self.ruler.sectionViewportPosition(CLIPS_COL)
             anchor = self.view_start_frame + max(0.0, x_in_clips) / self.pixels_per_frame
