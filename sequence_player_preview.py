@@ -601,10 +601,11 @@ def _source_size(path):
 
 # BUILD 189: per-range safe cap: free VRAM kept is max(this x total,
 # REFRESH_VRAM_FATAL_MB) + REFRESH_CHUNK_CUSHION_MB; per frame of a range:
-# one composite buffer + one nvJPEG state (estimated REFRESH_STATE_BYTES_PX
-# per sequence pixel, measured after each reserve) + its decode cost
+# one composite buffer + its decode cost. BUILD 190: the nvJPEG states
+# (at most _NvJpegEncoder.STATES_MAX, fixed, not per frame) are reserved
+# and warmed before free VRAM is measured, so their real size is already
+# out of free (was: estimated 2 bytes/px per frame; real ~60 MB each)
 REFRESH_VRAM_MARGIN = 0.25
-REFRESH_STATE_BYTES_PX = 2
 
 
 def _refresh_keep(total_b):
@@ -614,13 +615,14 @@ def _refresh_keep(total_b):
 
 def _free_pool(gen, n):
     # BUILD 189: (lock held) free composite buffers / nvJPEG states beyond n
+    # BUILD 190: states kept up to STATES_MAX (n None: all freed)
     cudart = _libs()[0]
-    for b in gen.gen_bufs[n:]:
+    for b in gen.gen_bufs[n or 0:]:
         if b.value:
             cudart.cudaFree(b)
-    del gen.gen_bufs[n:]
+    del gen.gen_bufs[n or 0:]
     if gen.nvj is not None:
-        gen.nvj.trim(n)
+        gen.nvj.trim(_NvJpegEncoder.STATES_MAX if n else 0)
 
 
 def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
@@ -644,6 +646,10 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     # floor, plus the cushion); pool_n (Preview Frame Cap) only lowers it.
     # Returns [(start, end, n, decode bytes/frame, still bytes)]; the
     # worker reserves the pool per range (fit_refresh_pool).
+    # BUILD 190: after freeing, a small pool (min(pool_n, STATES_MAX)
+    # buffers + states, warmed) is reserved and kept; free VRAM is read
+    # after it, so the plan uses the real nvJPEG state cost. Per frame of
+    # a range: one composite buffer + its decode.
     gen = _generator_for(project_path, sequence_id)
     if gen is None or total <= 0:
         return []
@@ -652,14 +658,23 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         gen._close_all_decoders()
         gen._refresh_hold = 0
-        _free_pool(gen, 0)
+        _free_pool(gen, None)
     finally:
         _GEN_LOCK.release()
+    fv0 = free_vram()
+    n0 = max(1, min(int(pool_n), _NvJpegEncoder.STATES_MAX))
+    n0 = reserve_refresh_pool(project_path, sequence_id, n0)
     fv = free_vram()
+    pool_px = int(gen.row) * int(gen.seq_h)
     keep = _refresh_keep(fv[1]) if fv else 0
-    budget = (fv[0] - keep) if fv else 0
-    pool_px = int(gen.row) * int(gen.seq_h) + int(
-        REFRESH_STATE_BYTES_PX * int(gen.seq_w) * int(gen.seq_h))
+    # the n0 reserved buffers count as free (the range's N includes them)
+    budget = (fv[0] + n0 * pool_px - keep) if fv else 0
+    if fv0 and fv:
+        print("WORKER refresh states: %d nvJPEG states + %d buffers reserved, "
+              "free %d -> %d MB (states %.0f MB measured)" % (
+                  len(gen.nvj.states) if gen.nvj is not None else 0, n0,
+                  fv0[0] >> 20, fv[0] >> 20,
+                  (fv0[0] - fv[0] - n0 * pool_px) / float(1 << 20)))
     cuts = set([0, int(total)])
     for clips in snapshot[1].values():
         for clip in clips:
@@ -757,6 +772,15 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still):
     n = max(1, int(n))
     for _ in range(4):
         if int(getattr(gen, "_refresh_hold", 0) or 0) != n:
+            # BUILD 190: predict before reserving: buffers are exact
+            # (row x height each); never grow into the margin
+            fv = free_vram()
+            if fv is not None:
+                held = len(gen.gen_bufs)
+                room = fv[0] + held * int(gen.row) * int(gen.seq_h) - still \
+                    - _refresh_keep(fv[1])
+                fit = max(1, int(room // (per + int(gen.row) * int(gen.seq_h))))
+                n = min(n, fit)
             _GEN_LOCK.acquire()
             try:
                 _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")

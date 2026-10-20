@@ -165,6 +165,10 @@ def _nvjpeg_lib():
 class _NvJpegEncoder(object):
     # One nvJPEG encoder per player (its CUDA context and stream). Encodes
     # an interleaved RGB device buffer; only the JPEG bytes come back.
+    # BUILD 190: encode_many uses at most STATES_MAX encoder states (a
+    # warmed state holds ~60 MB at 1080p), reused group by group; was one
+    # state per buffer (N 150 = ~9.5 GB of states)
+    STATES_MAX = 16
     def __init__(self, lib, stream):
         self.lib = lib
         self.stream = stream
@@ -172,7 +176,7 @@ class _NvJpegEncoder(object):
         self.state = ctypes.c_void_p()
         self.params = ctypes.c_void_p()
         self.quality = None
-        self.states = []                 # encode_many: one state per buffer
+        self.states = []                 # encode_many: up to STATES_MAX
         _check(lib.nvjpegCreateSimple(ctypes.byref(self.handle)), "nvjpeg create")
         _check(lib.nvjpegEncoderStateCreate(self.handle, ctypes.byref(self.state),
                                             stream), "nvjpeg state")
@@ -207,9 +211,17 @@ class _NvJpegEncoder(object):
         return out.raw[:length.value]
 
     def encode_many(self, srcs, w, h, pitch, quality):
-        # nvJPEG has no batched encode: queue every encode on the stream
-        # (one encoder state per buffer), sync once, then read the N
-        # bitstreams. Pixels stay on the GPU.
+        # nvJPEG has no batched encode: queue the encodes on the stream
+        # (one encoder state per buffer), sync once, then read the
+        # bitstreams. Pixels stay on the GPU. BUILD 190: in groups of
+        # STATES_MAX (states reused per group, one sync per group)
+        out = []
+        for g0 in range(0, len(srcs), self.STATES_MAX):
+            out.extend(self._encode_group(srcs[g0:g0 + self.STATES_MAX],
+                                          w, h, pitch, quality))
+        return out
+
+    def _encode_group(self, srcs, w, h, pitch, quality):
         lib = self.lib
         cudart = _libs()[0]
         if quality != self.quality:
@@ -248,6 +260,8 @@ class _NvJpegEncoder(object):
 
     def reserve(self, n):
         # BUILD 173: create encoder states up to n (refresh pool)
+        # BUILD 190: never more than STATES_MAX
+        n = min(int(n), self.STATES_MAX)
         while len(self.states) < n:
             st = ctypes.c_void_p()
             _check(self.lib.nvjpegEncoderStateCreate(self.handle, ctypes.byref(st),
