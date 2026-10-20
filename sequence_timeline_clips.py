@@ -533,7 +533,13 @@ def _edge_drag_move(self, pos):
     else:
         delta = frame - (drag["orig_start"] + drag["orig_length"])
     delta = self._snap_drag_delta(drag, group, pos, delta)
-    if edge == "move" and all("blocks" in m for m in group):
+    from sequence_timeline_insert import insert_held
+    if edge == "move" and insert_held():
+        # Shift held: insert drag (sequence_timeline_insert.py). The group
+        # may pass over other clips; only frame 0 stops it.
+        delta = max(delta, -min(m["start"] for m in group))
+        drag["cur_delta"] = delta
+    elif edge == "move" and all("blocks" in m for m in group):
         # BUILD 134: waits at a blocking clip's edge, jumps past it
         # once the mouse is past it and the whole group fits there
         from clip_drag import legal_components, move_delta
@@ -808,6 +814,11 @@ def _move_drag_release(self):
     group = drag.get("group") or [{"clip": clip}]
     new_start = max(0, int(clip[2]))
     if new_start == drag["orig_start"]:
+        return
+    from sequence_timeline_insert import insert_held, insert_drop
+    if insert_held():
+        # Shift held at the drop: slice and push every track to make room
+        insert_drop(self, group)
         return
     # BUILD 134: drop guard -- a final position that overlaps a clip on
     # any moved clip's track (or is below 0) is refused, nothing saved

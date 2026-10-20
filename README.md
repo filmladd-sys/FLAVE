@@ -85,6 +85,7 @@ whose functions take the timeline as `self` and are attached to the class)
 | `sequence_timeline_droppreview.py` | Drop preview boxes while dragging footage in |
 | `sequence_timeline_rubber.py` | Rubber-band selection |
 | `sequence_timeline_slice.py` | Slice mode (C key) |
+| `sequence_timeline_insert.py` | Shift+drag insert: slice at the drop and push every track right |
 | `sequence_timeline_link.py` | Link / Unlink decisions (pure functions) |
 | `timeline_clipboard.py` | In-memory copy / cut / paste per sequence |
 | `clip_drag.py`, `clip_snap.py`, `edit_points.py` | Pure math: drag deltas, snapping, transport targets |

@@ -763,103 +763,112 @@ def slice_clip(self, clip, x_in_clips):
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
-        right_ids = []
-        right_other = []   # BUILD 132: right caption / keyframe mem ids
-        has_gain = None
-        has_seq_ref = None
-        has_proxy = False
-        for c in members:
-            c_start, c_len, c_in = c[2], c[3], c[7]
-            if not (c_start < split_frame < c_start + c_len):
-                continue
-            track_id = self._clip_track_id(c)
-            if track_id is None:
-                continue
-            left_length = split_frame - c_start
-            right_length = c_len - left_length
-            right_in = c_in + (split_frame - c_start)
-            if is_keyframe_clip_id(c[0]):
-                from keyframe import slice_keyframe_clip_db
-                new_mem = slice_keyframe_clip_db(cur, c[0], split_frame)
-                if new_mem is not None:
-                    right_other.append(new_mem)
-                continue
-            if is_caption_id(c[0]):
-                # Caption: two rows, same text, font, position and scale
-                cap_id = -c[0]
-                cur.execute("UPDATE captions SET length_frames = ? WHERE id = ?",
-                            (left_length, cap_id))
-                cur.execute(
-                    "INSERT INTO captions (sequence_id, track_id, start_frame, "
-                    "length_frames, text, font_family, font_size, pos_x, pos_y, scale) "
-                    "SELECT sequence_id, track_id, ?, ?, text, font_family, font_size, "
-                    "pos_x, pos_y, scale FROM captions WHERE id = ?",
-                    (split_frame, right_length, cap_id)
-                )
-                right_other.append(-cur.lastrowid)
-                continue
-            cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
-                        (left_length, c[0]))
-            cur.execute(
-                "INSERT INTO clips (track_id, footage_id, start_frame, length_frames, "
-                "in_frame, enabled, solo) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (track_id, c[1], split_frame, right_length, right_in,
-                 1 if c[5] else 0, 1 if c[6] else 0)
-            )
-            right_ids.append(cur.lastrowid)
-            # Markers on the right piece's source frames move to it
-            from markers import move_markers
-            move_markers(cur, c[0], right_ids[-1], right_in, right_in + right_length)
-            # Right piece keeps the clip gain (gain_db; older tables lack it)
-            if has_gain is None:
-                cur.execute("PRAGMA table_info(clips)")
-                clip_cols = [r[1] for r in cur.fetchall()]
-                has_gain = "gain_db" in clip_cols
-                has_proxy = "proxy_percent" in clip_cols
-            if has_gain:
-                cur.execute(
-                    "UPDATE clips SET gain_db = (SELECT gain_db FROM clips WHERE id = ?) "
-                    "WHERE id = ?", (c[0], right_ids[-1]))
-            if has_proxy:
-                cur.execute(
-                    "UPDATE clips SET proxy_percent = (SELECT proxy_percent FROM clips "
-                    "WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
-            # BUILD 105: right piece of a sequence clip stays a sequence clip
-            if has_seq_ref is None:
-                cur.execute("PRAGMA table_info(clips)")
-                has_seq_ref = "sequence_id_ref" in [r[1] for r in cur.fetchall()]
-            if has_seq_ref:
-                cur.execute(
-                    "UPDATE clips SET sequence_id_ref = (SELECT sequence_id_ref "
-                    "FROM clips WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
-        if linked and (right_ids or right_other):
-            # New link_id for the right pieces: the first right clip's id,
-            # else (no footage piece) the first right caption / keyframe
-            # piece's mem id, the same values link_selected_clips uses
-            new_link = right_ids[0] if right_ids else right_other[0]
-            cur.executemany("UPDATE clips SET link_id = ? WHERE id = ?",
-                            [(new_link, rid) for rid in right_ids])
-            from keyframe import persist_keyframe_link_id
-            from sequence_timeline_captions import persist_caption_link_id
-            for mid in right_other:
-                if is_keyframe_clip_id(mid):
-                    persist_keyframe_link_id(cur, mid, new_link)
-                else:
-                    persist_caption_link_id(cur, mid, new_link)
-        elif right_other:
-            # Unlinked cut: the new keyframe piece copied the old link_id
-            # (NULL for an unlinked clip, or a solo-sliced member's group);
-            # it stays out of any group like the footage right piece
-            from keyframe import persist_keyframe_link_id
-            for mid in right_other:
-                if is_keyframe_clip_id(mid):
-                    persist_keyframe_link_id(cur, mid, None)
+        slice_members_db(self, cur, members, split_frame, linked)
         conn.commit()
         conn.close()
     except Exception as e:
         QMessageBox.warning(self, "Slice Clip", f"Could not slice clip: {e}")
         return
     self._after_clip_change(f"Sliced clip at frame {split_frame}")
+
+
+def slice_members_db(self, cur, members, split_frame, linked):
+    # The database part of slice_clip: split each member that spans
+    # split_frame into a left piece (keeps its row) and a right piece (new
+    # row). linked True gives the right pieces a new shared link_id. No
+    # commit / undo here: the caller owns the transaction and undo step
+    # (slice_clip, and the Shift+drag insert in sequence_timeline_insert.py).
+    right_ids = []
+    right_other = []   # BUILD 132: right caption / keyframe mem ids
+    has_gain = None
+    has_seq_ref = None
+    has_proxy = False
+    for c in members:
+        c_start, c_len, c_in = c[2], c[3], c[7]
+        if not (c_start < split_frame < c_start + c_len):
+            continue
+        track_id = self._clip_track_id(c)
+        if track_id is None:
+            continue
+        left_length = split_frame - c_start
+        right_length = c_len - left_length
+        right_in = c_in + (split_frame - c_start)
+        if is_keyframe_clip_id(c[0]):
+            from keyframe import slice_keyframe_clip_db
+            new_mem = slice_keyframe_clip_db(cur, c[0], split_frame)
+            if new_mem is not None:
+                right_other.append(new_mem)
+            continue
+        if is_caption_id(c[0]):
+            # Caption: two rows, same text, font, position and scale
+            cap_id = -c[0]
+            cur.execute("UPDATE captions SET length_frames = ? WHERE id = ?",
+                        (left_length, cap_id))
+            cur.execute(
+                "INSERT INTO captions (sequence_id, track_id, start_frame, "
+                "length_frames, text, font_family, font_size, pos_x, pos_y, scale) "
+                "SELECT sequence_id, track_id, ?, ?, text, font_family, font_size, "
+                "pos_x, pos_y, scale FROM captions WHERE id = ?",
+                (split_frame, right_length, cap_id)
+            )
+            right_other.append(-cur.lastrowid)
+            continue
+        cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
+                    (left_length, c[0]))
+        cur.execute(
+            "INSERT INTO clips (track_id, footage_id, start_frame, length_frames, "
+            "in_frame, enabled, solo) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (track_id, c[1], split_frame, right_length, right_in,
+             1 if c[5] else 0, 1 if c[6] else 0)
+        )
+        right_ids.append(cur.lastrowid)
+        # Markers on the right piece's source frames move to it
+        from markers import move_markers
+        move_markers(cur, c[0], right_ids[-1], right_in, right_in + right_length)
+        # Right piece keeps the clip gain (gain_db; older tables lack it)
+        if has_gain is None:
+            cur.execute("PRAGMA table_info(clips)")
+            clip_cols = [r[1] for r in cur.fetchall()]
+            has_gain = "gain_db" in clip_cols
+            has_proxy = "proxy_percent" in clip_cols
+        if has_gain:
+            cur.execute(
+                "UPDATE clips SET gain_db = (SELECT gain_db FROM clips WHERE id = ?) "
+                "WHERE id = ?", (c[0], right_ids[-1]))
+        if has_proxy:
+            cur.execute(
+                "UPDATE clips SET proxy_percent = (SELECT proxy_percent FROM clips "
+                "WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
+        # BUILD 105: right piece of a sequence clip stays a sequence clip
+        if has_seq_ref is None:
+            cur.execute("PRAGMA table_info(clips)")
+            has_seq_ref = "sequence_id_ref" in [r[1] for r in cur.fetchall()]
+        if has_seq_ref:
+            cur.execute(
+                "UPDATE clips SET sequence_id_ref = (SELECT sequence_id_ref "
+                "FROM clips WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
+    if linked and (right_ids or right_other):
+        # New link_id for the right pieces: the first right clip's id,
+        # else (no footage piece) the first right caption / keyframe
+        # piece's mem id, the same values link_selected_clips uses
+        new_link = right_ids[0] if right_ids else right_other[0]
+        cur.executemany("UPDATE clips SET link_id = ? WHERE id = ?",
+                        [(new_link, rid) for rid in right_ids])
+        from keyframe import persist_keyframe_link_id
+        from sequence_timeline_captions import persist_caption_link_id
+        for mid in right_other:
+            if is_keyframe_clip_id(mid):
+                persist_keyframe_link_id(cur, mid, new_link)
+            else:
+                persist_caption_link_id(cur, mid, new_link)
+    elif right_other:
+        # Unlinked cut: the new keyframe piece copied the old link_id
+        # (NULL for an unlinked clip, or a solo-sliced member's group);
+        # it stays out of any group like the footage right piece
+        from keyframe import persist_keyframe_link_id
+        for mid in right_other:
+            if is_keyframe_clip_id(mid):
+                persist_keyframe_link_id(cur, mid, None)
 
 
 def ripple_delete(self, track_id, click_frame):
