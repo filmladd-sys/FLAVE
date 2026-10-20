@@ -522,10 +522,9 @@ def _edge_drag_move(self, pos):
             self._cross_track_preview(drag, target)
             return
         if drag.get("target_track") is not None:
-            # Back on the source track: return the clip to its own row
-            # and restore the drag-start start_frame before time move
-            self._relocate_clip(clip, drag["src_track"])
-            clip[2] = drag["orig_start"]
+            # Back on the source track: return the group to its own rows
+            # and restore the drag-start start_frames before time move
+            _restore_cross_track(self, drag)
             drag["target_track"] = None
             drag["target_ok"] = True
             drag["cur_delta"] = 0
@@ -755,31 +754,105 @@ def _relocate_clip(self, clip, track_id):
     self.clips_by_track.setdefault(track_id, []).append(clip)
 
 
-def _cross_track_preview(self, drag, target):
-    # Track move only: the clicked clip changes row, start_frame stays
-    # at drag["orig_start"]. Partners stay put. Mouse x is ignored.
-    self._set_snap_frame(None)
+# Track moves keep time and move the whole drag group (a linked stack, or
+# the selection): the dragged clip goes to the track under the mouse, and
+# every other video / audio / image member moves the same number of tracks
+# of its own type in the same direction (V1/A1 -> V2/A2 with sets laid out
+# V1, A1, V2, A2). Keyframe and caption members stay on their tracks. The
+# move is refused when a member has no such track or would overlap a clip
+# that is not moving. Mouse x is ignored.
+
+CROSS_TRACK_TYPES = ("video", "audio", "image")
+
+
+def _tracks_of_type(self, ttype):
+    # Track ids of one type, top to bottom
+    out = []
+    for r in range(self.table.rowCount()):
+        item = self.table.item(r, 0)
+        if item is not None and (item.data(Qt.UserRole + 4) or "").lower() == ttype:
+            out.append(item.data(Qt.UserRole))
+    return out
+
+
+def _cross_track_plan(self, drag, target):
+    # {clip id: target track id} for every member that changes track, or
+    # None when a member has nowhere to go
     clip = drag["clip"]
+    src = drag["src_track"]
+    order = _tracks_of_type(self, self._track_type(src))
+    if src not in order or target not in order:
+        return None
+    steps = order.index(target) - order.index(src)
+    src_tracks = drag.setdefault(
+        "src_tracks", {m["clip"][0]: self._clip_track_id(m["clip"])
+                       for m in drag.get("group") or [{"clip": clip}]})
+    plan = {}
+    for m in drag.get("group") or [{"clip": clip}]:
+        c = m["clip"]
+        if c is clip:
+            plan[c[0]] = target
+            continue
+        own = src_tracks.get(c[0])
+        ttype = self._track_type(own)
+        if ttype not in CROSS_TRACK_TYPES:
+            continue
+        tracks = _tracks_of_type(self, ttype)
+        if own not in tracks:
+            return None
+        i = tracks.index(own) + steps
+        if not (0 <= i < len(tracks)):
+            return None
+        plan[c[0]] = tracks[i]
+    return plan
+
+
+def _restore_cross_track(self, drag):
+    # Every member back on its drag-start track at its drag-start frame
     for m in drag.get("group") or []:
         c = m["clip"]
-        if c is not clip:
-            c[2] = m["start"]
-    self._relocate_clip(clip, target)
+        own = (drag.get("src_tracks") or {}).get(c[0])
+        if own is not None and self._clip_track_id(c) != own:
+            self._relocate_clip(c, own)
+        c[2] = m["start"]
+    clip = drag["clip"]
+    if self._clip_track_id(clip) != drag["src_track"]:
+        self._relocate_clip(clip, drag["src_track"])
     clip[2] = drag["orig_start"]
-    end = clip[2] + clip[3]
-    ok = True
-    for c in self.clips_by_track.get(target, []):
-        if c is clip:
-            continue
-        if c[2] < end and c[2] + c[3] > clip[2]:
-            ok = False
-            break
+
+
+def _cross_track_preview(self, drag, target):
+    self._set_snap_frame(None)
+    clip = drag["clip"]
+    plan = _cross_track_plan(self, drag, target)
+    _restore_cross_track(self, drag)
+    ok = plan is not None
+    if ok:
+        for m in drag.get("group") or [{"clip": clip}]:
+            c = m["clip"]
+            if c[0] in plan:
+                self._relocate_clip(c, plan[c[0]])
+        ids = set(plan)
+        for cid, tid in plan.items():
+            c = self._clip_by_id(cid)
+            if c is None:
+                continue
+            end = c[2] + c[3]
+            for o in self.clips_by_track.get(tid, []):
+                if o[0] in ids:
+                    continue
+                if o[2] < end and o[2] + o[3] > c[2]:
+                    ok = False
+                    break
     drag["target_track"] = target
     drag["target_ok"] = ok
+    drag["track_plan"] = plan if ok else None
     self.table.viewport().update()
     if ok:
         self.status_bar.showMessage(
             f"Move to track {target}, frame {clip[2]} (time locked)")
+    elif plan is None:
+        self.status_bar.showMessage("No matching track for a linked clip")
     else:
         self.status_bar.showMessage("Overlaps a clip on the target track")
 
@@ -793,23 +866,23 @@ def _move_drag_release(self):
     clip = drag["clip"]
     target = drag.get("target_track")
     if target is not None:
-        # Track change only: start_frame stays at drag start; partner stays
-        new_start = drag["orig_start"]
-        refused = not drag.get("target_ok", True)
+        # Track change only: start_frames stay at drag start; the group
+        # moves by _cross_track_plan (overlaps were checked in memory
+        # against every clip that is not moving)
+        plan = drag.get("track_plan")
+        refused = not drag.get("target_ok", True) or not plan
         if not refused:
             try:
                 conn = sqlite3.connect(self._project_db())
                 cur = conn.cursor()
-                if self._range_overlaps(cur, target, new_start, int(clip[3])):
-                    refused = True
-                else:
-                    from undo import push_undo
-                    push_undo(self._project_db(), "Move clip to track")
-                    table, row_id = clip_table_and_id(clip[0])
+                from undo import push_undo
+                push_undo(self._project_db(), "Move clip to track")
+                for cid, tid in plan.items():
+                    table, row_id = clip_table_and_id(cid)
                     cur.execute(
                         f"UPDATE {table} SET track_id = ? WHERE id = ?",
-                        (target, row_id))
-                    conn.commit()
+                        (tid, row_id))
+                conn.commit()
                 conn.close()
             except Exception as e:
                 QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
