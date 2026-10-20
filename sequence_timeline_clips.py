@@ -145,7 +145,8 @@ class ClipDelegate(QStyledItemDelegate):
             elif track_type == "audio":
                 # Audio clips: waveform from stored peaks, no icons
                 self._draw_waveform(painter, tl, clip_rect, footage_id,
-                                    in_frame, length_frames)
+                                    in_frame, length_frames,
+                                    (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0))
             else:
                 # Video clips show the source frame at their left edge; stills use 0
                 icon_frame = in_frame if track_type == "video" else 0
@@ -203,6 +204,11 @@ class ClipDelegate(QStyledItemDelegate):
             label = filename or ""
             if clip_solo:
                 label += " [S]"
+            # BUILD 165: non-zero clip gain after the name
+            gain_db = (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0)
+            if gain_db:
+                from clip_gain import gain_label
+                label += gain_label(gain_db)
             if title_rect is not None:
                 # BUILD 128: the name lives in the title bar (sticky left,
                 # elided); no in-content name

@@ -33,6 +33,22 @@ def read_clip_gain(project_db, clip_id):
         conn.close()
 
 
+def load_clip_gains(cur, sequence_id):
+    # BUILD 165: {clip_id: gain_db} for this sequence's clips with a
+    # non-zero gain (title bar label, waveform scale). No column: {}
+    if not _has_gain_column(cur):
+        return {}
+    cur.execute("SELECT c.id, c.gain_db FROM clips c JOIN tracks t ON t.id = c.track_id "
+                "WHERE t.sequence_id = ? AND COALESCE(c.gain_db, 0) != 0",
+                (sequence_id,))
+    return {r[0]: float(r[1]) for r in cur.fetchall()}
+
+
+def gain_label(gain_db):
+    # BUILD 165: title bar suffix, e.g. " | (Gain -5db)"
+    return " | (Gain %gdb)" % round(float(gain_db), 1)
+
+
 class GainDialog(QDialog):
     def __init__(self, parent, value):
         super().__init__(parent)

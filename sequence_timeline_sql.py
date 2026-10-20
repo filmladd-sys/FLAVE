@@ -380,6 +380,9 @@ def refresh(self):
         for track_clips in clips.values():
             track_clips.sort(key=lambda c: (c[2], c[0]))
         self.clips_by_track = clips
+        # BUILD 165: clip gain (dB) for the title bar and waveform scale
+        from clip_gain import load_clip_gains
+        self._clip_gains = load_clip_gains(cur, self.sequence_id)
         # BUILD 102: player caption overlay rebuilds from the new rows
         self._caption_snapshot = None
         conn.close()
