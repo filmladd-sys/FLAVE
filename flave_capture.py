@@ -5,12 +5,16 @@
 # One small window: output folder, FPS, and a Start / Stop button (enabled
 # only when the folder exists and FPS is a positive number). Start launches
 # one FFmpeg gdigrab process per monitor at that monitor's native pixel
-# size, video only (no audio), libx264 preset veryfast, one file each:
+# size, video only (no audio), encoded on the GPU with NVIDIA NVENC
+# (h264_nvenc, fastest preset p1, low-latency tune), one file each:
 #   Monitor<N>_<W>x<H>_YYYYMMDD_HHMMSS.mp4
 # Stop sends "q" to every FFmpeg so each MP4 is finalized, then kills any
 # that do not exit in time. The last folder and FPS are kept in
 # flave_capture.json next to this script.
 #
+# Needs an NVIDIA GPU and an FFmpeg build with h264_nvenc (FFmpeg 4.4+ for
+# the p1..p7 presets); if NVENC is missing FFmpeg exits and the title bar
+# says it failed.
 # Kept light so FLAVE can run in the foreground: FFmpeg runs at below
 # normal priority with no console window, its output goes nowhere, and the
 # window polls the processes once a second only while recording.
@@ -122,13 +126,15 @@ def monitors():
 
 
 def capture_cmd(x, y, w, h, fps, out_path):
-    # gdigrab of one desktop rect; crop keeps yuv420p sizes even
+    # gdigrab of one desktop rect -> h264_nvenc (constant quality 23, no
+    # bitrate cap); crop keeps yuv420p sizes even
     return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
             "-f", "gdigrab", "-framerate", "%g" % fps, "-draw_mouse", "1",
             "-offset_x", str(x), "-offset_y", str(y),
             "-video_size", "%dx%d" % (w, h), "-i", "desktop",
             "-an", "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
+            "-rc", "vbr", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p",
             "-y", out_path]
 
 
