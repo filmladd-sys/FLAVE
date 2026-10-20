@@ -274,6 +274,10 @@ class PreviewWorker(object):
                     # already blocked on the lock gets it for its one frame
                     # (else the window, Refreshing Preview too, freezes)
                     time.sleep(0.001)
+                elif time.perf_counter() - _gui_beat[0] > REFRESH_GUI_STALL_SEC:
+                    # BUILD 172: the Refreshing Preview poll (100 ms) has
+                    # not run: a short nap gives the GUI thread the GIL
+                    time.sleep(0.01)
                 # Dirty mark number before the build: an edit made while
                 # this chunk renders (old snapshot) keeps its frames dirty
                 seq0 = dirty_seq()
@@ -346,7 +350,9 @@ WORKER_PASS_SEC = 0.25
 # frames. BUILD 170: frames per card pass from free VRAM
 # (refresh_batch_frames), previewGpuBatchFrames .. REFRESH_GPU_MAX
 REFRESH_GPU_MAX = 120
-REFRESH_PASS_SEC = 5.0
+# BUILD 172: 1 s per card pass (was 5 s), so the window updates during it
+REFRESH_PASS_SEC = 1.0
+REFRESH_GUI_STALL_SEC = 0.3
 REFRESH_BATCH_SECONDS = 10
 
 
@@ -446,6 +452,8 @@ _play_priority = [0]
 # BUILD 166: an explicit refresh (F5) asked for every not-clean frame;
 # cleared when that pass finishes
 _refresh_all = [0]
+# BUILD 172: perf_counter of the last Refreshing Preview poll (GUI thread)
+_gui_beat = [0.0]
 
 
 def set_refresh_all(on):

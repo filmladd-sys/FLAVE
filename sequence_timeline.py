@@ -494,9 +494,11 @@ class SequenceTimeline(QMainWindow):
             set_refresh_all(True)
         except Exception as e:
             print(f"Refresh preview failed: {e}")
+        # BUILD 172: window up (and painted) before the retarget, so it
+        # shows even while the refresh pass keeps the GPU busy
+        self._show_refresh_dialog()
         self._retarget_preview(force=True)
         self.status_bar.showMessage("Refreshing preview", 3000)
-        self._show_refresh_dialog()
 
     def _show_refresh_dialog(self):
         # BUILD 167: progress window, closes itself when both are done
@@ -505,6 +507,7 @@ class SequenceTimeline(QMainWindow):
             if getattr(self, "_refresh_dialog", None) is None:
                 self._refresh_dialog = RefreshPreviewDialog(self)
             self._refresh_dialog.start()
+            QApplication.processEvents()    # BUILD 172: paint it now
         except Exception as e:
             print(f"Refresh preview window failed: {e}")
 

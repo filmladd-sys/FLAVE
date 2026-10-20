@@ -118,19 +118,28 @@ def _prefetch(self, frames, snapshot):
 
 # BUILD 170: buffers / encoder states kept after a pass; a normal pass
 # (n <= GEN_KEEP) frees what a bigger refresh pass grew beyond that
+# BUILD 172: also freed at the end of every pass larger than GEN_KEEP, so
+# the next free-VRAM query sees the real free memory
 GEN_KEEP = 30
+
+
+def _trim_gen(self):
+    # Free composite buffers / nvJPEG states beyond GEN_KEEP (lock held)
+    if len(self.gen_bufs) > GEN_KEEP:
+        cudart = _libs()[0]
+        for b in self.gen_bufs[GEN_KEEP:]:
+            if b.value:
+                cudart.cudaFree(b)
+        del self.gen_bufs[GEN_KEEP:]
+    if self.nvj is not None:
+        self.nvj.trim(GEN_KEEP)
 
 
 def _gen_buffers(self, n):
     # n sequence-size RGB device buffers for one GPU pass (grown, kept)
     cudart = _libs()[0]
-    if n <= GEN_KEEP and len(self.gen_bufs) > GEN_KEEP:
-        for b in self.gen_bufs[GEN_KEEP:]:
-            if b.value:
-                cudart.cudaFree(b)
-        del self.gen_bufs[GEN_KEEP:]
-        if self.nvj is not None:
-            self.nvj.trim(GEN_KEEP)
+    if n <= GEN_KEEP:
+        _trim_gen(self)
     while len(self.gen_bufs) < n:
         ptr = ctypes.c_void_p()
         _check(cudart.cudaMalloc(ctypes.byref(ptr), self.row * self.seq_h),
@@ -151,6 +160,9 @@ def _frames_locked(self, frames, snapshot, quality):
         items = composite_batch(self, frames, snapshot, _dark_mode(),
                                 self._gen_buffers(n), _jpeg_sink(quality))
         self._target = None
+        if n > GEN_KEEP:
+            # BUILD 172: a large refresh pass gives its extra memory back
+            _trim_gen(self)
     except Exception as e:
         self._target = None
         print(f"Sequence Player frame_jpeg failed: {e}")

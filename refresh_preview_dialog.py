@@ -63,6 +63,14 @@ class RefreshPreviewDialog(QDialog):
         return False, self._video_pct
 
     def _poll(self):
+        # BUILD 172: GUI heartbeat for the refresh pass (it naps briefly
+        # when this poll has not run for a while, so the window updates)
+        try:
+            import time
+            import sequence_preview_worker as spw
+            spw._gui_beat[0] = time.perf_counter()
+        except Exception:
+            pass
         v_done, v_pct = self._video_state()
         self._video_bar.setValue(v_pct)
         self._video_label.setText("Preview frames: done" if v_done
