@@ -483,8 +483,20 @@ def print_build():
         print("BUILD missing")
 
 
+def warn_missing_numpy():
+    # numpy is what makes the preview audio mix usable; without it
+    # sequence_preview_audio runs its pure-Python fallback
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        print("WARNING: numpy not installed (pip install numpy): preview audio "
+              "mix runs a slow pure-Python fallback (whole-source loads, no "
+              "threads, no partial remix)")
+
+
 def main():
     print_build()
+    warn_missing_numpy()
     # Shared CUDA primary context before any window or preview worker
     try:
         from cuda_context import ensure_cuda

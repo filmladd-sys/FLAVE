@@ -19,13 +19,17 @@ says what it owns.
   `sqlite3.Connection.blobopen`). 3.8-3.10 runs (the DLL loader uses
   `os.add_dll_directory`), but the preview audio mix is slow on long
   sources.
-- **Python packages:** there is no requirements file. The third-party
-  imports are:
+- **Python packages:** there is no requirements file. Install the three
+  third-party packages with `pip install PySide6 PyNvVideoCodec numpy`.
+  The third-party imports are:
   - `PySide6` -- all windows, QAudioSink playback, the Sequence Player's
     QWindow + QOpenGLContext.
   - `PyNvVideoCodec` -- NVDEC decode (`SimpleDecoder`, device memory, RGB).
-  - `numpy` -- optional; audio peaks, the audio mix and the WAV writer
-    fall back to pure Python without it.
+  - `numpy` -- required for usable preview audio speed (`pip install
+    numpy`). Without it audio peaks, the audio mix and the WAV writer fall
+    back to pure Python: the preview audio mix loads whole sources, runs
+    no threads and does no partial remix. `project_manager.py` prints a
+    `WARNING: numpy not installed ...` line at launch when it is missing.
   - Everything else is the standard library (`sqlite3`, `ctypes`,
     `subprocess`, `wave`, ...).
 - **CUDA runtime and nvJPEG DLLs:** found by `_load_cudart()` and
