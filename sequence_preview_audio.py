@@ -690,6 +690,24 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
     return out.tobytes()
 
 
+def mix_full_pcm(project_db, rows, fps, total_frames, vol_clips, track_order,
+                 cancel=None, stats=None, as_array=False):
+    # The mix of the whole sequence (mono 48 kHz s16le), for the preview's
+    # full mix and the render. With numpy: one range over the whole
+    # sequence on the range mix pool (_mix_ranges: ranged source reads,
+    # worker threads; same samples as _mix_pcm); without: _mix_pcm.
+    # Returns bytes, or the int16 array when as_array (numpy only). Writes
+    # no files and touches no preview job state, so any thread may call it.
+    n = _frame_to_sample(total_frames, fps)
+    if _HAS_NP and n > 0:
+        out = np.zeros(n, dtype="<i2")
+        _mix_ranges(project_db, rows, fps, n, vol_clips, track_order,
+                    [(0, n)], out, cancel=cancel, stats=stats)
+        return out if as_array else out.tobytes()
+    return _mix_pcm(project_db, rows, fps, total_frames, vol_clips, track_order,
+                    cancel=cancel, as_array=as_array and _HAS_NP)
+
+
 def _write_wav(path, pcm_bytes):
     # Mono 48 kHz 16-bit little-endian WAV
     tmp = path + ".tmp"
@@ -921,17 +939,9 @@ def _mix_worker(job):
                 pcm = None
         if pcm is None:
             job.read_stats = {}
-            n_full = _frame_to_sample(job.total_frames, job.fps)
-            if _HAS_NP and n_full > 0:
-                # full mix = one range over the whole sequence, on the
-                # range mix pool (same samples as _mix_pcm)
-                pcm = np.zeros(n_full, dtype="<i2")
-                _mix_ranges(job.project_db, rows, job.fps, n_full, vols, order,
-                            [(0, n_full)], pcm, cancel=job.cancel,
-                            stats=job.read_stats)
-            else:
-                pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames,
-                               vols, order, cancel=job.cancel, as_array=_HAS_NP)
+            pcm = mix_full_pcm(job.project_db, rows, job.fps, job.total_frames,
+                               vols, order, cancel=job.cancel,
+                               stats=job.read_stats, as_array=_HAS_NP)
             job.mode = "full"
         if job.cancel.is_set():
             raise MixCancelled()

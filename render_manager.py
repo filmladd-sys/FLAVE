@@ -349,16 +349,17 @@ def sequence_deint_proxies(project_db, sequence_id):
 
 
 def mix_mono_pcm(project_db, sequence_id, fps, total_frames):
-    # (pcm, has_audio): the preview mix for the whole range, fresh
+    # (pcm bytes, has_audio): the preview mix for the whole range, fresh
+    # (sequence_preview_audio.mix_full_pcm: the preview's full mix path)
     from sequence_preview_audio import (_load_mix_rows, _track_order,
-                                        _load_volume_clips, _mix_pcm)
+                                        _load_volume_clips, mix_full_pcm)
     rows = _load_mix_rows(project_db, sequence_id)
     has_audio = any(r.get("length_frames", 0) > 0 and r.get("basename") for r in rows)
     if not has_audio:
         return b"", False
     order = _track_order(project_db, sequence_id)
     vols = _load_volume_clips(project_db, sequence_id, order)
-    return _mix_pcm(project_db, rows, fps, total_frames, vols, order), True
+    return mix_full_pcm(project_db, rows, fps, total_frames, vols, order), True
 
 
 # ---------------------------------------------------------------- GPU frames
