@@ -192,6 +192,12 @@ class RulerHeader(QHeaderView):
             wx = int(left + (snap - start) * ppf)
             if rect.left() <= wx <= rect.right():
                 painter.fillRect(wx, rect.top(), 1, rect.height(), QColor(255, 255, 255))
+        # Shift+drag insert cut line (white, sequence_timeline_insert.py)
+        cut = getattr(tl, "_insert_frame", None)
+        if cut is not None:
+            wx = int(left + (cut - start) * ppf)
+            if rect.left() <= wx <= rect.right():
+                painter.fillRect(wx, rect.top(), 1, rect.height(), QColor(255, 255, 255))
         painter.restore()
 
     def _frame_at(self, x):
@@ -432,9 +438,12 @@ class PlayheadOverlay(QWidget):
             paint_rubber(tl, painter)
             painter.end()
         # Snap line (white) through every track while a drag snaps
-        snap = getattr(tl, "_snap_frame", None)
-        if snap is not None:
-            wx = int(left + (snap - tl.view_start_frame) * tl.pixels_per_frame)
+        # Snap line, and the Shift+drag insert cut line: white through
+        # every track
+        for line in (getattr(tl, "_snap_frame", None), getattr(tl, "_insert_frame", None)):
+            if line is None:
+                continue
+            wx = int(left + (line - tl.view_start_frame) * tl.pixels_per_frame)
             if left <= wx <= right and 0 <= wx < self.width():
                 painter = QPainter(self)
                 painter.fillRect(wx, 0, 1, self.height(), QColor(255, 255, 255))

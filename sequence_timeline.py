@@ -390,6 +390,7 @@ class SequenceTimeline(QMainWindow):
         self._edge_drag = None
         self._key_drag = None
         self._snap_frame = None   # white snap line frame, None = hidden
+        self._insert_frame = None   # Shift+drag insert cut line frame
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)

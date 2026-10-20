@@ -103,3 +103,53 @@ def insert_drop(tl, group):
         return
     tl._after_clip_change(
         f"Inserted at frame {at}: {len(cuts)} cut(s), later clips pushed {span} frames")
+
+
+# ---------------------------------------------------------------- cut line
+# While a move drag runs with Shift held, a white line through the ruler
+# and every track marks tl._insert_frame, the frame the drop will cut at
+# (painted in sequence_timeline_ruler.py next to the snap line). Pressing
+# or releasing Shift mid-drag is picked up by a short timer that re-runs
+# the drag at the last mouse position, so the line and the clip position
+# switch without moving the mouse.
+
+INSERT_WATCH_MS = 50
+
+
+def set_insert_frame(tl, frame):
+    # Cut line frame (None = hidden); repaint only when it changes
+    if getattr(tl, "_insert_frame", None) == frame:
+        return
+    tl._insert_frame = frame
+    try:
+        tl.ruler.viewport().update()
+        tl.playhead_overlay.update()
+    except Exception:
+        pass
+
+
+def insert_watch(tl, pos, active):
+    # Called by each move-drag step: remember the mouse and Shift state,
+    # keep the Shift watch timer running while the drag lasts
+    drag = tl._edge_drag
+    drag["last_pos"] = pos
+    drag["insert_state"] = active
+    timer = getattr(tl, "_insert_timer", None)
+    if timer is None:
+        from PySide6.QtCore import QTimer
+        timer = QTimer(tl)
+        timer.setInterval(INSERT_WATCH_MS)
+        timer.timeout.connect(lambda: _insert_tick(tl))
+        tl._insert_timer = timer
+    if not timer.isActive():
+        timer.start()
+
+
+def _insert_tick(tl):
+    drag = getattr(tl, "_edge_drag", None)
+    if drag is None or drag.get("edge") != "move":
+        tl._insert_timer.stop()
+        set_insert_frame(tl, None)
+        return
+    if insert_held() != drag.get("insert_state") and drag.get("last_pos") is not None:
+        tl._edge_drag_move(drag["last_pos"])

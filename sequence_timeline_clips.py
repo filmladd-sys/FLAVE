@@ -517,6 +517,8 @@ def _edge_drag_move(self, pos):
         if target is not None:
             # Track move only: start_frame stays at drag-start; mouse x
             # does not change time. Release, then drag again, for time.
+            from sequence_timeline_insert import set_insert_frame
+            set_insert_frame(self, None)
             self._cross_track_preview(drag, target)
             return
         if drag.get("target_track") is not None:
@@ -569,6 +571,12 @@ def _edge_drag_move(self, pos):
             c[7] = m["in"] + delta
         else:
             c[3] = m["length"] + delta
+    if edge == "move":
+        # Shift held: white cut line at the insert frame
+        from sequence_timeline_insert import insert_watch, set_insert_frame
+        active = insert_held()
+        set_insert_frame(self, min(m["clip"][2] for m in group) if active else None)
+        insert_watch(self, pos, active)
     self.table.viewport().update()
     self.status_bar.showMessage(f"Clip start {clip[2]}, length {clip[3]}")
 
@@ -780,6 +788,8 @@ def _move_drag_release(self):
     drag = self._edge_drag
     self._edge_drag = None
     self._set_snap_frame(None)
+    from sequence_timeline_insert import set_insert_frame
+    set_insert_frame(self, None)
     clip = drag["clip"]
     target = drag.get("target_track")
     if target is not None:
