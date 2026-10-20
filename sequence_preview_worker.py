@@ -320,13 +320,13 @@ class PreviewWorker(object):
                     # plan range holding this frame; the chunk stops at
                     # that range's end (the next chunk is the next range's)
                     limit = gpu_n
-                    for r0, r1, rn, rper, rstill, rkeep in plan:
+                    for r0, r1, rn, rper, rstill, rk, rheld in plan:
                         if r0 <= frame <= r1:
                             range_end = r1
                             # BUILD 189: pool fit to this range's safe N
                             if self._pool_fit != r0:
                                 self._pool_n = fit_refresh_pool(
-                                    project, sequence_id, rn, rper, rstill, rkeep)
+                                    project, sequence_id, rn, rper, rstill, rk, rheld)
                                 self._pool_fit = r0
                                 _vram_fatal_check("after reserve %d..%d" % (r0, r1))
                             limit = self._pool_n or 1

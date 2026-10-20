@@ -255,17 +255,28 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
         # f_closed = _free_mb()
         # before = set(self.decoders.keys())
-        pre = self._prefetch(frames, snapshot, clips)
-        # BUILD 183: the files (footage or proxy) this track decoded
-        files = ", ".join(sorted(set(k[1] for k in self.decoders if k[0] in clips)))
-        vram_fatal_check("track %s decode, frames %d..%d, files %s" % (
-            track_id, frames[0], frames[-1], files or "none"))
-        for k, fr in enumerate(frames):
-            self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
-                            clips=clips, clear=False)
-        _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
-        vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
-            track_id, frames[0], frames[-1], files or "none"))
+        # BUILD 193: the track's frames are pulled in pulls of _pull_k
+        # (plan: from the memory budget): a decoder's memory is sized by
+        # its largest pull, so open decoders hold _pull_k frames each, not
+        # N. Each pull is blended and synced before the next pull (the
+        # next pull hands the previous one's frames back to the decoder).
+        step = int(getattr(self, "_pull_k", 0) or 0) or len(frames)
+        for s0 in range(0, len(frames), step):
+            sub = frames[s0:s0 + step]
+            pre = self._prefetch(sub, snapshot, clips)
+            # BUILD 183: the files (footage or proxy) this track decoded
+            files = ", ".join(sorted(set(k[1] for k in self.decoders
+                                         if k[0] in clips)))
+            vram_fatal_check("track %s decode, frames %d..%d, files %s" % (
+                track_id, sub[0], sub[-1], files or "none"))
+            for k, fr in enumerate(sub):
+                self._build_dst(fr, dark, bufs[s0 + k], snapshot, False, pre,
+                                sync=False, clips=clips, clear=False)
+            _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
+            vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
+                track_id, sub[0], sub[-1], files or "none"))
+            pre.clear()
+            del pre
         # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
         # _refresh_trace.append(
         #     "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
@@ -273,8 +284,6 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         #         track_id, closed, f_closed,
         #         len(set(self.decoders.keys()) - before), len(pre),
         #         files or "none", _free_mb()))
-        pre.clear()
-        del pre
         # BUILD 188: release this layer's decode surfaces as soon as it is
         # blended (synced above): close its decoders (their N-frame output
         # pools) and free its stills, so no source-size frame outlives its
@@ -685,6 +694,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         gen._close_all_decoders()
         gen._refresh_hold = 0
         gen._keep_dec = False
+        gen._pull_k = 0
         _free_pool(gen, None)
     finally:
         _GEN_LOCK.release()
@@ -735,26 +745,38 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 per_all[it[6]] = cost
                 if cost > per:
                     per, big_path, big_size = cost, it[1], size
-        if fv is None:
+        # BUILD 193: every layer's decoders stay open for the range (no
+        # reopen and seek per batch) and pull k frames at a time, so the
+        # decode held is k x (sum of the layers' per-frame costs), not N x.
+        # One pull per layer per batch (k = N) when that fits; else N
+        # gets the budget left after pulls of at least STATES_MAX frames,
+        # and k gets whatever room N leaves (never above N).
+        sum_per = sum(per_all.values())
+        want = max(1, min(int(pool_n), b - a + 1))
+        room = (budget - still) if fv is not None else 0
+        k, held = 0, 0
+        if fv is None or room <= 0:
             n = 1
+        elif not sum_per:
+            n = max(1, min(want, int(room // pool_px)))
+        elif (pool_px + sum_per) * want <= room:
+            n = k = want
         else:
-            n = max(1, min(pool_n, int((budget - still) // (pool_px + per))))
-        # BUILD 192: a range longer than one batch keeps every layer's
-        # decoders open between its batches (no reopen and seek per
-        # batch). Then all layers' decode is held at once, so N is
-        # recomputed from the sum of their costs (the same budget and
-        # keep); a range done in one batch closes per layer as before.
-        keep_dec = fv is not None and b - a + 1 > n and len(per_all) > 0
-        if keep_dec:
-            per = sum(per_all.values())
-            n = max(1, min(pool_n, int((budget - still) // (pool_px + per))))
-        plan.append((a, b, n, per, still, keep_dec))
+            k0 = _NvJpegEncoder.STATES_MAX
+            n = int((room - k0 * sum_per) // pool_px)
+            if n < k0:
+                n = k = max(1, int(room // (pool_px + sum_per)))
+            else:
+                n = min(want, n)
+                k = max(k0, min(n, int((room - n * pool_px) // sum_per)))
+        held = k * sum_per
+        plan.append((a, b, n, 0 if k else per, still, k, held))
         print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
-              "%.1f MB/frame decode%s, stills %d MB" % (
+              "%d video layers %.1f MB/frame, pulls of %d frames (%d MB held), "
+              "stills %d MB" % (
                   a, b, n, ("%dx%d" % big_size) if big_size else "none",
-                  big_path or "", per / float(1 << 20),
-                  (" (%d layers, decoders kept open)" % len(per_all))
-                  if keep_dec else "", still >> 20))
+                  big_path or "", len(per_all), sum_per / float(1 << 20),
+                  k, held >> 20, still >> 20))
     return plan
 
 
@@ -800,7 +822,7 @@ def reserve_refresh_pool(project_path, sequence_id, n):
         _GEN_LOCK.release()
 
 
-def fit_refresh_pool(project_path, sequence_id, n, per, still, keep_dec=False):
+def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
     # BUILD 189: worker, at each plan range: hold a refresh pool of exactly
     # n (frees beyond n, reserves up to n). Then the free VRAM after the
     # reserve is checked: if n frames of decode (per bytes each) + still
@@ -810,17 +832,26 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, keep_dec=False):
     if gen is None:
         return 0
     # BUILD 192: a new range starts with no decoders open (the previous
-    # range's kept ones are not in this range's free VRAM math);
-    # keep_dec: this range keeps its decoders open between batches
+    # range's kept ones are not in this range's free VRAM math)
+    # BUILD 193: k > 0: decoders kept open, pulls of k frames, held =
+    # decode bytes they hold (k x the layers' summed per-frame cost); a
+    # smaller N also lowers k (k <= N) and held with it
+    k = int(k or 0)
+    unit_dec = (int(held) // k) if k else 0
     _GEN_LOCK.acquire()
     try:
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         gen._close_all_decoders()
-        gen._keep_dec = bool(keep_dec)
+        gen._keep_dec = k > 0
+        gen._pull_k = k
     finally:
         _GEN_LOCK.release()
     n = max(1, int(n))
     for _ in range(4):
+        if k:
+            k = min(k, n)
+            held = k * unit_dec
+            gen._pull_k = k
         if int(getattr(gen, "_refresh_hold", 0) or 0) != n:
             # BUILD 190: predict before reserving: buffers are exact
             # (row x height each); never grow into the margin
@@ -829,8 +860,12 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, keep_dec=False):
                 held = len(gen.gen_bufs)
                 room = fv[0] + held * int(gen.row) * int(gen.seq_h) - still \
                     - _refresh_keep(fv[1])
-                fit = max(1, int(room // (per + int(gen.row) * int(gen.seq_h))))
+                fit = max(1, int((room - held) // (per + int(gen.row) * int(gen.seq_h))))
                 n = min(n, fit)
+                if k and k > n:
+                    k = n
+                    held = k * unit_dec
+                    gen._pull_k = k
             _GEN_LOCK.acquire()
             try:
                 _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
@@ -844,16 +879,22 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, keep_dec=False):
         if fv is None:
             return n
         _vram_base[0] = fv[0]
-        short = _refresh_keep(fv[1]) - (fv[0] - n * per - still)
+        short = _refresh_keep(fv[1]) - (fv[0] - n * per - held - still)
         print("WORKER refresh pool: N %d reserved, free after %d of %d MB, "
-              "decode %d x %.1f MB + stills %d MB, keep %d MB%s" % (
+              "decode %d x %.1f MB + pulls of %d (%d MB) + stills %d MB, "
+              "keep %d MB%s" % (
                   n, fv[0] >> 20, fv[1] >> 20, n, per / float(1 << 20),
-                  still >> 20, _refresh_keep(fv[1]) >> 20,
+                  k, held >> 20, still >> 20, _refresh_keep(fv[1]) >> 20,
                   (", short %d MB" % (short >> 20)) if short > 0 else ""))
         if short <= 0 or n <= 1:
             return n
         unit = per + int(gen.row) * int(gen.seq_h)
         n = max(1, n - (short + unit - 1) // unit)
+        if k and k > n:
+            # BUILD 193: pulls never above N (frees decode with it)
+            k = n
+            held = k * unit_dec
+            gen._pull_k = k
     return n
 
 
@@ -873,6 +914,7 @@ def release_refresh_pool(project_path, sequence_id):
     try:
         gen._refresh_hold = 0
         gen._keep_dec = False
+        gen._pull_k = 0
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         _trim_gen(gen)
         # BUILD 179: decoders grown to N-frame output pools by the refresh
