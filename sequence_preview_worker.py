@@ -46,6 +46,10 @@ class PreviewWorker(object):
         # this pass. Plain attributes, read by the GUI status poll.
         self.progress = None
         self._done = 0
+        # BUILD 173: refresh pool (frames, (project, sequence_id)) reserved
+        # at the start of an explicit refresh, freed when it finishes
+        self._pool_n = 0
+        self._pool_key = None
         self._thread = threading.Thread(target=self._run, name="PreviewWorker",
                                         daemon=True)
         self._thread.start()
@@ -121,8 +125,21 @@ class PreviewWorker(object):
                     self._done_gen = gen
                     # BUILD 166: the explicit refresh pass is finished
                     _refresh_all[0] = 0
+                    pool = self._pool_key if self._pool_n else None
+                    self._pool_n = 0
+                    self._pool_key = None
                     # Idle: the timeline status clears (BUILD 129)
                     self.progress = None
+                else:
+                    pool = None
+            if pool is not None:
+                # BUILD 173: free the refresh pool (takes the GEN lock,
+                # outside the condition)
+                try:
+                    from sequence_player_preview import release_refresh_pool
+                    release_refresh_pool(pool[0], pool[1])
+                except Exception as e:
+                    print(f"Refresh pool release failed: {e}")
 
     def _pass(self, target, gen):
         from sequence_player import FrameGenerate
@@ -188,6 +205,25 @@ class PreviewWorker(object):
             gpu_low = gpu_n
             spg._worker_fast[0] = True
             sp._worker_burst[0] = True
+            # BUILD 173: N from one free-VRAM query at the start of the
+            # refresh; its buffers reserved once and kept for every card
+            # pass (a pass restarted by a retarget reuses the pool)
+            key = (project, sequence_id)
+            if self._pool_n and self._pool_key != key:
+                from sequence_player_preview import release_refresh_pool
+                release_refresh_pool(self._pool_key[0], self._pool_key[1])
+                self._pool_n = 0
+            from sequence_player_preview import refresh_pool_size
+            if self._pool_n and refresh_pool_size(project, sequence_id) != self._pool_n:
+                self._pool_n = 0        # composer replaced / released
+            if not self._pool_n:
+                n = refresh_batch_frames(project, sequence_id, snapshot,
+                                         gpu_low, REFRESH_GPU_MAX)
+                from sequence_player_preview import reserve_refresh_pool
+                self._pool_n = reserve_refresh_pool(project, sequence_id, n)
+                self._pool_key = key if self._pool_n else None
+                _log_refresh_pool(n, self._pool_n)
+            gpu_n = max(gpu_low, self._pool_n)
             burst_left = 1 << 30
             bursts = 1
             burst_t0 = time.perf_counter()
@@ -257,8 +293,6 @@ class PreviewWorker(object):
                 left_s = WORKER_BURST_SEC - (time.perf_counter() - burst_t0)
                 budget = REFRESH_PASS_SEC if fast else min(WORKER_PASS_SEC, left_s)
                 if fast:
-                    gpu_n = refresh_batch_frames(project, sequence_id, snapshot,
-                                                 gpu_low, REFRESH_GPU_MAX)
                     time_n = pass_frame_limit(sec_per_frame, budget)
                 limit = max(1, min(gpu_n, burst_left,
                                    pass_frame_limit(sec_per_frame, budget)))
@@ -368,17 +402,9 @@ def _log_refresh_batch(chunk, gpu_n, time_n, dt):
     try:
         from sequence_player_preview import _last_batch_info as info, free_vram
         after = free_vram()
-        if "n" in info:
-            vram = ("free %s of %s, margin %s (25%%), held %s, usable %s, "
-                    "per frame %.1f MB (buffer %.1f MB + %d video layers), "
-                    "vram fit %d -> N %d (%s, clamp %d..%d)" % (
-                        _mb(info["free"]), _mb(info["total"]), _mb(info["margin"]),
-                        _mb(info["held"]), _mb(info["usable"]),
-                        info["per"] / float(1 << 20), info["buf"] / float(1 << 20),
-                        info["layers"], info["raw"], info["n"], info["why"],
-                        info["low"], info["high"]))
-        else:
-            vram = "N %d (%s)" % (gpu_n, info.get("why", "?"))
+        # BUILD 173: N is the pool reserved at the refresh start (its
+        # VRAM numbers: the WORKER refresh pool line)
+        vram = "N %d (refresh pool)" % gpu_n
         print("WORKER refresh batch: %d frames %d..%d in %.0f ms (%.1f fps) | %s "
               "| time fit %d (%.1f s budget) | free after %s" % (
                   len(chunk), chunk[0], chunk[-1], dt * 1000.0,
@@ -386,6 +412,29 @@ def _log_refresh_batch(chunk, gpu_n, time_n, dt):
                   REFRESH_PASS_SEC, _mb(after[0]) if after else "?"))
     except Exception as e:
         print("WORKER refresh batch log failed: %s" % e)
+
+
+def _log_refresh_pool(n, got):
+    # BUILD 173: the one free-VRAM query of a refresh and its reserved pool
+    try:
+        from sequence_player_preview import _last_batch_info as info, free_vram
+        after = free_vram()
+        if "n" in info:
+            print("WORKER refresh pool: free %s of %s, margin %s (25%%), held %s, "
+                  "usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "
+                  "vram fit %d -> N %d (%s, clamp %d..%d) | reserved %d | free "
+                  "after reserve %s" % (
+                      _mb(info["free"]), _mb(info["total"]), _mb(info["margin"]),
+                      _mb(info["held"]), _mb(info["usable"]),
+                      info["per"] / float(1 << 20), info["buf"] / float(1 << 20),
+                      info["layers"], info["raw"], info["n"], info["why"],
+                      info["low"], info["high"], got,
+                      _mb(after[0]) if after else "?"))
+        else:
+            print("WORKER refresh pool: N %d (%s) | reserved %d" % (
+                n, info.get("why", "?"), got))
+    except Exception as e:
+        print("WORKER refresh pool log failed: %s" % e)
 
 
 def pass_frame_limit(sec_per_frame, budget=None):

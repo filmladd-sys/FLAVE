@@ -124,7 +124,10 @@ GEN_KEEP = 30
 
 
 def _trim_gen(self):
-    # Free composite buffers / nvJPEG states beyond GEN_KEEP (lock held)
+    # Free composite buffers / nvJPEG states beyond GEN_KEEP (lock held).
+    # BUILD 173: never while a refresh pool is reserved
+    if getattr(self, "_refresh_hold", 0):
+        return
     if len(self.gen_bufs) > GEN_KEEP:
         cudart = _libs()[0]
         for b in self.gen_bufs[GEN_KEEP:]:
@@ -394,6 +397,61 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
         print(f"Refresh batch size failed: {e}")
         _last_batch_info["why"] = "error"
         return low
+
+
+def reserve_refresh_pool(project_path, sequence_id, n):
+    # BUILD 173: worker, start of an explicit refresh: allocate the n
+    # composite buffers and n nvJPEG encoder states once; every card pass
+    # of the refresh reuses them (no trim) until release_refresh_pool.
+    # Returns n, or 0 when the composer is missing or allocation failed
+    # (whatever was allocated is freed again).
+    gen = _generator_for(project_path, sequence_id)
+    if gen is None or n <= 0:
+        return 0
+    _GEN_LOCK.acquire()
+    try:
+        _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+        gen._refresh_hold = int(n)
+        gen._gen_buffers(int(n))
+        lib = _nvjpeg_lib()
+        if lib is not None:
+            if gen.nvj is None:
+                gen.nvj = _NvJpegEncoder(lib, gen.stream)
+            gen.nvj.reserve(int(n))
+        return int(n)
+    except Exception as e:
+        print(f"Refresh pool reserve failed: {e}")
+        gen._refresh_hold = 0
+        try:
+            _trim_gen(gen)
+        except Exception:
+            pass
+        return 0
+    finally:
+        _GEN_LOCK.release()
+
+
+def refresh_pool_size(project_path, sequence_id):
+    # BUILD 173: frames the composer's refresh pool holds (0: none, e.g. the
+    # composer was replaced or released since the reserve)
+    gen = _generator_for(project_path, sequence_id)
+    return int(getattr(gen, "_refresh_hold", 0) or 0) if gen is not None else 0
+
+
+def release_refresh_pool(project_path, sequence_id):
+    # BUILD 173: end of the explicit refresh: free the pool beyond GEN_KEEP
+    gen = _generator_for(project_path, sequence_id)
+    if gen is None:
+        return
+    _GEN_LOCK.acquire()
+    try:
+        gen._refresh_hold = 0
+        _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+        _trim_gen(gen)
+    except Exception as e:
+        print(f"Refresh pool release failed: {e}")
+    finally:
+        _GEN_LOCK.release()
 
 
 def preview_jpeg_quality():

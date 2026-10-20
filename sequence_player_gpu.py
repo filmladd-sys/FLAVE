@@ -246,6 +246,14 @@ class _NvJpegEncoder(object):
         _check(cudart.cudaStreamSynchronize(self.stream), "nvjpeg sync")
         return [outs[k].raw[:lens[k].value] for k in range(len(srcs))]
 
+    def reserve(self, n):
+        # BUILD 173: create encoder states up to n (refresh pool)
+        while len(self.states) < n:
+            st = ctypes.c_void_p()
+            _check(self.lib.nvjpegEncoderStateCreate(self.handle, ctypes.byref(st),
+                                                     self.stream), "nvjpeg state")
+            self.states.append(st)
+
     def trim(self, keep):
         # BUILD 170: free encoder states beyond keep (after a big refresh)
         while len(self.states) > keep:
