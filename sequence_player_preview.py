@@ -566,6 +566,8 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
 # BUILD 184: device bytes per decoded frame per source pixel: the RGB
 # output frame a SimpleDecoder keeps (3) plus its NV12 decode surface (1.5)
 REFRESH_DECODE_BYTES_PX = 4.5
+# BUILD 185: per-chunk fit keeps REFRESH_VRAM_FATAL_MB + this free
+REFRESH_CHUNK_CUSHION_MB = 256
 _src_size = {}      # path -> (w, h) via ffprobe, or None
 
 
@@ -586,8 +588,8 @@ def refresh_chunk_frames(project_path, sequence_id, snapshot, frames,
     # the largest video source the chunk opens (proxy or original, its
     # real width x height): REFRESH_DECODE_BYTES_PX per pixel per frame.
     # Fit: free VRAM + what the open decoders already hold (closed or
-    # reused before the next layer decodes) - max(margin, the safety exit
-    # limit) - headroom. The composite buffers are the reserved pool (in
+    # reused before the next layer decodes) - the safety exit limit - a
+    # cushion (BUILD 185; margin / headroom unused here). The composite buffers are the reserved pool (in
     # use, so already out of free). At least 1.
     n = len(frames)
     gen = _generator_for(project_path, sequence_id)
@@ -617,7 +619,10 @@ def refresh_chunk_frames(project_path, sequence_id, snapshot, frames,
                 continue
             size = _source_size(key[1]) or (int(gen.seq_w), int(gen.seq_h))
             held += int(dec_frames[key] * size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
-        keep = max(int(margin * fv[1]), REFRESH_VRAM_FATAL_MB << 20) + int(headroom)
+        # BUILD 185: keep only the safety exit limit plus a cushion (was
+        # max(25% margin, limit) + 1 GB headroom: N 1 for a 4680x3120
+        # source with about 3.3 GB free)
+        keep = (REFRESH_VRAM_FATAL_MB + REFRESH_CHUNK_CUSHION_MB) << 20
         usable = fv[0] + held - keep
         k = max(1, min(n, int(usable // per) if usable > 0 else 1))
         print("WORKER refresh chunk: N %d of %d, frames %d..%d | largest source "
