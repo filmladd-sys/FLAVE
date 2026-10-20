@@ -12,6 +12,8 @@
 # frame (dirty or missing) is built only after an explicit refresh (F5 /
 # Refresh Preview, set_refresh_all) or while Play fills (set_play_priority).
 
+import os
+import sys
 import threading
 import time
 
@@ -230,6 +232,7 @@ class PreviewWorker(object):
                 self._pool_n = reserve_refresh_pool(project, sequence_id, n)
                 self._pool_key = key if self._pool_n else None
                 _log_refresh_pool(n, self._pool_n)
+                _vram_fatal_check("after reserve")
             gpu_n = max(gpu_low, self._pool_n)
             burst_left = 1 << 30
             bursts = 1
@@ -346,6 +349,7 @@ class PreviewWorker(object):
                 if fast and len(chunk) > 1:
                     _log_refresh_batch(chunk, gpu_n, dt)
                     _log_refresh_vram(project, sequence_id)
+                    _vram_fatal_check("after batch %d..%d" % (chunk[0], chunk[-1]))
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
                     0.5 * sec_per_frame + 0.5 * per)
@@ -419,6 +423,36 @@ def _log_refresh_batch(chunk, gpu_n, dt):
                   len(chunk) / dt if dt > 0 else 0.0, gpu_n))
     except Exception as e:
         print("WORKER refresh batch log failed: %s" % e)
+
+
+# BUILD 181: temporary hard guard: explicit refresh exits the program when
+# free VRAM falls under this (a bad allocation must not freeze the PC)
+REFRESH_VRAM_FATAL_MB = 1500
+
+
+def _vram_fatal_check(where):
+    # BUILD 181: free VRAM under REFRESH_VRAM_FATAL_MB: print the numbers
+    # and exit the process at once (os._exit: no cleanup that could touch
+    # the GPU again)
+    try:
+        from sequence_player_preview import free_vram
+        fv = free_vram()
+    except Exception:
+        fv = None
+    if fv is None or fv[0] >= (REFRESH_VRAM_FATAL_MB << 20):
+        return
+    base = _POOL_FREE[0]
+    print("ERROR: WORKER refresh VRAM critically low %s: free %s of %s "
+          "(limit %d MB), drift since reserve %s. Exiting FLAVE now." % (
+              where, _mb(fv[0]), _mb(fv[1]), REFRESH_VRAM_FATAL_MB,
+              ("%+.0f MB" % ((fv[0] - base) / float(1 << 20)))
+              if base is not None else "?"))
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(3)
 
 
 # BUILD 180: free VRAM right after the pool reserve (drift baseline)
