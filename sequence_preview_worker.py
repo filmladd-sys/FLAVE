@@ -355,7 +355,9 @@ class PreviewWorker(object):
                 hold_max = max(hold_max, dt)
                 if fast and len(chunk) > 1:
                     _log_refresh_batch(chunk, gpu_n, dt)
-                    _log_refresh_vram(project, sequence_id)
+                    # BUILD 187: per-batch VRAM line and soft guard silenced
+                    # (speed); the hard exit below stays
+                    # _log_refresh_vram(project, sequence_id)
                     _vram_fatal_check("after batch %d..%d" % (chunk[0], chunk[-1]))
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (

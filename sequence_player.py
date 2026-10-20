@@ -796,10 +796,11 @@ class SequencePlayer(QWindow):
             if getattr(self, "_refresh_hold", 0):
                 # BUILD 182: explicit refresh: hard VRAM exit check
                 # BUILD 183: full path (footage or proxy) logged at open
-                from sequence_player_preview import vram_fatal_check, free_vram
-                fv = free_vram()
-                print("WORKER refresh decoder open: %s | free %s of %s MB" % (
-                    path, (fv[0] >> 20) if fv else "?", (fv[1] >> 20) if fv else "?"))
+                from sequence_player_preview import vram_fatal_check
+                # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+                # fv = free_vram()
+                # print("WORKER refresh decoder open: %s | free %s of %s MB" % (
+                #     path, (fv[0] >> 20) if fv else "?", (fv[1] >> 20) if fv else "?"))
                 vram_fatal_check("after decoder open %s" % path)
         return dec
 

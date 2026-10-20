@@ -193,7 +193,8 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
         # BUILD 176: explicit refresh (pool reserved): one layer at a time
         _composite_by_layer(self, frames, snapshot, dark, bufs)
         out = sink(self, bufs)
-        _refresh_trace.append("encoded %d (free %d MB)" % (len(bufs), _free_mb()))
+        # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+        # _refresh_trace.append("encoded %d (free %d MB)" % (len(bufs), _free_mb()))
         return out
     # 1) decode
     pre = self._prefetch(frames, snapshot)
@@ -224,9 +225,10 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     # BUILD 180: _refresh_trace gets free VRAM at each step of the batch
     # (console: WORKER refresh vram)
     cudart = _libs()[0]
-    del _refresh_trace[:]
-    _refresh_trace.append("start free %d MB, decoders open %d" % (
-        _free_mb(), len(self.decoders)))
+    # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+    # del _refresh_trace[:]
+    # _refresh_trace.append("start free %d MB, decoders open %d" % (
+    #     _free_mb(), len(self.decoders)))
     for b in bufs:
         _check(cudart.cudaMemsetAsync(b, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
@@ -247,8 +249,9 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
             if key[0] not in clips:
                 self._close_decoder(key)
                 closed += 1
-        f_closed = _free_mb()
-        before = set(self.decoders.keys())
+        # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+        # f_closed = _free_mb()
+        # before = set(self.decoders.keys())
         pre = self._prefetch(frames, snapshot, clips)
         # BUILD 183: the files (footage or proxy) this track decoded
         files = ", ".join(sorted(set(k[1] for k in self.decoders if k[0] in clips)))
@@ -260,12 +263,13 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
         vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
             track_id, frames[0], frames[-1], files or "none"))
-        _refresh_trace.append(
-            "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
-            "batch-decoded from %s, blended (free %d MB)" % (
-                track_id, closed, f_closed,
-                len(set(self.decoders.keys()) - before), len(pre),
-                files or "none", _free_mb()))
+        # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+        # _refresh_trace.append(
+        #     "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
+        #     "batch-decoded from %s, blended (free %d MB)" % (
+        #         track_id, closed, f_closed,
+        #         len(set(self.decoders.keys()) - before), len(pre),
+        #         files or "none", _free_mb()))
         pre.clear()
         del pre
     freed = 0
@@ -275,8 +279,9 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
             if item is not None:
                 cudart.cudaFree(item[0])
             freed += 1
-    if freed:
-        _refresh_trace.append("stills freed %d (free %d MB)" % (freed, _free_mb()))
+    # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+    # if freed:
+    #     _refresh_trace.append("stills freed %d (free %d MB)" % (freed, _free_mb()))
 
 
 # BUILD 180: steps of the last refresh batch (free VRAM after each)
