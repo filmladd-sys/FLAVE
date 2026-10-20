@@ -356,7 +356,7 @@ def free_vram():
 
 
 def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
-                         margin=0.25):
+                         margin=0.25, headroom=0):
     # BUILD 170: worker, explicit refresh: frames per card pass from free
     # VRAM (cudaMemGetInfo), keeping margin x total VRAM free for other
     # programs. Estimated cost per frame: the RGB composite buffer, an
@@ -364,6 +364,7 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
     # one decoded surface (NV12 with room for a larger source: 3 x w x h).
     # Buffers / states this composer already holds are reused, so their
     # size counts as free. Clamped to low..high; low on any failure.
+    # BUILD 174: headroom bytes also kept free (NVDEC decode surfaces).
     _last_batch_info.clear()
     try:
         gen = _generator_for(project_path, sequence_id)
@@ -384,11 +385,12 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
         per = buf + max(1, layers) * 3 * w * h
         held = len(getattr(gen, "gen_bufs", [])) * buf
         margin_b = int(margin * total.value)
-        usable = free.value + held - margin_b
+        usable = free.value + held - margin_b - int(headroom)
         raw = int(usable // per) if usable > 0 else 0
         n = max(low, min(high, raw if raw > 0 else low))
         _last_batch_info.update(
             free=free.value, total=total.value, margin=margin_b, held=held,
+            headroom=int(headroom),
             usable=usable, per=per, buf=buf, layers=layers, raw=raw,
             low=low, high=high, n=n,
             why=("cap" if raw > high else "floor" if raw < low else "vram"))

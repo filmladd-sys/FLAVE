@@ -199,7 +199,7 @@ class PreviewWorker(object):
         # worker back), bigger card passes and fewer commits
         fast = bool(_refresh_all[0])
         if fast:
-            # BUILD 170: card pass size from free VRAM, re-read per chunk
+            # BUILD 170: card pass size from free VRAM (BUILD 173: once)
             from sequence_player_preview import refresh_batch_frames
             import sequence_player_gpu as spg
             gpu_low = gpu_n
@@ -218,7 +218,8 @@ class PreviewWorker(object):
                 self._pool_n = 0        # composer replaced / released
             if not self._pool_n:
                 n = refresh_batch_frames(project, sequence_id, snapshot,
-                                         gpu_low, REFRESH_GPU_MAX)
+                                         gpu_low, REFRESH_GPU_MAX,
+                                         headroom=REFRESH_NVDEC_HEADROOM)
                 from sequence_player_preview import reserve_refresh_pool
                 self._pool_n = reserve_refresh_pool(project, sequence_id, n)
                 self._pool_key = key if self._pool_n else None
@@ -291,11 +292,14 @@ class PreviewWorker(object):
                 chunk = [frame]
                 j = i + 1
                 left_s = WORKER_BURST_SEC - (time.perf_counter() - burst_t0)
-                budget = REFRESH_PASS_SEC if fast else min(WORKER_PASS_SEC, left_s)
                 if fast:
-                    time_n = pass_frame_limit(sec_per_frame, budget)
-                limit = max(1, min(gpu_n, burst_left,
-                                   pass_frame_limit(sec_per_frame, budget)))
+                    # BUILD 174: no time budget: every card pass is the
+                    # full reserved N (only the dirty run end cuts it)
+                    limit = gpu_n
+                else:
+                    budget = min(WORKER_PASS_SEC, left_s)
+                    limit = max(1, min(gpu_n, burst_left,
+                                       pass_frame_limit(sec_per_frame, budget)))
                 while (len(chunk) < limit and j < len(order)
                        and order[j] == chunk[-1] + 1 and order[j] not in clean):
                     chunk.append(order[j])
@@ -334,7 +338,7 @@ class PreviewWorker(object):
                 dt = time.perf_counter() - t_c
                 hold_max = max(hold_max, dt)
                 if fast and len(chunk) > 1:
-                    _log_refresh_batch(chunk, gpu_n, time_n, dt)
+                    _log_refresh_batch(chunk, gpu_n, dt)
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
                     0.5 * sec_per_frame + 0.5 * per)
@@ -379,13 +383,13 @@ class PreviewWorker(object):
 WORKER_BURST_SEC = 1.0
 WORKER_YIELD_SEC = 0.03
 WORKER_PASS_SEC = 0.25
-# BUILD 169: explicit refresh (F5 / Play on dirty) fast mode: card pass up
-# to REFRESH_PASS_SEC of work, one commit per REFRESH_BATCH_SECONDS of
-# frames. BUILD 170: frames per card pass from free VRAM
+# BUILD 169: explicit refresh (F5 / Play on dirty) fast mode: one commit
+# per REFRESH_BATCH_SECONDS of frames. BUILD 170: frames per card pass from free VRAM
 # (refresh_batch_frames), previewGpuBatchFrames .. REFRESH_GPU_MAX
-REFRESH_GPU_MAX = 120
-# BUILD 172: 1 s per card pass (was 5 s), so the window updates during it
-REFRESH_PASS_SEC = 1.0
+# BUILD 174: one fixed N per refresh, at most REFRESH_GPU_MAX, with
+# REFRESH_NVDEC_HEADROOM kept free beyond the margin for decode surfaces
+REFRESH_GPU_MAX = 90
+REFRESH_NVDEC_HEADROOM = 1 << 30
 REFRESH_GUI_STALL_SEC = 0.3
 REFRESH_BATCH_SECONDS = 10
 
@@ -394,22 +398,15 @@ def _mb(b):
     return "%.0f MB" % (float(b) / (1 << 20))
 
 
-def _log_refresh_batch(chunk, gpu_n, time_n, dt):
-    # BUILD 171: one console line per large refresh card pass: the chosen
-    # N and why (VRAM numbers from refresh_batch_frames), the frames this
-    # pass built (also limited by the time budget and the dirty run), and
-    # free VRAM after the pass
+def _log_refresh_batch(chunk, gpu_n, dt):
+    # BUILD 171: one console line per large refresh card pass. BUILD 174:
+    # frames built (N, or fewer at a dirty run end) against the fixed N of
+    # the refresh pool; no VRAM query per pass
     try:
-        from sequence_player_preview import _last_batch_info as info, free_vram
-        after = free_vram()
-        # BUILD 173: N is the pool reserved at the refresh start (its
-        # VRAM numbers: the WORKER refresh pool line)
-        vram = "N %d (refresh pool)" % gpu_n
-        print("WORKER refresh batch: %d frames %d..%d in %.0f ms (%.1f fps) | %s "
-              "| time fit %d (%.1f s budget) | free after %s" % (
+        print("WORKER refresh batch: %d frames %d..%d in %.0f ms (%.1f fps) | "
+              "N %d (refresh pool)" % (
                   len(chunk), chunk[0], chunk[-1], dt * 1000.0,
-                  len(chunk) / dt if dt > 0 else 0.0, vram, time_n,
-                  REFRESH_PASS_SEC, _mb(after[0]) if after else "?"))
+                  len(chunk) / dt if dt > 0 else 0.0, gpu_n))
     except Exception as e:
         print("WORKER refresh batch log failed: %s" % e)
 
@@ -420,11 +417,12 @@ def _log_refresh_pool(n, got):
         from sequence_player_preview import _last_batch_info as info, free_vram
         after = free_vram()
         if "n" in info:
-            print("WORKER refresh pool: free %s of %s, margin %s (25%%), held %s, "
-                  "usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "
+            print("WORKER refresh pool: free %s of %s, margin %s (25%%), "
+                  "NVDEC headroom %s, held %s, usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "
                   "vram fit %d -> N %d (%s, clamp %d..%d) | reserved %d | free "
                   "after reserve %s" % (
                       _mb(info["free"]), _mb(info["total"]), _mb(info["margin"]),
+                      _mb(info.get("headroom", 0)),
                       _mb(info["held"]), _mb(info["usable"]),
                       info["per"] / float(1 << 20), info["buf"] / float(1 << 20),
                       info["layers"], info["raw"], info["n"], info["why"],
