@@ -12,8 +12,6 @@
 # frame (dirty or missing) is built only after an explicit refresh (F5 /
 # Refresh Preview, set_refresh_all) or while Play fills (set_play_priority).
 
-import os
-import sys
 import threading
 import time
 
@@ -425,34 +423,12 @@ def _log_refresh_batch(chunk, gpu_n, dt):
         print("WORKER refresh batch log failed: %s" % e)
 
 
-# BUILD 181: temporary hard guard: explicit refresh exits the program when
-# free VRAM falls under this (a bad allocation must not freeze the PC)
-REFRESH_VRAM_FATAL_MB = 1500
-
-
 def _vram_fatal_check(where):
-    # BUILD 181: free VRAM under REFRESH_VRAM_FATAL_MB: print the numbers
-    # and exit the process at once (os._exit: no cleanup that could touch
-    # the GPU again)
-    try:
-        from sequence_player_preview import free_vram
-        fv = free_vram()
-    except Exception:
-        fv = None
-    if fv is None or fv[0] >= (REFRESH_VRAM_FATAL_MB << 20):
-        return
-    base = _POOL_FREE[0]
-    print("ERROR: WORKER refresh VRAM critically low %s: free %s of %s "
-          "(limit %d MB), drift since reserve %s. Exiting FLAVE now." % (
-              where, _mb(fv[0]), _mb(fv[1]), REFRESH_VRAM_FATAL_MB,
-              ("%+.0f MB" % ((fv[0] - base) / float(1 << 20)))
-              if base is not None else "?"))
-    try:
-        sys.stdout.flush()
-        sys.stderr.flush()
-    except Exception:
-        pass
-    os._exit(3)
+    # BUILD 181: temporary hard guard (free VRAM under 1500 MB exits the
+    # program). BUILD 182: moved to sequence_player_preview, also checked
+    # inside each batch; this is the after-reserve / after-batch call.
+    from sequence_player_preview import vram_fatal_check
+    vram_fatal_check(where)
 
 
 # BUILD 180: free VRAM right after the pool reserve (drift baseline)
@@ -492,6 +468,8 @@ def _log_refresh_pool(n, got):
         from sequence_player_preview import _last_batch_info as info, free_vram
         after = free_vram()
         _POOL_FREE[0] = after[0] if after else None
+        from sequence_player_preview import _vram_base
+        _vram_base[0] = _POOL_FREE[0]
         if "n" in info:
             print("WORKER refresh pool: free %s of %s, margin %s (25%%), "
                   "NVDEC headroom %s, held %s, usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "

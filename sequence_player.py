@@ -793,6 +793,10 @@ class SequencePlayer(QWindow):
             )
             self.decoders[key] = dec
             # print(f"DECODER open {key} total={len(self.decoders)}")
+            if getattr(self, "_refresh_hold", 0):
+                # BUILD 182: explicit refresh: hard VRAM exit check
+                from sequence_player_preview import vram_fatal_check
+                vram_fatal_check("after decoder open %s" % os.path.basename(path))
         return dec
 
     def _image(self, path):

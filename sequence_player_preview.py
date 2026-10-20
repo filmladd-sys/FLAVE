@@ -11,6 +11,7 @@
 
 import ctypes
 import os
+import sys
 import time
 
 from PySide6.QtCore import QBuffer, QIODevice
@@ -249,10 +250,14 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         f_closed = _free_mb()
         before = set(self.decoders.keys())
         pre = self._prefetch(frames, snapshot, clips)
+        vram_fatal_check("track %s decode, frames %d..%d" % (
+            track_id, frames[0], frames[-1]))
         for k, fr in enumerate(frames):
             self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
                             clips=clips, clear=False)
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
+        vram_fatal_check("track %s blend, frames %d..%d" % (
+            track_id, frames[0], frames[-1]))
         _refresh_trace.append(
             "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
             "batch-decoded, blended (free %d MB)" % (
@@ -273,6 +278,33 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
 
 # BUILD 180: steps of the last refresh batch (free VRAM after each)
 _refresh_trace = []
+
+# BUILD 181/182: temporary hard guard: explicit refresh exits the program
+# when free VRAM falls under this (a bad allocation must not freeze the
+# PC). BUILD 182: checked inside the batch (each decoder open, each
+# layer's decode and blend), not only at its end. _vram_base: free VRAM
+# after the pool reserve (drift in the message), set by the worker.
+REFRESH_VRAM_FATAL_MB = 1500
+_vram_base = [None]
+
+
+def vram_fatal_check(where):
+    # Free VRAM under REFRESH_VRAM_FATAL_MB: print the numbers and exit the
+    # process at once (os._exit: no cleanup that could touch the GPU again)
+    fv = free_vram()
+    if fv is None or fv[0] >= (REFRESH_VRAM_FATAL_MB << 20):
+        return
+    base = _vram_base[0]
+    print("ERROR: WORKER refresh VRAM critically low %s: free %d MB of %d MB "
+          "(limit %d MB), drift since reserve %s. Exiting FLAVE now." % (
+              where, fv[0] >> 20, fv[1] >> 20, REFRESH_VRAM_FATAL_MB,
+              ("%+d MB" % ((fv[0] - base) >> 20)) if base is not None else "?"))
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(3)
 
 
 def _free_mb():
