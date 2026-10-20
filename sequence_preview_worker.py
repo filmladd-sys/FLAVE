@@ -345,6 +345,7 @@ class PreviewWorker(object):
                 hold_max = max(hold_max, dt)
                 if fast and len(chunk) > 1:
                     _log_refresh_batch(chunk, gpu_n, dt)
+                    _log_refresh_vram(project, sequence_id)
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
                     0.5 * sec_per_frame + 0.5 * per)
@@ -420,11 +421,43 @@ def _log_refresh_batch(chunk, gpu_n, dt):
         print("WORKER refresh batch log failed: %s" % e)
 
 
+# BUILD 180: free VRAM right after the pool reserve (drift baseline)
+_POOL_FREE = [None]
+
+
+def _log_refresh_vram(project, sequence_id):
+    # BUILD 180: per refresh batch: free VRAM after each step of the batch,
+    # what FLAVE holds, and the drift from the free after reserve. If free
+    # VRAM fell below the 25% margin, every decoder is closed (the guard).
+    try:
+        from sequence_player_preview import (_refresh_trace, _generator_for,
+                                             refresh_owned, free_vram,
+                                             refresh_vram_guard)
+        fv = free_vram()
+        gen = _generator_for(project, sequence_id)
+        base = _POOL_FREE[0]
+        print("WORKER refresh vram: %s | holds %s | free now %s, drift since "
+              "reserve %s" % (
+                  "; ".join(_refresh_trace),
+                  refresh_owned(gen) if gen is not None else "?",
+                  _mb(fv[0]) if fv else "?",
+                  ("%+.0f MB" % ((fv[0] - base) / float(1 << 20)))
+                  if (fv and base is not None) else "?"))
+        if fv:
+            got = refresh_vram_guard(project, sequence_id, fv[1] // 4)
+            if got is not None:
+                print("WORKER refresh vram guard: free %d MB below margin, "
+                      "closed all decoders -> free %d MB" % got)
+    except Exception as e:
+        print("WORKER refresh vram log failed: %s" % e)
+
+
 def _log_refresh_pool(n, got):
     # BUILD 173: the one free-VRAM query of a refresh and its reserved pool
     try:
         from sequence_player_preview import _last_batch_info as info, free_vram
         after = free_vram()
+        _POOL_FREE[0] = after[0] if after else None
         if "n" in info:
             print("WORKER refresh pool: free %s of %s, margin %s (25%%), "
                   "NVDEC headroom %s, held %s, usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "

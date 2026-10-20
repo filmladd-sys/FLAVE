@@ -191,7 +191,9 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
     if getattr(self, "_refresh_hold", 0) and len(frames) > 1:
         # BUILD 176: explicit refresh (pool reserved): one layer at a time
         _composite_by_layer(self, frames, snapshot, dark, bufs)
-        return sink(self, bufs)
+        out = sink(self, bufs)
+        _refresh_trace.append("encoded %d (free %d MB)" % (len(bufs), _free_mb()))
+        return out
     # 1) decode
     pre = self._prefetch(frames, snapshot)
     # 2) composite all N on the card (prefetched blends are stream
@@ -218,7 +220,12 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     # at a time (was: up to DEC_MAX decoders, each with an N-frame pool,
     # building up as the refresh walked the sequence). Stills not in this
     # batch are freed after it (was: every still of the sequence kept).
+    # BUILD 180: _refresh_trace gets free VRAM at each step of the batch
+    # (console: WORKER refresh vram)
     cudart = _libs()[0]
+    del _refresh_trace[:]
+    _refresh_trace.append("start free %d MB, decoders open %d" % (
+        _free_mb(), len(self.decoders)))
     for b in bufs:
         _check(cudart.cudaMemsetAsync(b, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
@@ -234,21 +241,77 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         clips = set(c[0] for c in clips_by_track.get(track_id, [])) & used
         if not clips:
             continue
+        closed = 0
         for key in list(self.decoders.keys()):
             if key[0] not in clips:
                 self._close_decoder(key)
+                closed += 1
+        f_closed = _free_mb()
+        before = set(self.decoders.keys())
         pre = self._prefetch(frames, snapshot, clips)
         for k, fr in enumerate(frames):
             self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
                             clips=clips, clear=False)
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
+        _refresh_trace.append(
+            "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
+            "batch-decoded, blended (free %d MB)" % (
+                track_id, closed, f_closed,
+                len(set(self.decoders.keys()) - before), len(pre), _free_mb()))
         pre.clear()
         del pre
+    freed = 0
     for path in list(self.images.keys()):
         if path not in stills:
             item = self.images.pop(path)
             if item is not None:
                 cudart.cudaFree(item[0])
+            freed += 1
+    if freed:
+        _refresh_trace.append("stills freed %d (free %d MB)" % (freed, _free_mb()))
+
+
+# BUILD 180: steps of the last refresh batch (free VRAM after each)
+_refresh_trace = []
+
+
+def _free_mb():
+    fv = free_vram()
+    return (fv[0] >> 20) if fv else -1
+
+
+def refresh_owned(gen):
+    # BUILD 180: what FLAVE itself holds on the card for the refresh
+    # (composite buffers, nvJPEG encoder states, stills, open decoders)
+    imgs = [i for i in getattr(gen, "images", {}).values() if i is not None]
+    bufs = getattr(gen, "gen_bufs", [])
+    nvj = getattr(gen, "nvj", None)
+    return ("buffers %d (%d MB), nvJPEG states %d, stills %d (%d MB), "
+            "decoders open %d" % (
+                len(bufs), (len(bufs) * gen.row * gen.seq_h) >> 20,
+                len(nvj.states) if nvj is not None else 0, len(imgs),
+                sum(i[3] * i[2] for i in imgs) >> 20,
+                len(getattr(gen, "decoders", {}))))
+
+
+def refresh_vram_guard(project_path, sequence_id, floor):
+    # BUILD 180: after a refresh batch: free VRAM below floor bytes closes
+    # every decoder (their output pools are the only memory the refresh
+    # holds outside the reserved pool). Returns (free before, after) MB or
+    # None when nothing was done.
+    fv = free_vram()
+    if fv is None or fv[0] >= floor:
+        return None
+    gen = _generator_for(project_path, sequence_id)
+    if gen is None:
+        return None
+    _GEN_LOCK.acquire()
+    try:
+        _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+        gen._close_all_decoders()
+    finally:
+        _GEN_LOCK.release()
+    return fv[0] >> 20, _free_mb()
 
 
 def host_rgb(self, bufs):
@@ -474,6 +537,16 @@ def reserve_refresh_pool(project_path, sequence_id, n):
             if gen.nvj is None:
                 gen.nvj = _NvJpegEncoder(lib, gen.stream)
             gen.nvj.reserve(int(n))
+            # BUILD 180: nvJPEG allocates a state's device buffers at its
+            # first encode, not at create: encode the N cleared buffers
+            # once now, so that memory is taken (and counted in the free
+            # after reserve) here instead of growing during the first batch
+            bufs = gen.gen_bufs[:int(n)]
+            for b in bufs:
+                _check(_libs()[0].cudaMemsetAsync(b, 0, gen.row * gen.seq_h,
+                                                  gen.stream), "clear")
+            gen.nvj.encode_many(bufs, gen.seq_w, gen.seq_h, gen.row,
+                                preview_jpeg_quality())
         return int(n)
     except Exception as e:
         print(f"Refresh pool reserve failed: {e}")
