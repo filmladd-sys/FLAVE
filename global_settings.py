@@ -1,10 +1,11 @@
 # global_settings.py
-# Global Settings window for Ladd Video Editor
-# Current Project Folder and Dark Mode.
+# Global Settings window for Ladd Video Editor, and the global settings
+# store (globalsettings.db) that every module uses.
 # ASCII only.
 
 import os
 import sqlite3
+import threading
 from PySide6.QtWidgets import (
     QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton,
     QLineEdit, QCheckBox, QApplication, QComboBox
@@ -12,41 +13,93 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 
+# ---------------------------------------------------------- settings DB
+# The one global settings store of the app: a SQLite key-value table
+# (settings: key TEXT PRIMARY KEY, value TEXT) in globalsettings.db next
+# to the code files. Every module reads and writes it through
+# _get_global_setting / _set_global_setting here.
+# On the first use in a process the file is created if missing and every
+# key in GLOBAL_DEFAULTS that has no row yet gets its default (INSERT OR
+# IGNORE: existing values are never changed). The defaults are the same
+# fallback values the getters across the app use, so a fresh file gives
+# the same behavior as no row at all. Keys that only hold state (current
+# project, window geometry, open windows, ...) are not seeded: an absent
+# row reads as the caller's default ("").
+
+GLOBAL_DEFAULTS = (
+    ("dark_mode", "0"),
+    ("FootageManager_IconMaxWidthPx", "64"),
+    ("FootageManager_IconMaxHeightPx", "64"),
+    ("playercontrols_alignment", "left"),
+    ("SequencePlayer_TicCenterLengthPixels", "10"),
+    ("SequencePlayer_TicsOuterLengthPixels", "6"),
+    ("previewJPEG_quality", "90"),
+    ("previewFrameCap", "120"),
+    ("UndoStackMax", "50"),
+    ("Pixel Snap-To", "2"),
+    ("previewBatchSeconds", "1"),
+    ("previewGpuBatchFrames", "8"),
+    ("previewBurstFrames", "15"),
+    ("previewIdleMs", "250"),
+)
+
+_DB_LOCK = threading.Lock()
+_DB_READY = [None]      # path checked (schema + defaults) in this process
+
+
 def _global_db_path():
-    return r"P:\globalsettings.db"  # Fixed global settings location
+    # globalsettings.db in the folder that holds the code files
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "globalsettings.db")
 
 
 def _ensure_global_db():
+    # Create the file / settings table if missing and add any missing
+    # default (first call per process, or again if the file was removed).
+    # Returns the path.
     path = _global_db_path()
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+    if _DB_READY[0] == path and os.path.isfile(path):
+        return path
+    with _DB_LOCK:
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            conn.executemany("INSERT OR IGNORE INTO settings (key, value) "
+                             "VALUES (?, ?)", GLOBAL_DEFAULTS)
+            conn.commit()
+        finally:
+            conn.close()
+        _DB_READY[0] = path
     return path
 
 
 def _set_global_setting(key, value):
     _ensure_global_db()
     conn = sqlite3.connect(_global_db_path())
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                     (key, value))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _get_global_setting(key, default=None):
+    # Stored value, or default when the key has no row
     _ensure_global_db()
     conn = sqlite3.connect(_global_db_path())
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cur.fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?",
+                           (key,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.close()
     return row[0] if row else default
 
 
@@ -145,7 +198,7 @@ class GlobalSettingsWindow(QMainWindow):
         layout.addWidget(folder_label)
 
         self.folder_edit = QLineEdit()
-        self.folder_edit.setPlaceholderText("P:\\Projects")
+        self.folder_edit.setPlaceholderText("C:\\Videos\\Projects")
         layout.addWidget(self.folder_edit)
 
         self.dark_check = QCheckBox("Dark Mode")

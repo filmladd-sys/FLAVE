@@ -18,20 +18,8 @@ VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "m4v"}
 AUDIO_EXTS = {"mp3", "wav", "aac", "flac", "m4a", "ogg"}
 
 
-def _global_db_path():
-    return r"P:\globalsettings.db"  # Fixed global settings location
-
-
-def _get_global_setting(key, default=None):
-    path = _global_db_path()
-    if not os.path.exists(path):
-        return default
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else default
+# Global settings store (globalsettings.db): owned by global_settings.py
+from global_settings import _get_global_setting
 
 
 def _icon_limits():

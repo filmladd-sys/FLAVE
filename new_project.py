@@ -23,11 +23,11 @@ class NewProjectWindow(QMainWindow):
         central = QWidget()
         layout = QVBoxLayout(central)
 
-        label = QLabel("Full path to project file (example: P:\\Projects\\MyVideo.db):")
+        label = QLabel("Full path to project file (example: C:\\Videos\\Projects\\MyVideo.db):")
         layout.addWidget(label)
 
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("P:\\Projects\\MyVideo.db")
+        self.path_edit.setPlaceholderText("C:\\Videos\\Projects\\MyVideo.db")
         layout.addWidget(self.path_edit)
 
         create_btn = QPushButton("Create")

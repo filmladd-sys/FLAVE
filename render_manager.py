@@ -98,7 +98,7 @@ def default_output_name(sequence_name):
 
 def default_output_path(sequence_name, project_db):
     # BUILD 117: project folder + '<name>_v01.mp4', shown with forward
-    # slashes (P:/PythonVidTest/Sequence01_v01.mp4); Windows and ffmpeg
+    # slashes (C:/Videos/Projects/Sequence01_v01.mp4); Windows and ffmpeg
     # accept them. Bare name if there is no project path.
     name = default_output_name(sequence_name)
     if not project_db:

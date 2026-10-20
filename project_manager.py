@@ -59,42 +59,8 @@ except ImportError:
     SequenceManager = None
 
 
-def _global_db_path():
-    return r"P:\globalsettings.db"  # Fixed global settings location
-
-
-def _ensure_global_db():
-    path = _global_db_path()
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-    return path
-
-
-def _set_global_setting(key, value):
-    _ensure_global_db()
-    conn = sqlite3.connect(_global_db_path())
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-
-
-def _get_global_setting(key, default=None):
-    _ensure_global_db()
-    conn = sqlite3.connect(_global_db_path())
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else default
+# Global settings store (globalsettings.db): owned by global_settings.py
+from global_settings import _get_global_setting, _set_global_setting
 
 
 def _ensure_audiotmp_for(project_db):
@@ -507,7 +473,8 @@ class ProjectManager(QMainWindow):
 
 
 def print_build():
-    # Build counter written next to this script (Syncthing delivery check)
+    # Build number from counter.txt next to this script, printed at launch
+    # so the console shows which build is running
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "counter.txt")
     try:
         with open(path, "r") as f:

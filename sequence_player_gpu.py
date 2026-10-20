@@ -380,8 +380,8 @@ def _load_cudart():
 
 
 def _libs():
-    # Load cudart, nvcuda and opengl32 once, with the same signatures as
-    # VidTest_v02.py plus the few calls a still preview needs
+    # Load cudart, nvcuda and opengl32 once and set the ctypes signatures
+    # of every call the player, worker and render use
     global _LIBS
     if _LIBS is not None:
         return _LIBS

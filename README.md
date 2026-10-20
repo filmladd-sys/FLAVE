@@ -52,7 +52,7 @@ Project Manager exits the app.
 |---|---|
 | `project_manager.py` | Entry point and main window (File / Edit / Settings / Windows menus); restores open windows; prints the build number |
 | `new_project.py` | New Project dialog; `_init_db` creates the project SQLite schema |
-| `global_settings.py` | Global Settings window and the global settings DB; dark mode theme |
+| `global_settings.py` | Global Settings window; owns the global settings DB (`_get_global_setting` / `_set_global_setting`, defaults); dark mode theme |
 | `project_settings.py` | Per-project settings (project DB `settings` table) |
 | `footage_manager.py` | Footage Manager window (import, sort, replace, remove) |
 | `footage_manager_display.py` | Footage table rows and thumbnail icons |
@@ -96,7 +96,6 @@ whose functions take the timeline as `self` and are attached to the class)
 | `sequence_player_audio.py` | Plays the preview audio WAV; its position is the play clock |
 | `player_captions.py` | Caption overlay drawn with QPainter over the player picture |
 | `cuda_context.py` | The one shared CUDA primary context |
-| `VidTest_v02.py` | Original standalone GPU playback prototype (not imported by the app) |
 
 **Preview cache and worker**
 
@@ -127,10 +126,14 @@ whose functions take the timeline as `self` and are attached to the class)
   `<project>.audiotmp.db` (source PCM), `<project>.undo.db` (undo).
 - **Proxies:** in the project's `ProxyPath` setting folder (the project
   folder if unset).
-- **Global settings:** a SQLite `settings` key-value table in a fixed file,
-  `P:\globalsettings.db` (see leftovers). Keys include `current_project`,
-  `dark_mode`, `previewFrameCap`, `previewJPEG_quality`,
-  `previewBatchSeconds`, window geometry and open windows.
+- **Global settings:** a SQLite `settings` key-value table in
+  `globalsettings.db`, in the same folder as the code files (ignored by
+  git). `global_settings.py` owns it; every other module imports its
+  `_get_global_setting` / `_set_global_setting`. On first launch the file
+  is created and seeded from `GLOBAL_DEFAULTS` (dark mode off, Preview
+  Frame Cap 120, JPEG quality 90, ...); existing values are never
+  overwritten. State keys such as `current_project`, window geometry and
+  open windows are written as the app runs.
 
 ### 3. Architecture in brief
 
@@ -241,21 +244,6 @@ Useful console prefixes:
 
 ### 6. Known leftovers / good first tasks
 
-- **Hardcoded global settings path:** `P:\globalsettings.db` is returned
-  by a copy of `_global_db_path()` in `global_settings.py`,
-  `project_manager.py`, `project_settings.py`, `footage_manager.py`,
-  `footage_manager_display.py`, `sequence_manager.py`, `sequence_add.py`
-  and `sequence_timeline_sql.py`. Most machines have no `P:` drive, so
-  this is the first thing to change (one shared helper, e.g. a folder
-  under `%APPDATA%`). `_get_global_setting` is duplicated the same way.
-- **`P:\` examples:** the New Project and Global Settings windows show
-  `P:\Projects...` placeholder text.
-- **`VidTest_v02.py`** hardcodes `P:\PythonVidTest\...` media paths; it
-  is a prototype, not part of the app.
-- **`Test10.db`** is a sample project committed despite `*.db` in
-  `.gitignore`. Its footage and ProxyPath point at `P:/PythonVidTest/...`
-  files that are not in the repo, so it will not open cleanly elsewhere.
-- **`connector_test.txt`** is a stray one-line test file.
 - **CUDA device 0** is hardcoded (`ensure_cuda(0)`, `gpu_id=0`).
 - `REFRESH_NVDEC_HEADROOM` in `sequence_preview_worker.py` is unused.
 - `_POOL_FREE` / `_log_refresh_vram` in `sequence_preview_worker.py` are
@@ -263,5 +251,8 @@ Useful console prefixes:
 - Three commented-out trace lines remain in `SequencePlayer._decoder`
   (`sequence_player.py`), and other files have commented-out timing
   prints.
-- The `print_build()` comment in `project_manager.py` and the header of
-  `sequence_preview_gpu.py` still carry old history notes.
+- The header of `sequence_preview_gpu.py` still carries old history
+  notes.
+- When adding a global setting with a default, add it to
+  `GLOBAL_DEFAULTS` in `global_settings.py` with the same value the
+  getters fall back to.

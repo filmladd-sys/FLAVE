@@ -48,37 +48,8 @@ TRACK_FOOTAGE_EXTENSIONS = {
 }
 
 
-def _global_db_path():
-    return r"P:\globalsettings.db"  # Fixed global settings location
-
-
-def _get_global_setting(key, default=None):
-    path = _global_db_path()
-    if not os.path.exists(path):
-        return default
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = cur.fetchone()
-    except sqlite3.OperationalError:
-        row = None
-    conn.close()
-    return row[0] if row else default
-
-
-def _set_global_setting(key, value):
-    conn = sqlite3.connect(_global_db_path())
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
+# Global settings store (globalsettings.db): owned by global_settings.py
+from global_settings import _global_db_path, _get_global_setting, _set_global_setting
 
 
 def _read_open_ids():

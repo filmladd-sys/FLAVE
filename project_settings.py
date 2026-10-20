@@ -14,24 +14,16 @@ from PySide6.QtWidgets import (
 from proxy_manager import PROXY_PATH_KEY, get_proxy_path
 
 
-def _global_db_path():
-    return r"P:\globalsettings.db"  # Fixed global settings location
+# Global settings store (globalsettings.db): owned by global_settings.py
+from global_settings import _get_global_setting
 
 
 def _current_project_from_global():
-    path = _global_db_path()
-    if not os.path.exists(path):
-        return ""
+    # current_project from the global settings, "" if unset or unreadable
     try:
-        conn = sqlite3.connect(path)
-        try:
-            row = conn.execute("SELECT value FROM settings WHERE key = ?",
-                               ("current_project",)).fetchone()
-        finally:
-            conn.close()
+        return _get_global_setting("current_project", "") or ""
     except Exception:
         return ""
-    return row[0] if row and row[0] else ""
 
 
 def save_proxy_path(project_db, value):

@@ -113,37 +113,8 @@ except ImportError:
     get_display_rows = None
 
 
-def _global_db_path():
-    return r"P:\globalsettings.db"  # Fixed global settings location
-
-
-def _get_global_setting(key, default=None):
-    import sqlite3
-    path = _global_db_path()
-    if not os.path.exists(path):
-        return default
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else default
-
-
-def _set_global_setting(key, value):
-    import sqlite3
-    path = _global_db_path()
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
+# Global settings store (globalsettings.db): owned by global_settings.py
+from global_settings import _get_global_setting, _set_global_setting
 
 
 class FootageManager(QMainWindow):

@@ -4,7 +4,7 @@
 # The picture is the preview JPEG for that frame. A miss asks the preview
 # worker to build it. The player does not decode. ASCII only.
 #
-# GPU path follows VidTest_v02.py: cudaGLSetGLDevice on the GL context,
+# GPU path: cudaGLSetGLDevice on the GL context,
 # PyNvVideoCodec SimpleDecoder in device memory (RGB), a PTX kernel that
 # scales a layer to the sequence buffer and blends it, then
 # cudaMemcpy2DToArray into a registered GL texture and a textured quad.
@@ -487,7 +487,7 @@ class SequencePlayer(QWindow):
         if sid is not None and not sequence_timeline.app_quitting:
             _remove_open_player_id(sid)
 
-    # ---- GPU setup, as in VidTest_v02.py
+    # ---- GPU setup
 
     def _setup(self):
         cudart, nvcuda, gl = _libs()

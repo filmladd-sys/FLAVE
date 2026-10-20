@@ -9,7 +9,7 @@ import threading
 
 
 def preview_db_path(project_path, sequence_id):
-    # P:\SomeFolder\test7.db + sequence 3 -> P:\SomeFolder\3_preview.db
+    # C:\Videos\test7.db + sequence 3 -> C:\Videos\3_preview.db
     folder = os.path.dirname(os.path.abspath(project_path))
     return os.path.join(folder, "%d_preview.db" % int(sequence_id))
 
