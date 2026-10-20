@@ -68,7 +68,7 @@ Project Manager exits the app.
 | `sequence_add.py` | Add Sequence dialog |
 | `undo.py` | Snapshot undo / redo in `<project>.undo.db` |
 | `window_snapshot.py` | Camera button over each window's title bar; saves a PNG of that window |
-| `flave_capture.py` | FLAVE Capture: standalone screen recorder (Windows, run on its own); one FFmpeg gdigrab MP4 per monitor at native size, h264_nvenc, no audio; settings in `flave_capture.json` |
+| `flave_capture.py` | FLAVE Capture: standalone screen recorder (Windows, run on its own); one FFmpeg ddagrab MP4 per monitor at native size, h264_nvenc, no audio; settings in `flave_capture.json` |
 | `dark_titlebar.py` | Dark title bars on Windows in dark mode |
 
 **Sequence Timeline** (`sequence_timeline.py` is the window, mouse

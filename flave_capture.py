@@ -4,17 +4,18 @@
 #
 # One small window: output folder, FPS, and a Start / Stop button (enabled
 # only when the folder exists and FPS is a positive number). Start launches
-# one FFmpeg gdigrab process per monitor at that monitor's native pixel
-# size, video only (no audio), encoded on the GPU with NVIDIA NVENC
+# one FFmpeg ddagrab (Desktop Duplication API) process per monitor at that
+# monitor's native pixel size, video only (no audio). Frames stay on the
+# GPU (D3D11) from capture into NVIDIA NVENC
 # (h264_nvenc, fastest preset p1, low-latency tune), one file each:
 #   Monitor<N>_<W>x<H>_YYYYMMDD_HHMMSS.mp4
 # Stop sends "q" to every FFmpeg so each MP4 is finalized, then kills any
 # that do not exit in time. The last folder and FPS are kept in
 # flave_capture.json next to this script.
 #
-# Needs an NVIDIA GPU and an FFmpeg build with h264_nvenc (FFmpeg 4.4+ for
-# the p1..p7 presets); if NVENC is missing FFmpeg exits and the title bar
-# says it failed.
+# Needs Windows 8+, an NVIDIA GPU and an FFmpeg build with ddagrab (5.1+)
+# and h264_nvenc; if either is missing FFmpeg exits and the title bar says
+# it failed. ddagrab only sees the outputs of the first GPU adapter.
 # Kept light so FLAVE can run in the foreground: FFmpeg runs at below
 # normal priority with no console window, its output goes nowhere, and the
 # window polls the processes once a second only while recording.
@@ -70,7 +71,7 @@ def parse_fps(text):
 
 
 def win32_monitors():
-    # [(x, y, w, h)] in physical desktop pixels (the space gdigrab uses),
+    # [(x, y, w, h)] in physical desktop pixels (fallback for monitors()),
     # primary first; [] when not on Windows or the call fails
     if sys.platform != "win32":
         return []
@@ -121,20 +122,82 @@ def qt_monitors():
     return out
 
 
+def dxgi_outputs():
+    # [(output_idx, w, h)] for the outputs of DXGI adapter 0, in the order
+    # ddagrab's output_idx uses; [] when not on Windows or DXGI fails.
+    # Plain COM through vtable slots: IDXGIFactory1::EnumAdapters1 = 12,
+    # IDXGIAdapter::EnumOutputs = 7, IDXGIOutput::GetDesc = 7, Release = 2.
+    if sys.platform != "win32":
+        return []
+    from ctypes import wintypes
+    win32_monitors()           # sets per-monitor DPI awareness first
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_uint16),
+                    ("d3", ctypes.c_uint16), ("d4", ctypes.c_ubyte * 8)]
+
+    class OUTPUT_DESC(ctypes.Structure):
+        _fields_ = [("DeviceName", ctypes.c_wchar * 32),
+                    ("DesktopCoordinates", wintypes.RECT),
+                    ("AttachedToDesktop", wintypes.BOOL),
+                    ("Rotation", ctypes.c_int), ("Monitor", wintypes.HMONITOR)]
+
+    def call(obj, slot, *args):
+        # args: ctypes.c_uint values or byref() pointers (passed as void *)
+        vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        types = [ctypes.c_uint if isinstance(a, ctypes.c_uint) else ctypes.c_void_p
+                 for a in args]
+        fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *types)(vtbl[slot])
+        return fn(obj, *args)
+
+    # IID_IDXGIFactory1 {770aae78-f26f-4dba-a829-253c83d1b387}
+    iid = GUID(0x770aae78, 0xf26f, 0x4dba,
+               (ctypes.c_ubyte * 8)(0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87))
+    out = []
+    factory = ctypes.c_void_p()
+    adapter = ctypes.c_void_p()
+    try:
+        dxgi = ctypes.windll.dxgi
+        if dxgi.CreateDXGIFactory1(ctypes.byref(iid), ctypes.byref(factory)) != 0:
+            return []
+        if call(factory, 12, ctypes.c_uint(0), ctypes.byref(adapter)) != 0:
+            return []
+        i = 0
+        while True:
+            output = ctypes.c_void_p()
+            if call(adapter, 7, ctypes.c_uint(i), ctypes.byref(output)) != 0:
+                break              # DXGI_ERROR_NOT_FOUND: no more outputs
+            desc = OUTPUT_DESC()
+            if call(output, 7, ctypes.byref(desc)) == 0 and desc.AttachedToDesktop:
+                r = desc.DesktopCoordinates
+                out.append((i, r.right - r.left, r.bottom - r.top))
+            call(output, 2)
+            i += 1
+    except Exception:
+        return []
+    finally:
+        if adapter:
+            call(adapter, 2)
+        if factory:
+            call(factory, 2)
+    return out
+
+
 def monitors():
-    return win32_monitors() or qt_monitors()
+    # [(ddagrab output_idx, w, h)]; without DXGI, a guess in Win32 order
+    return dxgi_outputs() or [
+        (i, w, h) for i, (_x, _y, w, h) in enumerate(win32_monitors() or qt_monitors())]
 
 
-def capture_cmd(x, y, w, h, fps, out_path):
-    # gdigrab of one desktop rect -> h264_nvenc (constant quality 23, no
-    # bitrate cap); crop keeps yuv420p sizes even
+def capture_cmd(output_idx, fps, out_path):
+    # ddagrab of one whole output (native size) -> h264_nvenc (constant
+    # quality 23, no bitrate cap). The D3D11 frames go straight into NVENC,
+    # so there is no CPU-side scale or pixel format filter.
+    src = "ddagrab=output_idx=%d:framerate=%g:draw_mouse=1" % (output_idx, fps)
     return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-            "-f", "gdigrab", "-framerate", "%g" % fps, "-draw_mouse", "1",
-            "-offset_x", str(x), "-offset_y", str(y),
-            "-video_size", "%dx%d" % (w, h), "-i", "desktop",
-            "-an", "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-f", "lavfi", "-i", src, "-an",
             "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-            "-rc", "vbr", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "-rc", "vbr", "-cq", "23", "-b:v", "0",
             "-y", out_path]
 
 
@@ -186,11 +249,11 @@ class CaptureWindow(QWidget):
         fps = parse_fps(self.fps_edit.text())
         save_settings(folder, self.fps_edit.text().strip())
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        for i, (x, y, w, h) in enumerate(monitors(), 1):
-            name = "Monitor%d_%dx%d_%s.mp4" % (i, w, h, stamp)
+        for idx, w, h in monitors():
+            name = "Monitor%d_%dx%d_%s.mp4" % (idx + 1, w, h, stamp)
             try:
                 p = subprocess.Popen(
-                    capture_cmd(x, y, w, h, fps, os.path.join(folder, name)),
+                    capture_cmd(idx, fps, os.path.join(folder, name)),
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=BELOW_NORMAL | NO_WINDOW)
