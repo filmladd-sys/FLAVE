@@ -204,7 +204,6 @@ class PreviewWorker(object):
         fast = bool(_refresh_all[0])
         if fast:
             # BUILD 170: card pass size from free VRAM (BUILD 173: once)
-            from sequence_player_preview import refresh_batch_frames
             import sequence_player_gpu as spg
             # BUILD 177: N cap from the Preview Frame Cap setting
             cap = _setting_int("previewFrameCap", REFRESH_GPU_MAX, 1, 10000)
@@ -219,22 +218,16 @@ class PreviewWorker(object):
                 from sequence_player_preview import release_refresh_pool
                 release_refresh_pool(self._pool_key[0], self._pool_key[1])
                 self._pool_n = 0
-            from sequence_player_preview import refresh_pool_size
-            if self._pool_n and refresh_pool_size(project, sequence_id) != self._pool_n:
-                self._pool_n = 0        # composer replaced / released
-            if not self._pool_n:
-                n = refresh_batch_frames(project, sequence_id, snapshot,
-                                         gpu_low, cap,
-                                         headroom=REFRESH_NVDEC_HEADROOM)
-                from sequence_player_preview import reserve_refresh_pool
-                self._pool_n = reserve_refresh_pool(project, sequence_id, n)
-                self._pool_key = key if self._pool_n else None
-                _log_refresh_pool(n, self._pool_n)
-                _vram_fatal_check("after reserve")
-            gpu_n = max(gpu_low, self._pool_n)
+            # BUILD 189: no up-front reserve: the plan frees the pool,
+            # computes each range's safe N (Preview Frame Cap only lowers
+            # it) and the pool is fit per range in the chunk loop
+            gpu_n = gpu_low
             # BUILD 186: edit decision list: per-range N for this pass
-            from sequence_player_preview import refresh_plan
-            plan = refresh_plan(project, sequence_id, snapshot, total, gpu_n)
+            from sequence_player_preview import refresh_plan, fit_refresh_pool
+            plan = refresh_plan(project, sequence_id, snapshot, total, cap)
+            self._pool_n = 0
+            self._pool_key = key
+            self._pool_fit = None
             burst_left = 1 << 30
             bursts = 1
             burst_t0 = time.perf_counter()
@@ -308,9 +301,16 @@ class PreviewWorker(object):
                     # plan range holding this frame; the chunk stops at
                     # that range's end (the next chunk is the next range's)
                     limit = gpu_n
-                    for r0, r1, rn in plan:
+                    for r0, r1, rn, rper, rstill in plan:
                         if r0 <= frame <= r1:
-                            limit, range_end = rn, r1
+                            range_end = r1
+                            # BUILD 189: pool fit to this range's safe N
+                            if self._pool_fit != r0:
+                                self._pool_n = fit_refresh_pool(
+                                    project, sequence_id, rn, rper, rstill)
+                                self._pool_fit = r0
+                                _vram_fatal_check("after reserve %d..%d" % (r0, r1))
+                            limit = self._pool_n or 1
                             break
                 else:
                     budget = min(WORKER_PASS_SEC, left_s)
@@ -354,7 +354,7 @@ class PreviewWorker(object):
                 dt = time.perf_counter() - t_c
                 hold_max = max(hold_max, dt)
                 if fast and len(chunk) > 1:
-                    _log_refresh_batch(chunk, gpu_n, dt)
+                    _log_refresh_batch(chunk, self._pool_n, dt)
                     # BUILD 187: per-batch VRAM line and soft guard silenced
                     # (speed); the hard exit below stays
                     # _log_refresh_vram(project, sequence_id)

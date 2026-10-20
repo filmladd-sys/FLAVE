@@ -599,6 +599,30 @@ def _source_size(path):
     return _src_size[path]
 
 
+# BUILD 189: per-range safe cap: free VRAM kept is max(this x total,
+# REFRESH_VRAM_FATAL_MB) + REFRESH_CHUNK_CUSHION_MB; per frame of a range:
+# one composite buffer + one nvJPEG state (estimated REFRESH_STATE_BYTES_PX
+# per sequence pixel, measured after each reserve) + its decode cost
+REFRESH_VRAM_MARGIN = 0.25
+REFRESH_STATE_BYTES_PX = 2
+
+
+def _refresh_keep(total_b):
+    return (max(int(REFRESH_VRAM_MARGIN * total_b), REFRESH_VRAM_FATAL_MB << 20)
+            + (REFRESH_CHUNK_CUSHION_MB << 20))
+
+
+def _free_pool(gen, n):
+    # BUILD 189: (lock held) free composite buffers / nvJPEG states beyond n
+    cudart = _libs()[0]
+    for b in gen.gen_bufs[n:]:
+        if b.value:
+            cudart.cudaFree(b)
+    del gen.gen_bufs[n:]
+    if gen.nvj is not None:
+        gen.nvj.trim(n)
+
+
 def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     # BUILD 186: worker, explicit refresh, once per pass before any chunk:
     # an edit decision list of the sequence. Ranges are cut at every clip
@@ -613,6 +637,13 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     # N = budget / per frame, 1..pool_n; a range with no video gets pool_n.
     # Chunks never cross a range end (the worker cuts them), so no chunk
     # mixes two ranges' sources. Returns [(start, end, n)], end inclusive.
+    # BUILD 189: the cap is per range. The refresh pool is freed first
+    # (no buffers, states or decoders held), then per range N = the most
+    # frames whose composite buffers + nvJPEG states + decode surfaces fit
+    # in free VRAM - _refresh_keep (25% margin, never under the 1500 MB
+    # floor, plus the cushion); pool_n (Preview Frame Cap) only lowers it.
+    # Returns [(start, end, n, decode bytes/frame, still bytes)]; the
+    # worker reserves the pool per range (fit_refresh_pool).
     gen = _generator_for(project_path, sequence_id)
     if gen is None or total <= 0:
         return []
@@ -620,11 +651,15 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     try:
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         gen._close_all_decoders()
+        gen._refresh_hold = 0
+        _free_pool(gen, 0)
     finally:
         _GEN_LOCK.release()
     fv = free_vram()
-    keep = (REFRESH_VRAM_FATAL_MB + REFRESH_CHUNK_CUSHION_MB) << 20
+    keep = _refresh_keep(fv[1]) if fv else 0
     budget = (fv[0] - keep) if fv else 0
+    pool_px = int(gen.row) * int(gen.seq_h) + int(
+        REFRESH_STATE_BYTES_PX * int(gen.seq_w) * int(gen.seq_h))
     cuts = set([0, int(total)])
     for clips in snapshot[1].values():
         for clip in clips:
@@ -641,8 +676,11 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         else:
             ranges.append([a, b - 1, sig, items])
     plan = []
-    print("WORKER refresh plan: %d ranges, free %s MB, keep %d MB, pool N %d" % (
-        len(ranges), (fv[0] >> 20) if fv else "?", keep >> 20, pool_n))
+    print("WORKER refresh plan: %d ranges, free %s of %s MB, keep %d MB, "
+          "pool %.1f MB/frame, Preview Frame Cap %d" % (
+              len(ranges), (fv[0] >> 20) if fv else "?",
+              (fv[1] >> 20) if fv else "?", keep >> 20,
+              pool_px / float(1 << 20), pool_n))
     for a, b, _sig, items in ranges:
         per, still, big_path, big_size = 0, 0, None, None
         for it in items:
@@ -653,13 +691,11 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 cost = int(size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
                 if cost > per:
                     per, big_path, big_size = cost, it[1], size
-        if per <= 0:
-            n = pool_n
-        elif fv is None:
+        if fv is None:
             n = 1
         else:
-            n = max(1, min(pool_n, int((budget - still) // per)))
-        plan.append((a, b, n))
+            n = max(1, min(pool_n, int((budget - still) // (pool_px + per))))
+        plan.append((a, b, n, per, still))
         print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
               "%.1f MB/frame decode, stills %d MB" % (
                   a, b, n, ("%dx%d" % big_size) if big_size else "none",
@@ -707,6 +743,44 @@ def reserve_refresh_pool(project_path, sequence_id, n):
         return 0
     finally:
         _GEN_LOCK.release()
+
+
+def fit_refresh_pool(project_path, sequence_id, n, per, still):
+    # BUILD 189: worker, at each plan range: hold a refresh pool of exactly
+    # n (frees beyond n, reserves up to n). Then the free VRAM after the
+    # reserve is checked: if n frames of decode (per bytes each) + still
+    # would leave less than _refresh_keep free, n is lowered by the real
+    # measured shortfall and the pool refit. Returns the n held (0: none).
+    gen = _generator_for(project_path, sequence_id)
+    if gen is None:
+        return 0
+    n = max(1, int(n))
+    for _ in range(4):
+        if int(getattr(gen, "_refresh_hold", 0) or 0) != n:
+            _GEN_LOCK.acquire()
+            try:
+                _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+                gen._refresh_hold = 0
+                _free_pool(gen, n)
+            finally:
+                _GEN_LOCK.release()
+            if reserve_refresh_pool(project_path, sequence_id, n) != n:
+                return 0
+        fv = free_vram()
+        if fv is None:
+            return n
+        _vram_base[0] = fv[0]
+        short = _refresh_keep(fv[1]) - (fv[0] - n * per - still)
+        print("WORKER refresh pool: N %d reserved, free after %d of %d MB, "
+              "decode %d x %.1f MB + stills %d MB, keep %d MB%s" % (
+                  n, fv[0] >> 20, fv[1] >> 20, n, per / float(1 << 20),
+                  still >> 20, _refresh_keep(fv[1]) >> 20,
+                  (", short %d MB" % (short >> 20)) if short > 0 else ""))
+        if short <= 0 or n <= 1:
+            return n
+        unit = per + int(gen.row) * int(gen.seq_h)
+        n = max(1, n - (short + unit - 1) // unit)
+    return n
 
 
 def refresh_pool_size(project_path, sequence_id):
