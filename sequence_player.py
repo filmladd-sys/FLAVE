@@ -1294,8 +1294,10 @@ class SequencePlayer(QWindow):
                    prefetched=None, sync=True, clips=None, clear=True):
         # Clear, decode and blend every layer into target (default self.dst,
         # sequence size). The worker passes gen_dst, a snapshot, use_gl False.
-        # BUILD 176: clips (set of clip ids): blend only those layers;
-        # clear False: blend over what target already holds
+        # clips (set of clip ids): blend only those layers (the refresh
+        # composites track by track); clear False: blend over what target
+        # already holds. prefetched: frames a batch pass already decoded
+        # ({(decoder key, source frame): frame}, from _prefetch).
         cudart, nvcuda, _gl = _libs()
         if use_gl:
             self.ctx.makeCurrent(self)
@@ -1312,11 +1314,12 @@ class SequencePlayer(QWindow):
         layer_list = self._layer_items(frame, snapshot)
         if clips is not None:
             layer_list = [l for l in layer_list if l[6][0] in clips]
-        # BUILD 191: not in a batch pass: _prefetch pruned at the batch's
-        # first frame and set each decoder's last use to the batch's last
-        # frame, so pruning here at an early frame of a batch longer than
-        # DEC_IDLE_FRAMES closed the decoder (freeing every frame it had
-        # just returned) before those frames were blended: CUDA error 700
+        # Prune idle decoders only outside a batch pass. In a batch,
+        # _prefetch already pruned at the batch's first frame and set each
+        # decoder's last use to the batch's LAST frame; pruning here at an
+        # early frame of a batch longer than DEC_IDLE_FRAMES would close a
+        # decoder (freeing every frame it just returned) before those
+        # frames are blended: CUDA error 700, which is sticky.
         if prefetched is None:
             self._prune_decoders(frame, snapshot)
         for layer in layer_list:
@@ -1375,9 +1378,9 @@ class SequencePlayer(QWindow):
                 elif nxt != src_frame:
                     dec.seek_to_index(src_frame)
                 if prefetched:
-                    # BUILD 191: a decode hands this decoder's earlier
-                    # frames back to its pool; finish the queued blends
-                    # that read prefetched frames first
+                    # In a batch pass: a new decode can hand this decoder's
+                    # earlier (prefetched) frames back to its pool, so the
+                    # queued blends that read them must finish first
                     _check(cudart.cudaStreamSynchronize(self.stream), "prefetch sync")
                 try:
                     batch = dec.get_batch_frames(count)

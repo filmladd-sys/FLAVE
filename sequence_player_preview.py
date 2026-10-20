@@ -1,13 +1,20 @@
 # sequence_player_preview.py
 # JPEG preview path for the Sequence Player: one frame and a card batch.
 # Methods take the SequenceTimeline player as self and are attached by
-# sequence_player.py. ASCII only.
-# BUILD 145: one frame engine. The preview worker composites every frame on
-# the headless composer (sequence_preview_gpu), whether or not a Sequence
+# sequence_player.py (and borrowed by sequence_preview_gpu's
+# HeadlessComposer). ASCII only.
+#
+# One frame engine: the preview worker composites every frame on the
+# headless composer (sequence_preview_gpu), whether or not a Sequence
 # Player is open; the player only presents (preview.db JPEGs, play ring)
-# and keeps no decoders. The open player composites only as a fallback when
-# the engine's GPU setup failed. The render runs the same composite_batch
-# on a private composer of the same class (own decoders, originals).
+# and keeps no decoders. The open player composites only as a fallback
+# when the engine's GPU setup failed. The render runs the same
+# composite_batch on a private composer of the same class (own decoders,
+# originals).
+#
+# The explicit refresh (F5) and its VRAM budgeting also live here; the
+# memory model is explained in the block comment above
+# _composite_by_layer.
 
 import ctypes
 import os
@@ -85,7 +92,8 @@ def frames_jpeg_batch(self, frames, quality, snapshot):
 def _prefetch(self, frames, snapshot, clips=None):
     # {((clip_id, path), src_frame): decoded frame} per clip whose source
     # frames run consecutively across the batch (one decoder per clip).
-    # BUILD 176: clips (set of clip ids): only those clips' layers
+    # clips (set of clip ids, or None for all): only those clips' layers
+    # (the explicit refresh decodes one track at a time)
     reqs = {}
     last = {}
     if frames:
@@ -120,16 +128,16 @@ def _prefetch(self, frames, snapshot, clips=None):
             self.dec_next.pop(key, None)
     return pre
 
-# BUILD 170: buffers / encoder states kept after a pass; a normal pass
-# (n <= GEN_KEEP) frees what a bigger refresh pass grew beyond that
-# BUILD 172: also freed at the end of every pass larger than GEN_KEEP, so
-# the next free-VRAM query sees the real free memory
+# Composite buffers / nvJPEG states a composer keeps after a normal pass.
+# A pass of more than GEN_KEEP frames frees what it grew beyond that, so
+# the next free-VRAM query sees the real free memory. While an explicit
+# refresh holds its pool (_refresh_hold) nothing is trimmed.
 GEN_KEEP = 30
 
 
 def _trim_gen(self):
     # Free composite buffers / nvJPEG states beyond GEN_KEEP (lock held).
-    # BUILD 173: never while a refresh pool is reserved
+    # Never while a refresh pool is reserved: the refresh sized it.
     if getattr(self, "_refresh_hold", 0):
         return
     if len(self.gen_bufs) > GEN_KEEP:
@@ -158,8 +166,8 @@ def _frames_locked(self, frames, snapshot, quality):
     # One GPU pass: decode all N (one get_batch_frames per in-order
     # source), composite all N into N device buffers, nvJPEG-encode all
     # N from those buffers; only the JPEG bytes come back to the host.
-    # BUILD 142: the pass itself is composite_batch (shared with the
-    # render); this is its preview JPEG sink.
+    # The pass itself is composite_batch (shared with the render); this
+    # is its preview JPEG sink.
     if self.closed or not self.ready:
         return None
     n = len(frames)
@@ -168,7 +176,8 @@ def _frames_locked(self, frames, snapshot, quality):
                                 self._gen_buffers(n), _jpeg_sink(quality))
         self._target = None
         if n > GEN_KEEP:
-            # BUILD 172: a large refresh pass gives its extra memory back
+            # a large pass gives its extra memory back (no-op while a
+            # refresh pool is held, see _trim_gen)
             _trim_gen(self)
     except Exception as e:
         self._target = None
@@ -179,22 +188,20 @@ def _frames_locked(self, frames, snapshot, quality):
 
 def composite_batch(self, frames, snapshot, dark, bufs, sink,
                     sync_name="composite sync"):
-    # BUILD 142: the one frame-batch loop of the preview fill and the
-    # render. Caller holds _GEN_LOCK. Decode (one get_batch_frames per
-    # in-order source), composite every frame into its device buffer
-    # (stream ordered, no host sync between frames), one stream sync, then
-    # sink(self, bufs) turns the N device buffers into the result list.
+    # The one frame-batch loop of the preview fill and the render. Caller
+    # holds _GEN_LOCK. Decode (one get_batch_frames per in-order source),
+    # composite every frame into its device buffer (stream ordered, no
+    # host sync between frames), one stream sync, then sink(self, bufs)
+    # turns the N device buffers into the result list.
     # self: a SequencePlayer or a HeadlessComposer. Raises on CUDA errors.
     cudart = _libs()[0]
     nvcuda = _libs()[1]
     self._tm = _new_tm()
     _check(nvcuda.cuCtxSetCurrent(self.cuda_ctx), "ctx")
     if getattr(self, "_refresh_hold", 0) and len(frames) > 1:
-        # BUILD 176: explicit refresh (pool reserved): one layer at a time
+        # explicit refresh (pool reserved): composite track by track
         _composite_by_layer(self, frames, snapshot, dark, bufs)
         out = sink(self, bufs)
-        # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
-        # _refresh_trace.append("encoded %d (free %d MB)" % (len(bufs), _free_mb()))
         return out
     # 1) decode
     pre = self._prefetch(frames, snapshot)
@@ -209,26 +216,80 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
     return out
 
 
+# ---------------------------------------------------------------------
+# Explicit refresh (F5 / Refresh Preview): the VRAM memory model
+#
+# Goal: build every dirty preview frame in big card passes as fast as
+# the card allows, without ever running the card out of video memory.
+# Only dedicated VRAM (cudaMemGetInfo on the device) is counted; shared
+# system memory is never part of the budget.
+#
+# The keep. _refresh_keep() is the free VRAM the refresh always leaves
+# for Windows, the GUI and other programs:
+#     max(REFRESH_VRAM_MARGIN (25%) x total VRAM, REFRESH_VRAM_FATAL_MB
+#     (1500 MB)) + REFRESH_CHUNK_CUSHION_MB (256 MB)
+# e.g. 3070 + 256 = 3326 MB on a 12281 MB card.
+#
+# The plan. refresh_plan() runs once per refresh pass (the worker reuses
+# it when a pass restarts with the same inputs). It cuts the sequence at
+# every clip edge on any track, merges neighbouring ranges that decode
+# the same clips and files, and gives each range its own N (frames per
+# card pass). N comes from this machine's free VRAM and the real width x
+# height of each source in the range (ffprobe, proxy or original). The
+# Preview Frame Cap setting is only an upper bound on N, and N is never
+# more than the range length. A card pass never crosses a range end, so
+# no pass mixes two ranges' sources.
+#
+# What a card pass of N frames holds on the card:
+#   - N composite buffers, one per frame, row x height bytes each
+#     (sequence-size RGB). These are the "refresh pool".
+#   - nvJPEG encoder states: at most _NvJpegEncoder.STATES_MAX (16), not
+#     one per frame (encode_many reuses them group by group). nvJPEG
+#     allocates a state's memory at its first encode, so the plan
+#     reserves and warms them (one encode each) BEFORE it measures free
+#     VRAM; their real size is then already out of the free number.
+#   - Decode: REFRESH_DECODE_BYTES_PX = 4.5 bytes per source pixel per
+#     decoded frame per video layer (RGB output frame 3 + NV12 decode
+#     surface 1.5).
+#   - Stills: RGBA, 4 bytes per pixel, once per still in the range.
+#
+# Decoders stay open across the batches of a range (no reopen and seek
+# per batch) and each video layer is pulled k frames at a time
+# (gen._pull_k). A PyNvVideoCodec SimpleDecoder keeps an output pool as
+# large as its largest get_batch_frames pull and frees it only when the
+# decoder is closed, so the decode held is k x (sum of the layers'
+# per-frame decode costs), not N x. k = N when everything fits;
+# otherwise N gets the room left after pulls of STATES_MAX frames, and k
+# gets whatever room N leaves.
+#
+# fit_refresh_pool() runs at the start of each range. It closes every
+# decoder, re-reads the real free VRAM, sizes the pool to the range's N
+# and checks the keep again after reserving. On a shortfall it lowers k
+# first (never below STATES_MAX, or k if that is smaller) and lowers N
+# only for what that cannot cover, so N still covers the range.
+#
+# Guards. kept_decoder_guard() runs after each batch: if free VRAM is
+# under the keep while decoders are held open, it closes them all and
+# the rest of the range closes each layer's decoders after its blend.
+# vram_fatal_check() is the hard stop: free VRAM under 1500 MB at any
+# check point exits FLAVE at once (see that function for why).
+# ---------------------------------------------------------------------
+
+
 def _composite_by_layer(self, frames, snapshot, dark, bufs):
-    # BUILD 176: explicit refresh: clear all N buffers, then per track,
-    # bottom first: decode that track's N frames, blend them into the N
-    # buffers, sync, drop the decoded frames before the next track. Each
-    # frame still gets its layers blended bottom first (same image as
-    # composite_batch); peak decoded frames held: one layer's N.
-    # BUILD 179: a SimpleDecoder keeps its own output frames, as many as
-    # its largest get_batch_frames (N), until it is closed; dropping the
-    # returned frames frees nothing. So before each track decodes, every
-    # decoder of another clip is closed: one layer's decoders hold memory
-    # at a time (was: up to DEC_MAX decoders, each with an N-frame pool,
-    # building up as the refresh walked the sequence). Stills not in this
-    # batch are freed after it (was: every still of the sequence kept).
-    # BUILD 180: _refresh_trace gets free VRAM at each step of the batch
-    # (console: WORKER refresh vram)
+    # Explicit refresh: composite the N frames of a batch one track at a
+    # time. All N buffers are cleared, then per track, bottom track
+    # first: decode that track's frames in pulls of gen._pull_k, blend
+    # each pull into its buffers, sync. Every frame still gets its layers
+    # blended bottom first, the same image as composite_batch.
+    # Decoders of clips not in this batch are closed before each track
+    # (their output pools would otherwise stay allocated). With
+    # gen._keep_dec on (set by fit_refresh_pool), the decoders of this
+    # batch stay open for the next batch of the range; with it off, each
+    # track's decoders are closed as soon as its blend is synced, so only
+    # one layer's decode is held at a time. Stills are freed after their
+    # track, and any other still left from earlier batches at the end.
     cudart = _libs()[0]
-    # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
-    # del _refresh_trace[:]
-    # _refresh_trace.append("start free %d MB, decoders open %d" % (
-    #     _free_mb(), len(self.decoders)))
     for b in bufs:
         _check(cudart.cudaMemsetAsync(b, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
@@ -245,26 +306,23 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         if not clips:
             continue
         closed = 0
-        # BUILD 192: decoders kept open for the range (plan said all its
-        # layers' decode fits): only decoders of clips not in this batch
+        # keep_dec: close only decoders of clips not in this batch; else
+        # also every other track's (one layer's decoders at a time)
         keep_dec = getattr(self, "_keep_dec", False)
         for key in list(self.decoders.keys()):
             if key[0] not in (used if keep_dec else clips):
                 self._close_decoder(key)
                 closed += 1
-        # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
-        # f_closed = _free_mb()
-        # before = set(self.decoders.keys())
-        # BUILD 193: the track's frames are pulled in pulls of _pull_k
-        # (plan: from the memory budget): a decoder's memory is sized by
-        # its largest pull, so open decoders hold _pull_k frames each, not
-        # N. Each pull is blended and synced before the next pull (the
-        # next pull hands the previous one's frames back to the decoder).
+        # Pull size k (gen._pull_k, 0: the whole batch). A decoder's pool
+        # is sized by its largest pull, so open decoders hold k frames
+        # each, not N. Each pull is blended and synced before the next
+        # one: the next get_batch_frames hands the previous pull's frames
+        # back to the decoder.
         step = int(getattr(self, "_pull_k", 0) or 0) or len(frames)
         for s0 in range(0, len(frames), step):
             sub = frames[s0:s0 + step]
             pre = self._prefetch(sub, snapshot, clips)
-            # BUILD 183: the files (footage or proxy) this track decoded
+            # the files (footage or proxy) this track decoded, for the log
             files = ", ".join(sorted(set(k[1] for k in self.decoders
                                          if k[0] in clips)))
             vram_fatal_check("track %s decode, frames %d..%d, files %s" % (
@@ -277,21 +335,10 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
                 track_id, sub[0], sub[-1], files or "none"))
             pre.clear()
             del pre
-        # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
-        # _refresh_trace.append(
-        #     "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
-        #     "batch-decoded from %s, blended (free %d MB)" % (
-        #         track_id, closed, f_closed,
-        #         len(set(self.decoders.keys()) - before), len(pre),
-        #         files or "none", _free_mb()))
-        # BUILD 188: release this layer's decode surfaces as soon as it is
-        # blended (synced above): close its decoders (their N-frame output
-        # pools) and free its stills, so no source-size frame outlives its
-        # blend, coexists with the next layer, or is held while the
-        # finished composites are JPEG-encoded. Peak: one layer's decode
-        # surfaces plus the N sequence-size composite buffers.
-        # BUILD 192: kept open for the next batch of the range (no reopen
-        # and seek) when the plan counted every layer's decode at once
+        # This track is blended (synced above). Without keep_dec its
+        # decoders are closed now, so no source-size frame coexists with
+        # the next layer's decode or the JPEG encode. Its stills are
+        # freed either way.
         if not keep_dec:
             for key in list(self.decoders.keys()):
                 if key[0] in clips:
@@ -300,6 +347,7 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
             item = self.images.pop(path, None)
             if item is not None:
                 cudart.cudaFree(item[0])
+    # stills still uploaded that this batch does not use
     freed = 0
     for path in list(self.images.keys()):
         if path not in stills:
@@ -307,13 +355,10 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
             if item is not None:
                 cudart.cudaFree(item[0])
             freed += 1
-    # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
-    # if freed:
-    #     _refresh_trace.append("stills freed %d (free %d MB)" % (freed, _free_mb()))
 
 
 def track_stills(self, frames, snapshot, clips):
-    # BUILD 188: still paths of the given clips in these frames
+    # Still (image) paths of the given clips in these frames
     out = set()
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
@@ -322,21 +367,29 @@ def track_stills(self, frames, snapshot, clips):
     return out
 
 
-# BUILD 180: steps of the last refresh batch (free VRAM after each)
+# Debug trace of a refresh batch: text steps (e.g. free VRAM after each
+# step) that sequence_preview_worker._log_refresh_vram prints. Nothing
+# appends to it in normal runs; add .append() calls to trace a batch.
 _refresh_trace = []
 
-# BUILD 181/182: temporary hard guard: explicit refresh exits the program
-# when free VRAM falls under this (a bad allocation must not freeze the
-# PC). BUILD 182: checked inside the batch (each decoder open, each
-# layer's decode and blend), not only at its end. _vram_base: free VRAM
-# after the pool reserve (drift in the message), set by the worker.
+# Hard VRAM floor of the explicit refresh: free VRAM under this at any
+# check point exits FLAVE (vram_fatal_check). Checked at each decoder
+# open, after each layer pull's decode and blend, after each range's
+# pool reserve and after each batch. _vram_base: free VRAM right after
+# the latest pool reserve (set by fit_refresh_pool), so the exit message
+# can show the drift since then.
 REFRESH_VRAM_FATAL_MB = 1500
 _vram_base = [None]
 
 
 def vram_fatal_check(where):
     # Free VRAM under REFRESH_VRAM_FATAL_MB: print the numbers and exit the
-    # process at once (os._exit: no cleanup that could touch the GPU again)
+    # process at once. Why exit instead of recovering: running the card
+    # out of memory can freeze the whole PC, and a CUDA fault such as
+    # error 700 is sticky in the shared CUDA context (nothing in-process
+    # can recover it). os._exit skips Python cleanup that could touch the
+    # GPU again. The plan's keep sits well above this floor, so reaching
+    # it means an estimate was wrong.
     fv = free_vram()
     if fv is None or fv[0] >= (REFRESH_VRAM_FATAL_MB << 20):
         return
@@ -354,12 +407,13 @@ def vram_fatal_check(where):
 
 
 def _free_mb():
+    # free VRAM in MB, -1 when it cannot be read
     fv = free_vram()
     return (fv[0] >> 20) if fv else -1
 
 
 def refresh_owned(gen):
-    # BUILD 180: what FLAVE itself holds on the card for the refresh
+    # Debug text: what FLAVE itself holds on the card for the refresh
     # (composite buffers, nvJPEG encoder states, stills, open decoders)
     imgs = [i for i in getattr(gen, "images", {}).values() if i is not None]
     bufs = getattr(gen, "gen_bufs", [])
@@ -373,10 +427,10 @@ def refresh_owned(gen):
 
 
 def refresh_vram_guard(project_path, sequence_id, floor):
-    # BUILD 180: after a refresh batch: free VRAM below floor bytes closes
-    # every decoder (their output pools are the only memory the refresh
-    # holds outside the reserved pool). Returns (free before, after) MB or
-    # None when nothing was done.
+    # Free VRAM below floor bytes: close every decoder (their output
+    # pools are the only refresh memory outside the reserved pool).
+    # Returns (free before, free after) in MB, or None when nothing was
+    # done.
     fv = free_vram()
     if fv is None or fv[0] >= floor:
         return None
@@ -393,10 +447,12 @@ def refresh_vram_guard(project_path, sequence_id, floor):
 
 
 def kept_decoder_guard(project_path, sequence_id):
-    # BUILD 192: worker, after a batch of a range whose decoders are kept
-    # open: the real free VRAM (all layers decoded and held) is measured;
-    # under the refresh keep, every decoder is closed and the rest of the
-    # range closes per layer again (the plan's estimate was too low)
+    # Worker, after each batch of a range whose decoders are kept open
+    # (gen._keep_dec): measure the real free VRAM with every layer's
+    # decoders held. Under the refresh keep, every decoder is closed and
+    # _keep_dec is turned off, so the rest of the range closes each
+    # layer's decoders after its blend (the plan's estimate was too low).
+    # The next range's fit_refresh_pool sets _keep_dec again.
     gen = _generator_for(project_path, sequence_id)
     if gen is None or not getattr(gen, "_keep_dec", False):
         return
@@ -552,12 +608,8 @@ def _generator_for(project_path, sequence_id):
     return _player_for(project_path, sequence_id)
 
 
-# BUILD 171: numbers of the last refresh_batch_frames call (console log)
-_last_batch_info = {}
-
-
 def free_vram():
-    # BUILD 171: (free, total) device bytes, or None
+    # (free, total) dedicated device bytes from cudaMemGetInfo, or None
     try:
         cudart = _libs()[0]
         free = ctypes.c_size_t(0)
@@ -569,62 +621,16 @@ def free_vram():
         return None
 
 
-def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
-                         margin=0.25, headroom=0):
-    # BUILD 170: worker, explicit refresh: frames per card pass from free
-    # VRAM (cudaMemGetInfo), keeping margin x total VRAM free for other
-    # programs. Estimated cost per frame: the RGB composite buffer, an
-    # nvJPEG encoder state (about 2 x w x h) and, per enabled video track,
-    # one decoded surface (NV12 with room for a larger source: 3 x w x h).
-    # Buffers / states this composer already holds are reused, so their
-    # size counts as free. Clamped to low..high; low on any failure.
-    # BUILD 174: headroom bytes also kept free (NVDEC decode surfaces).
-    _last_batch_info.clear()
-    try:
-        gen = _generator_for(project_path, sequence_id)
-        if gen is None:
-            _last_batch_info["why"] = "no composer"
-            return low
-        cudart = _libs()[0]
-        free = ctypes.c_size_t(0)
-        total = ctypes.c_size_t(0)
-        _check(cudart.cudaMemGetInfo(ctypes.byref(free), ctypes.byref(total)),
-               "mem info")
-        w, h = int(gen.seq_w), int(gen.seq_h)
-        buf = int(gen.row) * h + 2 * w * h
-        layers = 0
-        for r in (snapshot[0] if snapshot else []):
-            if r[1] and r[3] == "video":
-                layers += 1
-        per = buf + max(1, layers) * 3 * w * h
-        held = len(getattr(gen, "gen_bufs", [])) * buf
-        margin_b = int(margin * total.value)
-        usable = free.value + held - margin_b - int(headroom)
-        raw = int(usable // per) if usable > 0 else 0
-        # BUILD 175: high <= 0: no upper cap (the VRAM fit is N)
-        n = max(low, raw if high <= 0 else min(high, raw))
-        _last_batch_info.update(
-            free=free.value, total=total.value, margin=margin_b, held=held,
-            headroom=int(headroom),
-            usable=usable, per=per, buf=buf, layers=layers, raw=raw,
-            low=low, high=high, n=n,
-            why=("cap" if 0 < high < raw else "floor" if raw < low else "vram"))
-        return n
-    except Exception as e:
-        print(f"Refresh batch size failed: {e}")
-        _last_batch_info["why"] = "error"
-        return low
-
-
-# BUILD 184: device bytes per decoded frame per source pixel: the RGB
-# output frame a SimpleDecoder keeps (3) plus its NV12 decode surface (1.5)
+# Device bytes per decoded frame per source pixel: the RGB output frame a
+# SimpleDecoder keeps (3) plus its NV12 decode surface (1.5)
 REFRESH_DECODE_BYTES_PX = 4.5
-# BUILD 185: per-chunk fit keeps REFRESH_VRAM_FATAL_MB + this free
+# Added on top of the keep's floor (see _refresh_keep)
 REFRESH_CHUNK_CUSHION_MB = 256
 _src_size = {}      # path -> (w, h) via ffprobe, or None
 
 
 def _source_size(path):
+    # Source width x height (ffprobe, cached per path), or None
     if path not in _src_size:
         try:
             from proxy_manager import probe_size
@@ -634,23 +640,22 @@ def _source_size(path):
     return _src_size[path]
 
 
-# BUILD 189: per-range safe cap: free VRAM kept is max(this x total,
-# REFRESH_VRAM_FATAL_MB) + REFRESH_CHUNK_CUSHION_MB; per frame of a range:
-# one composite buffer + its decode cost. BUILD 190: the nvJPEG states
-# (at most _NvJpegEncoder.STATES_MAX, fixed, not per frame) are reserved
-# and warmed before free VRAM is measured, so their real size is already
-# out of free (was: estimated 2 bytes/px per frame; real ~60 MB each)
+# Share of total VRAM the refresh leaves free (never under
+# REFRESH_VRAM_FATAL_MB), see _refresh_keep
 REFRESH_VRAM_MARGIN = 0.25
 
 
 def _refresh_keep(total_b):
+    # Free VRAM (bytes) the refresh must always leave on a card of
+    # total_b bytes: max(25% of total, 1500 MB) + 256 MB cushion
     return (max(int(REFRESH_VRAM_MARGIN * total_b), REFRESH_VRAM_FATAL_MB << 20)
             + (REFRESH_CHUNK_CUSHION_MB << 20))
 
 
 def _free_pool(gen, n):
-    # BUILD 189: (lock held) free composite buffers / nvJPEG states beyond n
-    # BUILD 190: states kept up to STATES_MAX (n None: all freed)
+    # (lock held) free composite buffers beyond n. nvJPEG states are kept
+    # up to STATES_MAX (the refresh reuses them); n None or 0 frees every
+    # buffer and every state.
     cudart = _libs()[0]
     for b in gen.gen_bufs[n or 0:]:
         if b.value:
@@ -661,30 +666,34 @@ def _free_pool(gen, n):
 
 
 def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
-    # BUILD 186: worker, explicit refresh, once per pass before any chunk:
-    # an edit decision list of the sequence. Ranges are cut at every clip
-    # edge (any track) and merged while the layers decoded stay the same
-    # (same clip / file on every track); gaps are ranges too. Each range
-    # gets its own N once, from the real width x height (ffprobe, cached)
-    # of the largest video source decoded in it (proxy or original):
-    # REFRESH_DECODE_BYTES_PX per pixel per frame, one layer decoding at a
-    # time; plus its stills (RGBA, 4 per pixel, once). Budget: free VRAM
-    # with every decoder closed - the safety exit limit - a cushion (the
-    # composite buffers are the reserved pool, already out of free).
-    # N = budget / per frame, 1..pool_n; a range with no video gets pool_n.
-    # Chunks never cross a range end (the worker cuts them), so no chunk
-    # mixes two ranges' sources. Returns [(start, end, n)], end inclusive.
-    # BUILD 189: the cap is per range. The refresh pool is freed first
-    # (no buffers, states or decoders held), then per range N = the most
-    # frames whose composite buffers + nvJPEG states + decode surfaces fit
-    # in free VRAM - _refresh_keep (25% margin, never under the 1500 MB
-    # floor, plus the cushion); pool_n (Preview Frame Cap) only lowers it.
-    # Returns [(start, end, n, decode bytes/frame, still bytes)]; the
-    # worker reserves the pool per range (fit_refresh_pool).
-    # BUILD 190: after freeing, a small pool (min(pool_n, STATES_MAX)
-    # buffers + states, warmed) is reserved and kept; free VRAM is read
-    # after it, so the plan uses the real nvJPEG state cost. Per frame of
-    # a range: one composite buffer + its decode.
+    # Worker, once per explicit refresh pass, before any batch: the
+    # per-range plan (see the memory model above _composite_by_layer).
+    #
+    # 1) Close every decoder and free the whole pool, then reserve and
+    #    warm a small pool (min(pool_n, STATES_MAX) buffers + nvJPEG
+    #    states) and read free VRAM after it, so the real state cost is
+    #    already out of free. budget = that free + the reserved buffers
+    #    (they are part of every range's N) - the keep.
+    # 2) Cut the sequence at every clip start and end on any track; merge
+    #    neighbouring ranges whose layers at their first frame are the
+    #    same clips and files. Gaps are ranges too.
+    # 3) Per range: still bytes (RGBA, 4 per pixel) and each video
+    #    layer's decode cost per frame (REFRESH_DECODE_BYTES_PX x source
+    #    w x h; sequence size when ffprobe fails); sum_per is their sum.
+    #    want = min(pool_n, range length); room = budget - stills.
+    #      - every frame + its full decode fits: N = k = want
+    #      - else N gets the room left after pulls of STATES_MAX frames
+    #        (capped at want) and k the room N leaves (STATES_MAX..N);
+    #        if that N is under STATES_MAX, N = k = what fits with full
+    #        pulls
+    #      - no video layer: N = buffers that fit, k = 0
+    #      - no room or no VRAM reading: N = 1
+    # pool_n is the Preview Frame Cap: it only lowers N.
+    # Returns [(start, end, n, per, still, k, held)], end inclusive:
+    # per = largest layer's decode bytes/frame when k is 0 (layers then
+    # decode one at a time, N frames each), else 0 (decode is in held);
+    # still = still bytes; k = pull size; held = k x sum_per. The worker
+    # passes these to fit_refresh_pool at each range.
     gen = _generator_for(project_path, sequence_id)
     if gen is None or total <= 0:
         return []
@@ -745,12 +754,8 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 per_all[it[6]] = cost
                 if cost > per:
                     per, big_path, big_size = cost, it[1], size
-        # BUILD 193: every layer's decoders stay open for the range (no
-        # reopen and seek per batch) and pull k frames at a time, so the
-        # decode held is k x (sum of the layers' per-frame costs), not N x.
-        # One pull per layer per batch (k = N) when that fits; else N
-        # gets the budget left after pulls of at least STATES_MAX frames,
-        # and k gets whatever room N leaves (never above N).
+        # Decoders stay open for the range and pull k frames at a time,
+        # so the decode held is k x sum_per, not N x (see step 3 above).
         sum_per = sum(per_all.values())
         want = max(1, min(int(pool_n), b - a + 1))
         room = (budget - still) if fv is not None else 0
@@ -781,11 +786,15 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
 
 
 def reserve_refresh_pool(project_path, sequence_id, n):
-    # BUILD 173: worker, start of an explicit refresh: allocate the n
-    # composite buffers and n nvJPEG encoder states once; every card pass
-    # of the refresh reuses them (no trim) until release_refresh_pool.
+    # Worker, explicit refresh: hold a pool of n composite buffers and up
+    # to STATES_MAX nvJPEG encoder states (min(n, STATES_MAX)); every card
+    # pass reuses them, untrimmed, until release_refresh_pool. nvJPEG
+    # allocates a state's device memory at its first encode, not at
+    # create, so the n cleared buffers are encoded once here: that memory
+    # is taken now and shows in the free VRAM read after the reserve,
+    # instead of growing during the first batch.
     # Returns n, or 0 when the composer is missing or allocation failed
-    # (whatever was allocated is freed again).
+    # (the pool is then trimmed back to GEN_KEEP).
     gen = _generator_for(project_path, sequence_id)
     if gen is None or n <= 0:
         return 0
@@ -799,10 +808,7 @@ def reserve_refresh_pool(project_path, sequence_id, n):
             if gen.nvj is None:
                 gen.nvj = _NvJpegEncoder(lib, gen.stream)
             gen.nvj.reserve(int(n))
-            # BUILD 180: nvJPEG allocates a state's device buffers at its
-            # first encode, not at create: encode the N cleared buffers
-            # once now, so that memory is taken (and counted in the free
-            # after reserve) here instead of growing during the first batch
+            # warm-up encode (see above)
             bufs = gen.gen_bufs[:int(n)]
             for b in bufs:
                 _check(_libs()[0].cudaMemsetAsync(b, 0, gen.row * gen.seq_h,
@@ -823,21 +829,27 @@ def reserve_refresh_pool(project_path, sequence_id, n):
 
 
 def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
-    # BUILD 189: worker, at each plan range: hold a refresh pool of exactly
-    # n (frees beyond n, reserves up to n). Then the free VRAM after the
-    # reserve is checked: if n frames of decode (per bytes each) + still
-    # would leave less than _refresh_keep free, n is lowered by the real
-    # measured shortfall and the pool refit. Returns the n held (0: none).
+    # Worker, at the first batch of each plan range: make the pool hold
+    # exactly n frames and check it against the real free VRAM.
+    # n, per, still, k, held come from the range's refresh_plan entry.
+    # 1) Close every decoder (the previous range's kept decoders are not
+    #    in this range's math); _keep_dec = k > 0, _pull_k = k.
+    # 2) If the pool is not n yet: predict from free VRAM before
+    #    reserving (buffers are exactly row x height each, already held
+    #    ones count as free). A shortfall comes out of the pulls first
+    #    (_shrink_pull), then N is capped to what fits. Then free beyond
+    #    n and reserve up to n.
+    # 3) Read free VRAM after the reserve (also stored in _vram_base) and
+    #    check that n x per + held + still still leaves the keep. If
+    #    short: lower k first (decode is not allocated yet, so no
+    #    re-reserve is needed); only if that cannot cover it, lower N by
+    #    the shortfall and refit (up to 4 rounds). k never exceeds N.
+    # Returns the n held (0: reserve failed).
     gen = _generator_for(project_path, sequence_id)
     if gen is None:
         return 0
-    # BUILD 192: a new range starts with no decoders open (the previous
-    # range's kept ones are not in this range's free VRAM math)
-    # BUILD 193: k > 0: decoders kept open, pulls of k frames, held =
-    # decode bytes they hold (k x the layers' summed per-frame cost); a
-    # smaller N also lowers k (k <= N) and held with it
     k = int(k or 0)
-    unit_dec = (int(held) // k) if k else 0
+    unit_dec = (int(held) // k) if k else 0     # decode bytes per pulled frame
     _GEN_LOCK.acquire()
     try:
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
@@ -853,18 +865,16 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
             held = k * unit_dec
             gen._pull_k = k
         if int(getattr(gen, "_refresh_hold", 0) or 0) != n:
-            # BUILD 190: predict before reserving: buffers are exact
-            # (row x height each); never grow into the margin
+            # predict before reserving, so the pool never grows into the
+            # keep
             fv = free_vram()
             if fv is not None:
-                # BUILD 194: buffer count was in held (the pulls' decode
-                # bytes), so the fit and short check counted no decode
                 nbufs = len(gen.gen_bufs)
                 room = fv[0] + nbufs * int(gen.row) * int(gen.seq_h) - still \
                     - _refresh_keep(fv[1])
-                # BUILD 195: a shortfall comes out of the pulls first (k,
-                # not under STATES_MAX), so N still covers the range and
-                # leaves no small leftover batch
+                # shortfall out of the pulls first (k, not under
+                # STATES_MAX), so N still covers the range and leaves no
+                # small leftover batch
                 over = n * (per + int(gen.row) * int(gen.seq_h)) + held - room
                 if over > 0 and k:
                     k, held = _shrink_pull(gen, k, unit_dec, over)
@@ -897,8 +907,8 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
         if short <= 0 or n <= 1:
             return n
         if k:
-            # BUILD 195: pulls shrink first (no re-reserve: decode is not
-            # allocated yet); N only for what that cannot cover
+            # pulls shrink first (no re-reserve: decode is not allocated
+            # yet); N only for what that cannot cover
             k2, held2 = _shrink_pull(gen, k, unit_dec, short)
             short -= held - held2
             k, held = k2, held2
@@ -909,7 +919,7 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
         unit = per + int(gen.row) * int(gen.seq_h)
         n = max(1, n - (short + unit - 1) // unit)
         if k and k > n:
-            # BUILD 193: pulls never above N (frees decode with it)
+            # pulls never above N (frees decode with it)
             k = n
             held = k * unit_dec
             gen._pull_k = k
@@ -917,8 +927,8 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
 
 
 def _shrink_pull(gen, k, unit_dec, over):
-    # BUILD 195: lower the pull size by enough frames to free over bytes,
-    # not under min(k, STATES_MAX); returns (k, held bytes)
+    # Lower the pull size k by enough frames to free over bytes, but not
+    # under min(k, STATES_MAX). Sets gen._pull_k; returns (k, held bytes).
     floor = min(k, _NvJpegEncoder.STATES_MAX)
     k = max(floor, k - int((over + unit_dec - 1) // unit_dec)) if unit_dec else k
     gen._pull_k = k
@@ -926,14 +936,17 @@ def _shrink_pull(gen, k, unit_dec, over):
 
 
 def refresh_pool_size(project_path, sequence_id):
-    # BUILD 173: frames the composer's refresh pool holds (0: none, e.g. the
+    # Frames the composer's refresh pool holds (0: none, e.g. the
     # composer was replaced or released since the reserve)
     gen = _generator_for(project_path, sequence_id)
     return int(getattr(gen, "_refresh_hold", 0) or 0) if gen is not None else 0
 
 
 def release_refresh_pool(project_path, sequence_id):
-    # BUILD 173: end of the explicit refresh: free the pool beyond GEN_KEEP
+    # End of the explicit refresh: clear the refresh flags, trim the pool
+    # back to GEN_KEEP and close every decoder. Decoders grown to big
+    # output pools by the refresh pulls only give that memory back when
+    # closed; they reopen on demand at the normal 1-frame size.
     gen = _generator_for(project_path, sequence_id)
     if gen is None:
         return
@@ -944,8 +957,6 @@ def release_refresh_pool(project_path, sequence_id):
         gen._pull_k = 0
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         _trim_gen(gen)
-        # BUILD 179: decoders grown to N-frame output pools by the refresh
-        # are closed (reopened on demand at the normal 1-frame size)
         gen._close_all_decoders()
     except Exception as e:
         print(f"Refresh pool release failed: {e}")

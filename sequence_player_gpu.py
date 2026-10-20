@@ -165,9 +165,12 @@ def _nvjpeg_lib():
 class _NvJpegEncoder(object):
     # One nvJPEG encoder per player (its CUDA context and stream). Encodes
     # an interleaved RGB device buffer; only the JPEG bytes come back.
-    # BUILD 190: encode_many uses at most STATES_MAX encoder states (a
-    # warmed state holds ~60 MB at 1080p), reused group by group; was one
-    # state per buffer (N 150 = ~9.5 GB of states)
+    # encode_many uses at most STATES_MAX encoder states, reused group by
+    # group, because each state is big once warmed (about 60 MB at 1080p;
+    # one state per frame would cost gigabytes at a large refresh N).
+    # nvJPEG allocates a state's device memory at its first encode, not
+    # at create; the refresh warms its states in reserve_refresh_pool
+    # (sequence_player_preview) before it measures free VRAM.
     STATES_MAX = 16
     def __init__(self, lib, stream):
         self.lib = lib
@@ -212,9 +215,9 @@ class _NvJpegEncoder(object):
 
     def encode_many(self, srcs, w, h, pitch, quality):
         # nvJPEG has no batched encode: queue the encodes on the stream
-        # (one encoder state per buffer), sync once, then read the
-        # bitstreams. Pixels stay on the GPU. BUILD 190: in groups of
-        # STATES_MAX (states reused per group, one sync per group)
+        # (one encoder state per buffer of a group), sync once, then read
+        # the bitstreams. Pixels stay on the GPU. Groups of STATES_MAX
+        # buffers; the states are reused by every group (one sync each).
         out = []
         for g0 in range(0, len(srcs), self.STATES_MAX):
             out.extend(self._encode_group(srcs[g0:g0 + self.STATES_MAX],
@@ -259,8 +262,8 @@ class _NvJpegEncoder(object):
         return [outs[k].raw[:lens[k].value] for k in range(len(srcs))]
 
     def reserve(self, n):
-        # BUILD 173: create encoder states up to n (refresh pool)
-        # BUILD 190: never more than STATES_MAX
+        # Create encoder states up to n, never more than STATES_MAX (the
+        # refresh pool). They take their device memory at first encode.
         n = min(int(n), self.STATES_MAX)
         while len(self.states) < n:
             st = ctypes.c_void_p()
@@ -269,7 +272,7 @@ class _NvJpegEncoder(object):
             self.states.append(st)
 
     def trim(self, keep):
-        # BUILD 170: free encoder states beyond keep (after a big refresh)
+        # Free encoder states beyond keep (0 frees all of encode_many's)
         while len(self.states) > keep:
             st = self.states.pop()
             if st.value:

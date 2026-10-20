@@ -3,14 +3,19 @@
 # timeline. Works outward from the playhead (next, previous, ...), skips clean
 # frames, yields to the GUI through the Sequence Player generate lock, and
 # sleeps on a condition when there is nothing to do. ASCII only.
-# BUILD 141: no Sequence Player needed: with none open for the sequence the
-# frames are composited headless on the GPU (sequence_preview_gpu).
-# BUILD 145: always on that headless composer (the one frame engine), with
-# or without a player open; the player only presents.
-# BUILD 166: explicit refresh model. During normal editing a pass builds
-# only the playhead frame (scrub / edit stays realtime). Every not-clean
-# frame (dirty or missing) is built only after an explicit refresh (F5 /
-# Refresh Preview, set_refresh_all) or while Play fills (set_play_priority).
+# Frames are always composited on the headless GPU composer
+# (sequence_preview_gpu, the one frame engine), with or without a Sequence
+# Player open; the player only presents.
+# Explicit refresh model: during normal editing a pass builds only the
+# playhead frame (scrub / edit stays realtime). Every not-clean frame
+# (dirty or missing) is built only after an explicit refresh (F5 /
+# Refresh Preview, set_refresh_all) or while Play fills
+# (set_play_priority).
+# The explicit refresh runs in big card passes sized per plan range to
+# the card's free VRAM; the memory model is explained in
+# sequence_player_preview.py (block comment above _composite_by_layer).
+# This module walks the frames, fits the pool per range and runs the
+# per-batch guards.
 
 import threading
 import time
@@ -41,16 +46,18 @@ class PreviewWorker(object):
         self._done_gen = -1      # gen whose pass finished (sleep until bumped)
         self.saved = 0           # rows saved, read by the timeline repaint
         self.sequence_id = None
-        # BUILD 129: (project, sequence_id, clean at pass start, total) while
-        # a pass has frames to generate, else None; _done = rows committed
-        # this pass. Plain attributes, read by the GUI status poll.
+        # (project, sequence_id, clean at pass start, total) while a pass
+        # has frames to generate, else None; _done = rows committed this
+        # pass. Plain attributes, read by the GUI status poll.
         self.progress = None
         self._done = 0
-        # BUILD 173: refresh pool (frames, (project, sequence_id)) reserved
-        # at the start of an explicit refresh, freed when it finishes
+        # Explicit refresh pool: frames the composer holds for the current
+        # plan range (from fit_refresh_pool) and its (project,
+        # sequence_id); released when the refresh pass finishes
         self._pool_n = 0
         self._pool_key = None
-        # BUILD 192: (inputs, plan) of the refresh pass in progress
+        # (inputs, plan) of the refresh pass in progress, so a restarted
+        # pass with the same inputs does not plan twice
         self._plan = None
         self._thread = threading.Thread(target=self._run, name="PreviewWorker",
                                         daemon=True)
@@ -125,19 +132,20 @@ class PreviewWorker(object):
                 if gen == self._gen:
                     # Done, or cannot generate (no player): wait for a wake
                     self._done_gen = gen
-                    # BUILD 166: the explicit refresh pass is finished
+                    # the explicit refresh pass (if any) is finished: its
+                    # plan is dropped and its pool released below
                     _refresh_all[0] = 0
                     self._plan = None
                     pool = self._pool_key if self._pool_n else None
                     self._pool_n = 0
                     self._pool_key = None
-                    # Idle: the timeline status clears (BUILD 129)
+                    # Idle: the timeline status clears
                     self.progress = None
                 else:
                     pool = None
             if pool is not None:
-                # BUILD 173: free the refresh pool (takes the GEN lock,
-                # outside the condition)
+                # free the refresh pool and close the decoders (takes the
+                # GEN lock, so outside the condition)
                 try:
                     from sequence_player_preview import release_refresh_pool
                     release_refresh_pool(pool[0], pool[1])
@@ -192,47 +200,43 @@ class PreviewWorker(object):
         # Frames per card pass, read at the start of a pass
         gpu_n = _setting_int("previewGpuBatchFrames", 8, 1, 30)
         from sequence_player import FrameGenerateBatch
-        # BUILD 166: whole range only on an explicit refresh or Play fill;
-        # otherwise just the playhead frame
+        # whole range only on an explicit refresh or Play fill; otherwise
+        # just the playhead frame
         full = bool(_refresh_all[0] or _play_priority[0])
         order = (list(_forward(center, total)) if full
                  else [max(0, min(total - 1, int(center)))])
         if _refresh_all[0]:
-            # BUILD 179: the explicit refresh walks from frame 0 (its first
-            # dirty frame: clean ones are skipped), not from the playhead
+            # the explicit refresh walks from frame 0 (its first dirty
+            # frame: clean ones are skipped), not from the playhead
             order = list(range(total))
-        # BUILD 169: explicit refresh pass = fast mode: no bursts, yields,
-        # GUI-quiet waits or sleeps (only a GUI waiting on the lock holds the
-        # worker back), bigger card passes and fewer commits
+        # Explicit refresh pass = fast mode: no bursts, yields, GUI-quiet
+        # waits or sleeps (only a GUI waiting on the lock holds the worker
+        # back), big card passes sized from VRAM and fewer commits
         fast = bool(_refresh_all[0])
         if fast:
-            # BUILD 170: card pass size from free VRAM (BUILD 173: once)
             import sequence_player_gpu as spg
-            # BUILD 177: N cap from the Preview Frame Cap setting
+            # Preview Frame Cap: the upper bound on N (frames per card
+            # pass); the real N of each range comes from the plan
             cap = _setting_int("previewFrameCap", REFRESH_GPU_MAX, 1, 10000)
             gpu_low = min(gpu_n, cap)
             spg._worker_fast[0] = True
             sp._worker_burst[0] = True
-            # BUILD 173: N from one free-VRAM query at the start of the
-            # refresh; its buffers reserved once and kept for every card
-            # pass (a pass restarted by a retarget reuses the pool)
+            # a pool still held for another sequence is released first
             key = (project, sequence_id)
             if self._pool_n and self._pool_key != key:
                 from sequence_player_preview import release_refresh_pool
                 release_refresh_pool(self._pool_key[0], self._pool_key[1])
                 self._pool_n = 0
-            # BUILD 189: no up-front reserve: the plan frees the pool,
-            # computes each range's safe N (Preview Frame Cap only lowers
-            # it) and the pool is fit per range in the chunk loop
+            # No up-front reserve: refresh_plan frees the pool and computes
+            # each range's N; the pool is fit per range in the chunk loop.
+            # gpu_n is only the limit for a frame outside every plan range.
             gpu_n = gpu_low
-            # BUILD 186: edit decision list: per-range N for this pass
             from sequence_player_preview import (refresh_plan, fit_refresh_pool,
                                                  kept_decoder_guard)
-            # BUILD 192: a refresh pass restarted before it finished (the
-            # refresh request wakes the worker, then the retarget restarts
-            # it) reuses the plan when nothing it depends on changed; a
-            # finished pass clears it. Each range's pool fit still rechecks
-            # free VRAM.
+            # A refresh pass restarted before it finished (set_refresh_all
+            # wakes the worker, then a retarget restarts the pass) reuses
+            # the plan when nothing it depends on changed; a finished pass
+            # clears it. Each range's pool fit still rechecks free VRAM.
             pkey = (project, sequence_id, total, cap, snapshot)
             plan = None
             if self._plan is not None:
@@ -250,7 +254,7 @@ class PreviewWorker(object):
             burst_left = 1 << 30
             bursts = 1
             burst_t0 = time.perf_counter()
-        # BUILD 129: status percent = clean frames / total frames, from the
+        # Status percent = clean frames / total frames, from the
         # clean count in 0..total-1 at pass start plus rows committed since
         # (no db COUNT). Shown only when something needs generating.
         with _CLEAN_LOCK:
@@ -316,14 +320,16 @@ class PreviewWorker(object):
                 left_s = WORKER_BURST_SEC - (time.perf_counter() - burst_t0)
                 range_end = total
                 if fast:
-                    # BUILD 174: no time budget. BUILD 186: the N of the
-                    # plan range holding this frame; the chunk stops at
-                    # that range's end (the next chunk is the next range's)
+                    # No time budget: the chunk is up to the N of the plan
+                    # range holding this frame and stops at that range's
+                    # end (the next chunk is the next range's)
                     limit = gpu_n
                     for r0, r1, rn, rper, rstill, rk, rheld in plan:
                         if r0 <= frame <= r1:
                             range_end = r1
-                            # BUILD 189: pool fit to this range's safe N
+                            # first chunk of this range: fit the pool (and
+                            # pull size) to it against real free VRAM,
+                            # then the hard VRAM check
                             if self._pool_fit != r0:
                                 self._pool_n = fit_refresh_pool(
                                     project, sequence_id, rn, rper, rstill, rk, rheld)
@@ -343,12 +349,12 @@ class PreviewWorker(object):
                 if not fast:
                     time.sleep(0.005)
                 elif sp._gui_wants[0] > 0:
-                    # BUILD 170: no yield for activity, but a GUI thread
+                    # no yield for activity, but a GUI thread
                     # already blocked on the lock gets it for its one frame
                     # (else the window, Refreshing Preview too, freezes)
                     time.sleep(0.001)
                 elif time.perf_counter() - _gui_beat[0] > REFRESH_GUI_STALL_SEC:
-                    # BUILD 172: the Refreshing Preview poll (100 ms) has
+                    # the Refreshing Preview poll (100 ms) has
                     # not run: a short nap gives the GUI thread the GIL
                     time.sleep(0.01)
                 # Dirty mark number before the build: an edit made while
@@ -374,11 +380,11 @@ class PreviewWorker(object):
                 hold_max = max(hold_max, dt)
                 if fast and len(chunk) > 1:
                     _log_refresh_batch(chunk, self._pool_n, dt)
-                    # BUILD 187: per-batch VRAM line and soft guard silenced
-                    # (speed); the hard exit below stays
-                    # _log_refresh_vram(project, sequence_id)
+                    # after each batch: the hard VRAM exit, then the decoders
+                    # kept open for the range are measured against the keep
+                    # (for a detailed per-batch VRAM trace, call
+                    # _log_refresh_vram(project, sequence_id) here)
                     _vram_fatal_check("after batch %d..%d" % (chunk[0], chunk[-1]))
-                    # BUILD 192: kept-open decoders measured against the keep
                     kept_decoder_guard(project, sequence_id)
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
@@ -416,22 +422,22 @@ class PreviewWorker(object):
                           hold_max * 1000.0))
 
 
-# BUILD 129: the worker yields about once a second. A burst ends after
-# WORKER_BURST_SEC of work (or previewBurstFrames frames, or at once when the
-# GUI waits on _GEN_LOCK); then it commits and sleeps WORKER_YIELD_SEC with
-# the GIL and the lock free. One card pass (one _GEN_LOCK hold) is sized to
-# about WORKER_PASS_SEC from the measured time per frame.
+# Normal (not refresh) passes: the worker yields about once a second. A
+# burst ends after WORKER_BURST_SEC of work (or previewBurstFrames frames,
+# or at once when the GUI waits on _GEN_LOCK); then it commits and sleeps
+# WORKER_YIELD_SEC with the GIL and the lock free. One card pass (one
+# _GEN_LOCK hold) is sized to about WORKER_PASS_SEC from the measured time
+# per frame.
 WORKER_BURST_SEC = 1.0
 WORKER_YIELD_SEC = 0.03
 WORKER_PASS_SEC = 0.25
-# BUILD 169: explicit refresh (F5 / Play on dirty) fast mode: one commit
-# per REFRESH_BATCH_SECONDS of frames. BUILD 170: frames per card pass from free VRAM
-# (refresh_batch_frames), previewGpuBatchFrames .. REFRESH_GPU_MAX
-# BUILD 174: one fixed N per refresh, with REFRESH_NVDEC_HEADROOM kept
-# free beyond the margin for decode surfaces. BUILD 175: REFRESH_GPU_MAX 0
-# = no cap: N is the full VRAM fit (at least previewGpuBatchFrames).
-# BUILD 176: capped at 120 (VRAM fit still computed, N never above it).
-# BUILD 177: the cap is the Preview Frame Cap setting; this is its default
+# Explicit refresh (fast mode):
+# REFRESH_GPU_MAX: default of the Preview Frame Cap setting (upper bound
+#   on N; the per-range N itself comes from refresh_plan).
+# REFRESH_NVDEC_HEADROOM: not used by the current sizing.
+# REFRESH_GUI_STALL_SEC: if the Refreshing Preview poll has not run for
+#   this long, the worker naps briefly so the GUI thread gets the GIL.
+# REFRESH_BATCH_SECONDS: one commit per this many seconds of frames.
 REFRESH_GPU_MAX = 120
 REFRESH_NVDEC_HEADROOM = 1 << 30
 REFRESH_GUI_STALL_SEC = 0.3
@@ -443,9 +449,9 @@ def _mb(b):
 
 
 def _log_refresh_batch(chunk, gpu_n, dt):
-    # BUILD 171: one console line per large refresh card pass. BUILD 174:
-    # frames built (N, or fewer at a dirty run end) against the fixed N of
-    # the refresh pool; no VRAM query per pass
+    # One console line per refresh card pass: frames built (N, or fewer
+    # at a dirty run end) against the N the pool holds for this range; no
+    # VRAM query per pass
     try:
         print("WORKER refresh batch: %d frames %d..%d in %.0f ms (%.1f fps) | "
               "N %d (refresh pool)" % (
@@ -456,21 +462,25 @@ def _log_refresh_batch(chunk, gpu_n, dt):
 
 
 def _vram_fatal_check(where):
-    # BUILD 181: temporary hard guard (free VRAM under 1500 MB exits the
-    # program). BUILD 182: moved to sequence_player_preview, also checked
-    # inside each batch; this is the after-reserve / after-batch call.
+    # Hard VRAM guard (free VRAM under 1500 MB exits the program), see
+    # sequence_player_preview.vram_fatal_check. It is also checked inside
+    # each batch; this is the after-reserve / after-batch call.
     from sequence_player_preview import vram_fatal_check
     vram_fatal_check(where)
 
 
-# BUILD 180: free VRAM right after the pool reserve (drift baseline)
+# Drift baseline for _log_refresh_vram. Nothing sets it now (the drift
+# then prints "?"); vram_fatal_check reports drift from its own
+# _vram_base, which fit_refresh_pool sets after each reserve.
 _POOL_FREE = [None]
 
 
 def _log_refresh_vram(project, sequence_id):
-    # BUILD 180: per refresh batch: free VRAM after each step of the batch,
-    # what FLAVE holds, and the drift from the free after reserve. If free
-    # VRAM fell below the 25% margin, every decoder is closed (the guard).
+    # Debug only, not called in normal runs (see the after-batch checks in
+    # _pass_batched). Prints sequence_player_preview._refresh_trace (empty
+    # unless trace lines are added), what FLAVE holds on the card and the
+    # free VRAM now. If free VRAM is under 25% of total, every decoder is
+    # closed (refresh_vram_guard).
     try:
         from sequence_player_preview import (_refresh_trace, _generator_for,
                                              refresh_owned, free_vram,
@@ -492,33 +502,6 @@ def _log_refresh_vram(project, sequence_id):
                       "closed all decoders -> free %d MB" % got)
     except Exception as e:
         print("WORKER refresh vram log failed: %s" % e)
-
-
-def _log_refresh_pool(n, got):
-    # BUILD 173: the one free-VRAM query of a refresh and its reserved pool
-    try:
-        from sequence_player_preview import _last_batch_info as info, free_vram
-        after = free_vram()
-        _POOL_FREE[0] = after[0] if after else None
-        from sequence_player_preview import _vram_base
-        _vram_base[0] = _POOL_FREE[0]
-        if "n" in info:
-            print("WORKER refresh pool: free %s of %s, margin %s (25%%), "
-                  "NVDEC headroom %s, held %s, usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "
-                  "vram fit %d -> N %d (%s, min %d, max %s) | reserved %d | free "
-                  "after reserve %s" % (
-                      _mb(info["free"]), _mb(info["total"]), _mb(info["margin"]),
-                      _mb(info.get("headroom", 0)),
-                      _mb(info["held"]), _mb(info["usable"]),
-                      info["per"] / float(1 << 20), info["buf"] / float(1 << 20),
-                      info["layers"], info["raw"], info["n"], info["why"],
-                      info["low"], info["high"] if info["high"] > 0 else "none", got,
-                      _mb(after[0]) if after else "?"))
-        else:
-            print("WORKER refresh pool: N %d (%s) | reserved %d" % (
-                n, info.get("why", "?"), got))
-    except Exception as e:
-        print("WORKER refresh pool log failed: %s" % e)
 
 
 def pass_frame_limit(sec_per_frame, budget=None):
@@ -582,10 +565,10 @@ _worker = None
 _play_priority = [0]
 
 
-# BUILD 166: an explicit refresh (F5) asked for every not-clean frame;
-# cleared when that pass finishes
+# An explicit refresh (F5) asked for every not-clean frame; cleared when
+# that pass finishes
 _refresh_all = [0]
-# BUILD 172: perf_counter of the last Refreshing Preview poll (GUI thread)
+# perf_counter of the last Refreshing Preview poll (GUI thread)
 _gui_beat = [0.0]
 
 
