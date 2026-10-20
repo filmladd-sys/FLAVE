@@ -862,6 +862,12 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
                 nbufs = len(gen.gen_bufs)
                 room = fv[0] + nbufs * int(gen.row) * int(gen.seq_h) - still \
                     - _refresh_keep(fv[1])
+                # BUILD 195: a shortfall comes out of the pulls first (k,
+                # not under STATES_MAX), so N still covers the range and
+                # leaves no small leftover batch
+                over = n * (per + int(gen.row) * int(gen.seq_h)) + held - room
+                if over > 0 and k:
+                    k, held = _shrink_pull(gen, k, unit_dec, over)
                 fit = max(1, int((room - held) // (per + int(gen.row) * int(gen.seq_h))))
                 n = min(n, fit)
                 if k and k > n:
@@ -890,6 +896,16 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
                   (", short %d MB" % (short >> 20)) if short > 0 else ""))
         if short <= 0 or n <= 1:
             return n
+        if k:
+            # BUILD 195: pulls shrink first (no re-reserve: decode is not
+            # allocated yet); N only for what that cannot cover
+            k2, held2 = _shrink_pull(gen, k, unit_dec, short)
+            short -= held - held2
+            k, held = k2, held2
+            if short <= 0:
+                print("WORKER refresh pool: pulls lowered to %d (%d MB), "
+                      "N %d kept" % (k, held >> 20, n))
+                return n
         unit = per + int(gen.row) * int(gen.seq_h)
         n = max(1, n - (short + unit - 1) // unit)
         if k and k > n:
@@ -898,6 +914,15 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
             held = k * unit_dec
             gen._pull_k = k
     return n
+
+
+def _shrink_pull(gen, k, unit_dec, over):
+    # BUILD 195: lower the pull size by enough frames to free over bytes,
+    # not under min(k, STATES_MAX); returns (k, held bytes)
+    floor = min(k, _NvJpegEncoder.STATES_MAX)
+    k = max(floor, k - int((over + unit_dec - 1) // unit_dec)) if unit_dec else k
+    gen._pull_k = k
+    return k, k * unit_dec
 
 
 def refresh_pool_size(project_path, sequence_id):
