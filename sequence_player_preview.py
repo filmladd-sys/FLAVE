@@ -116,9 +116,21 @@ def _prefetch(self, frames, snapshot):
             self.dec_next.pop(key, None)
     return pre
 
+# BUILD 170: buffers / encoder states kept after a pass; a normal pass
+# (n <= GEN_KEEP) frees what a bigger refresh pass grew beyond that
+GEN_KEEP = 30
+
+
 def _gen_buffers(self, n):
     # n sequence-size RGB device buffers for one GPU pass (grown, kept)
     cudart = _libs()[0]
+    if n <= GEN_KEEP and len(self.gen_bufs) > GEN_KEEP:
+        for b in self.gen_bufs[GEN_KEEP:]:
+            if b.value:
+                cudart.cudaFree(b)
+        del self.gen_bufs[GEN_KEEP:]
+        if self.nvj is not None:
+            self.nvj.trim(GEN_KEEP)
     while len(self.gen_bufs) < n:
         ptr = ctypes.c_void_p()
         _check(cudart.cudaMalloc(ctypes.byref(ptr), self.row * self.seq_h),
@@ -309,6 +321,39 @@ def _generator_for(project_path, sequence_id):
     if engine is not None:
         return engine
     return _player_for(project_path, sequence_id)
+
+
+def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
+                         margin=0.25):
+    # BUILD 170: worker, explicit refresh: frames per card pass from free
+    # VRAM (cudaMemGetInfo), keeping margin x total VRAM free for other
+    # programs. Estimated cost per frame: the RGB composite buffer, an
+    # nvJPEG encoder state (about 2 x w x h) and, per enabled video track,
+    # one decoded surface (NV12 with room for a larger source: 3 x w x h).
+    # Buffers / states this composer already holds are reused, so their
+    # size counts as free. Clamped to low..high; low on any failure.
+    try:
+        gen = _generator_for(project_path, sequence_id)
+        if gen is None:
+            return low
+        cudart = _libs()[0]
+        free = ctypes.c_size_t(0)
+        total = ctypes.c_size_t(0)
+        _check(cudart.cudaMemGetInfo(ctypes.byref(free), ctypes.byref(total)),
+               "mem info")
+        w, h = int(gen.seq_w), int(gen.seq_h)
+        buf = int(gen.row) * h + 2 * w * h
+        layers = 0
+        for r in (snapshot[0] if snapshot else []):
+            if r[1] and r[3] == "video":
+                layers += 1
+        per = buf + max(1, layers) * 3 * w * h
+        held = len(getattr(gen, "gen_bufs", [])) * buf
+        usable = free.value + held - int(margin * total.value)
+        return max(low, min(high, int(usable // per) if usable > 0 else low))
+    except Exception as e:
+        print(f"Refresh batch size failed: {e}")
+        return low
 
 
 def preview_jpeg_quality():

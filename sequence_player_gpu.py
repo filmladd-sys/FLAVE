@@ -24,6 +24,9 @@ _gui_wants = [0]
 _gui_last = [0.0]
 _GUI_QUIET = [0.25]
 _worker_burst = [False]
+# BUILD 170: explicit refresh pass running: the worker takes the lock at
+# once (no wait for GUI activity); set by the preview worker
+_worker_fast = [False]
 
 
 def gui_touch():
@@ -47,6 +50,9 @@ class _GuiGen(object):
 def _worker_acquire():
     # Worker side: wait while the GUI wants the lock or was active in the
     # last _GUI_QUIET[0] seconds (the decoder may hold the GIL), then take it
+    if _worker_fast[0]:
+        _GEN_LOCK.acquire()
+        return
     while (_gui_wants[0] > 0
            or (not _worker_burst[0]
                and time.perf_counter() - _gui_last[0] < _GUI_QUIET[0])):
@@ -240,6 +246,13 @@ class _NvJpegEncoder(object):
         _check(cudart.cudaStreamSynchronize(self.stream), "nvjpeg sync")
         return [outs[k].raw[:lens[k].value] for k in range(len(srcs))]
 
+    def trim(self, keep):
+        # BUILD 170: free encoder states beyond keep (after a big refresh)
+        while len(self.states) > keep:
+            st = self.states.pop()
+            if st.value:
+                self.lib.nvjpegEncoderStateDestroy(st)
+
     def destroy(self):
         lib = self.lib
         for st in self.states:
@@ -359,6 +372,9 @@ def _libs():
     cudart.cudaMalloc.restype = c.c_int
     cudart.cudaFree.argtypes = [c.c_void_p]
     cudart.cudaFree.restype = c.c_int
+    # BUILD 170: free / total device memory (refresh batch size)
+    cudart.cudaMemGetInfo.argtypes = [c.POINTER(c.c_size_t), c.POINTER(c.c_size_t)]
+    cudart.cudaMemGetInfo.restype = c.c_int
     cudart.cudaMemcpy.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t, c.c_int]
     cudart.cudaMemcpy.restype = c.c_int
     cudart.cudaMemsetAsync.argtypes = [c.c_void_p, c.c_int, c.c_size_t, c.c_void_p]

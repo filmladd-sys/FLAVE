@@ -182,7 +182,11 @@ class PreviewWorker(object):
         # worker back), bigger card passes and fewer commits
         fast = bool(_refresh_all[0])
         if fast:
-            gpu_n = max(gpu_n, REFRESH_GPU_FRAMES)
+            # BUILD 170: card pass size from free VRAM, re-read per chunk
+            from sequence_player_preview import refresh_batch_frames
+            import sequence_player_gpu as spg
+            gpu_low = gpu_n
+            spg._worker_fast[0] = True
             sp._worker_burst[0] = True
             burst_left = 1 << 30
             bursts = 1
@@ -252,6 +256,9 @@ class PreviewWorker(object):
                 j = i + 1
                 left_s = WORKER_BURST_SEC - (time.perf_counter() - burst_t0)
                 budget = REFRESH_PASS_SEC if fast else min(WORKER_PASS_SEC, left_s)
+                if fast:
+                    gpu_n = refresh_batch_frames(project, sequence_id, snapshot,
+                                                 gpu_low, REFRESH_GPU_MAX)
                 limit = max(1, min(gpu_n, burst_left,
                                    pass_frame_limit(sec_per_frame, budget)))
                 while (len(chunk) < limit and j < len(order)
@@ -261,6 +268,11 @@ class PreviewWorker(object):
                 # Let the GUI thread run between card passes (GIL and the lock)
                 if not fast:
                     time.sleep(0.005)
+                elif sp._gui_wants[0] > 0:
+                    # BUILD 170: no yield for activity, but a GUI thread
+                    # already blocked on the lock gets it for its one frame
+                    # (else the window, Refreshing Preview too, freezes)
+                    time.sleep(0.001)
                 # Dirty mark number before the build: an edit made while
                 # this chunk renders (old snapshot) keeps its frames dirty
                 seq0 = dirty_seq()
@@ -308,6 +320,8 @@ class PreviewWorker(object):
                 i = j
         finally:
             sp._worker_burst[0] = False
+            if fast:
+                spg._worker_fast[0] = False
             if made:
                 el = time.perf_counter() - t_pass0
                 print("WORKER preview: %d frames %.1fs (%.1f fps) bursts %d "
@@ -325,10 +339,11 @@ WORKER_BURST_SEC = 1.0
 WORKER_YIELD_SEC = 0.03
 WORKER_PASS_SEC = 0.25
 # BUILD 169: explicit refresh (F5 / Play on dirty) fast mode: card pass up
-# to REFRESH_GPU_FRAMES frames and REFRESH_PASS_SEC of work, one commit per
-# REFRESH_BATCH_SECONDS of frames
-REFRESH_GPU_FRAMES = 30
-REFRESH_PASS_SEC = 2.0
+# to REFRESH_PASS_SEC of work, one commit per REFRESH_BATCH_SECONDS of
+# frames. BUILD 170: frames per card pass from free VRAM
+# (refresh_batch_frames), previewGpuBatchFrames .. REFRESH_GPU_MAX
+REFRESH_GPU_MAX = 120
+REFRESH_PASS_SEC = 5.0
 REFRESH_BATCH_SECONDS = 10
 
 
