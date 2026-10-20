@@ -481,11 +481,25 @@ def _drag_group(self, clip, edge="move"):
                   if o[0] not in ids]
         entry = {"clip": c, "start": c[2], "length": c[3], "in": c[7],
                  "prev_end": prev_end, "next_start": next_start,
-                 "blocks": blocks}
+                 "blocks": blocks,
+                 "free_in": _no_source_floor(self, c)}
         if is_keyframe_clip_id(c[0]) and len(c) > 9:
             entry["keys"] = list(c[9])
         group.append(entry)
     return group
+
+
+def _no_source_floor(self, clip):
+    # True for keyframe, caption and image (still) clips: they have no
+    # source media to run out of, so a left trim may take their in-point
+    # below source 0. Video and audio clips, and sequence clips on any
+    # track (their in-point is a frame of the child sequence), stop at 0.
+    from keyframe import is_keyframe_clip_id
+    if is_keyframe_clip_id(clip[0]) or is_caption_id(clip[0]):
+        return True
+    if clip[0] in (getattr(self, "_seq_refs", None) or {}):
+        return False
+    return self._track_type(self._clip_track_id(clip)) == "image"
 
 
 def _edge_drag_move(self, pos):
@@ -635,8 +649,13 @@ def _group_delta_range(self, group, edge):
             if next_start is not None:
                 hi = min(hi, next_start - (start + length))
         elif edge == "left":
-            # start + d >= prev_end and >= 0, in + d >= 0, length - d >= 1
-            lo = max(lo, max(0, prev_end) - start, -in_f)
+            # start + d >= prev_end and >= 0, length - d >= 1, and for
+            # clips with source media in + d >= 0. Keyframe, caption and
+            # image clips (free_in) have no source floor, so a linked
+            # stack is held only by its video / audio members' in-points.
+            lo = max(lo, max(0, prev_end) - start)
+            if not m.get("free_in"):
+                lo = max(lo, -in_f)
             hi = min(hi, length - 1)
         else:
             # length + d >= 1; end + d <= next_start

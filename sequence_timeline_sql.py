@@ -323,7 +323,7 @@ def refresh(self):
         cur.execute(
             "SELECT c.id, c.track_id, c.footage_id, c.start_frame, c.length_frames, "
             "COALESCE(c.enabled, 1), COALESCE(c.solo, 0), c.in_frame, "
-            "COALESCE(f.filename, f.original_path, ''), c.link_id "
+            "COALESCE(f.filename, f.original_path, ''), c.link_id, t.track_type "
             "FROM clips c JOIN tracks t ON t.id = c.track_id "
             "LEFT JOIN footage f ON f.id = c.footage_id "
             "WHERE t.sequence_id = ? ORDER BY c.start_frame, c.id",
@@ -331,12 +331,20 @@ def refresh(self):
         )
         clips = {}
         for (clip_id, track_id, footage_id, start_frame, length_frames,
-             clip_enabled, clip_solo, in_frame, filename, link_id) in cur.fetchall():
+             clip_enabled, clip_solo, in_frame, filename, link_id,
+             track_type) in cur.fetchall():
+            # Image (still) clips may have an in-point below source 0 (a
+            # left trim has no source floor for them; markers stay in
+            # source terms). Video / audio clips and sequence clips
+            # (footage_id NULL) never go below 0.
+            in_f = int(in_frame or 0)
+            if (track_type or "").lower() != "image" or footage_id is None:
+                in_f = max(0, in_f)
             # List, not tuple: edge drags update start and length in place
             clips.setdefault(track_id, []).append(
                 [clip_id, footage_id, max(0, int(start_frame or 0)), int(length_frames or 1),
                  os.path.basename(filename or ""), int(clip_enabled), int(clip_solo),
-                 max(0, int(in_frame or 0)), link_id]
+                 in_f, link_id]
             )
         # BUILD 105: sequence clips (footage_id NULL, sequence_id_ref set):
         # title is the child sequence name; clip id -> child id kept apart
