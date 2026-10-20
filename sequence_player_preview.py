@@ -323,6 +323,23 @@ def _generator_for(project_path, sequence_id):
     return _player_for(project_path, sequence_id)
 
 
+# BUILD 171: numbers of the last refresh_batch_frames call (console log)
+_last_batch_info = {}
+
+
+def free_vram():
+    # BUILD 171: (free, total) device bytes, or None
+    try:
+        cudart = _libs()[0]
+        free = ctypes.c_size_t(0)
+        total = ctypes.c_size_t(0)
+        _check(cudart.cudaMemGetInfo(ctypes.byref(free), ctypes.byref(total)),
+               "mem info")
+        return free.value, total.value
+    except Exception:
+        return None
+
+
 def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
                          margin=0.25):
     # BUILD 170: worker, explicit refresh: frames per card pass from free
@@ -332,9 +349,11 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
     # one decoded surface (NV12 with room for a larger source: 3 x w x h).
     # Buffers / states this composer already holds are reused, so their
     # size counts as free. Clamped to low..high; low on any failure.
+    _last_batch_info.clear()
     try:
         gen = _generator_for(project_path, sequence_id)
         if gen is None:
+            _last_batch_info["why"] = "no composer"
             return low
         cudart = _libs()[0]
         free = ctypes.c_size_t(0)
@@ -349,10 +368,19 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
                 layers += 1
         per = buf + max(1, layers) * 3 * w * h
         held = len(getattr(gen, "gen_bufs", [])) * buf
-        usable = free.value + held - int(margin * total.value)
-        return max(low, min(high, int(usable // per) if usable > 0 else low))
+        margin_b = int(margin * total.value)
+        usable = free.value + held - margin_b
+        raw = int(usable // per) if usable > 0 else 0
+        n = max(low, min(high, raw if raw > 0 else low))
+        _last_batch_info.update(
+            free=free.value, total=total.value, margin=margin_b, held=held,
+            usable=usable, per=per, buf=buf, layers=layers, raw=raw,
+            low=low, high=high, n=n,
+            why=("cap" if raw > high else "floor" if raw < low else "vram"))
+        return n
     except Exception as e:
         print(f"Refresh batch size failed: {e}")
+        _last_batch_info["why"] = "error"
         return low
 
 

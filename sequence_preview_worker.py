@@ -259,6 +259,7 @@ class PreviewWorker(object):
                 if fast:
                     gpu_n = refresh_batch_frames(project, sequence_id, snapshot,
                                                  gpu_low, REFRESH_GPU_MAX)
+                    time_n = pass_frame_limit(sec_per_frame, budget)
                 limit = max(1, min(gpu_n, burst_left,
                                    pass_frame_limit(sec_per_frame, budget)))
                 while (len(chunk) < limit and j < len(order)
@@ -294,6 +295,8 @@ class PreviewWorker(object):
                     jpegs = FrameGenerateBatch(project, sequence_id, chunk, snapshot)
                 dt = time.perf_counter() - t_c
                 hold_max = max(hold_max, dt)
+                if fast and len(chunk) > 1:
+                    _log_refresh_batch(chunk, gpu_n, time_n, dt)
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
                     0.5 * sec_per_frame + 0.5 * per)
@@ -345,6 +348,38 @@ WORKER_PASS_SEC = 0.25
 REFRESH_GPU_MAX = 120
 REFRESH_PASS_SEC = 5.0
 REFRESH_BATCH_SECONDS = 10
+
+
+def _mb(b):
+    return "%.0f MB" % (float(b) / (1 << 20))
+
+
+def _log_refresh_batch(chunk, gpu_n, time_n, dt):
+    # BUILD 171: one console line per large refresh card pass: the chosen
+    # N and why (VRAM numbers from refresh_batch_frames), the frames this
+    # pass built (also limited by the time budget and the dirty run), and
+    # free VRAM after the pass
+    try:
+        from sequence_player_preview import _last_batch_info as info, free_vram
+        after = free_vram()
+        if "n" in info:
+            vram = ("free %s of %s, margin %s (25%%), held %s, usable %s, "
+                    "per frame %.1f MB (buffer %.1f MB + %d video layers), "
+                    "vram fit %d -> N %d (%s, clamp %d..%d)" % (
+                        _mb(info["free"]), _mb(info["total"]), _mb(info["margin"]),
+                        _mb(info["held"]), _mb(info["usable"]),
+                        info["per"] / float(1 << 20), info["buf"] / float(1 << 20),
+                        info["layers"], info["raw"], info["n"], info["why"],
+                        info["low"], info["high"]))
+        else:
+            vram = "N %d (%s)" % (gpu_n, info.get("why", "?"))
+        print("WORKER refresh batch: %d frames %d..%d in %.0f ms (%.1f fps) | %s "
+              "| time fit %d (%.1f s budget) | free after %s" % (
+                  len(chunk), chunk[0], chunk[-1], dt * 1000.0,
+                  len(chunk) / dt if dt > 0 else 0.0, vram, time_n,
+                  REFRESH_PASS_SEC, _mb(after[0]) if after else "?"))
+    except Exception as e:
+        print("WORKER refresh batch log failed: %s" % e)
 
 
 def pass_frame_limit(sec_per_frame, budget=None):
