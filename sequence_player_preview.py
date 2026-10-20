@@ -250,19 +250,22 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         f_closed = _free_mb()
         before = set(self.decoders.keys())
         pre = self._prefetch(frames, snapshot, clips)
-        vram_fatal_check("track %s decode, frames %d..%d" % (
-            track_id, frames[0], frames[-1]))
+        # BUILD 183: the files (footage or proxy) this track decoded
+        files = ", ".join(sorted(set(k[1] for k in self.decoders if k[0] in clips)))
+        vram_fatal_check("track %s decode, frames %d..%d, files %s" % (
+            track_id, frames[0], frames[-1], files or "none"))
         for k, fr in enumerate(frames):
             self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
                             clips=clips, clear=False)
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
-        vram_fatal_check("track %s blend, frames %d..%d" % (
-            track_id, frames[0], frames[-1]))
+        vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
+            track_id, frames[0], frames[-1], files or "none"))
         _refresh_trace.append(
             "track %s: closed %d decoders (free %d MB), opened %d, %d frames "
-            "batch-decoded, blended (free %d MB)" % (
+            "batch-decoded from %s, blended (free %d MB)" % (
                 track_id, closed, f_closed,
-                len(set(self.decoders.keys()) - before), len(pre), _free_mb()))
+                len(set(self.decoders.keys()) - before), len(pre),
+                files or "none", _free_mb()))
         pre.clear()
         del pre
     freed = 0
