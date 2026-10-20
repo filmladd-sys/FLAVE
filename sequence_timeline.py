@@ -494,6 +494,14 @@ class SequenceTimeline(QMainWindow):
         self._audio_auto_failed = False
         self._audio_mix_kick()
         self.status_bar.showMessage("Refreshing preview", 3000)
+        # BUILD 167: progress window, closes itself when both are done
+        try:
+            from refresh_preview_dialog import RefreshPreviewDialog
+            if getattr(self, "_refresh_dialog", None) is None:
+                self._refresh_dialog = RefreshPreviewDialog(self)
+            self._refresh_dialog.start()
+        except Exception as e:
+            print(f"Refresh preview window failed: {e}")
 
     def _project_db(self):
         return _get_global_setting("current_project", "")
