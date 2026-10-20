@@ -878,8 +878,10 @@ def start_mix(project_db, sequence_id, fps, total_frames, sig):
 
 
 def _mix_worker(job):
-    # Worker thread. Only sqlite (own connections, opened here), numpy and
-    # files; never Qt.
+    # The job's coordinating thread. Only sqlite (own connections, opened
+    # here), numpy and files; never Qt. The samples are mixed on the range
+    # mix pool (_mix_ranges); the temp WAV, swap, signature, layout and
+    # status are written here only.
     tmp = preview_audio_wav_path(job.project_db, job.sequence_id) + ".%d.tmp" % job.token
     try:
         prev = getattr(job, "prev", None)
@@ -917,8 +919,16 @@ def _mix_worker(job):
                 print("Preview audio partial mix failed (%s): full mix" % e)
                 pcm = None
         if pcm is None:
-            pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames, vols,
-                           order, cancel=job.cancel, as_array=_HAS_NP)
+            n_full = _frame_to_sample(job.total_frames, job.fps)
+            if _HAS_NP and n_full > 0:
+                # full mix = one range over the whole sequence, on the
+                # range mix pool (same samples as _mix_pcm)
+                pcm = np.zeros(n_full, dtype="<i2")
+                _mix_ranges(job.project_db, rows, job.fps, n_full, vols, order,
+                            [(0, n_full)], pcm, cancel=job.cancel)
+            else:
+                pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames,
+                               vols, order, cancel=job.cancel, as_array=_HAS_NP)
             job.mode = "full"
         if job.cancel.is_set():
             raise MixCancelled()
@@ -1332,14 +1342,124 @@ def _partial_pcm(job, inputs, plan):
     return out
 
 
+# Range mix pool. _mix_ranges splits the ranges to mix into at most
+# MIX_POOL_SIZE groups of contiguous, non-overlapping sample ranges (a long
+# range is cut at a sample boundary; every sample's arithmetic depends only
+# on its own position, so a cut never changes a sample). Each group is
+# mixed on its own worker thread into a private int16 buffer
+# (_mix_ranges_pcm: own sqlite connections, no shared state); the calling
+# thread (the job's coordinating thread) copies each finished group into
+# out as it arrives and does all file, signature, layout and state work.
+# Numpy releases the GIL in the per-chunk arithmetic, so the groups mix in
+# parallel. Groups smaller than MIX_SPLIT_MIN samples are not worth a
+# thread: a small remix runs on the calling thread as one group. Cancel
+# (the job's event, or a failed worker) is checked by every worker between
+# rows and chunks; the caller always joins every worker before it returns.
+MIX_POOL_SIZE = min(3, max(2, (os.cpu_count() or 2) // 4))
+MIX_SPLIT_MIN = 4 * MIX_CHUNK   # ~22 s at 48 kHz
+
+
+class _AnySet(object):
+    # is_set() of several events (None entries ignored)
+    def __init__(self, *events):
+        self.events = [e for e in events if e is not None]
+
+    def is_set(self):
+        for e in self.events:
+            if e.is_set():
+                return True
+        return False
+
+
+def _split_ranges(ranges, parts):
+    # Sorted, non-overlapping [a, b) ranges -> up to parts groups of
+    # roughly equal sample count, each a list of ranges in order
+    total = sum(b - a for a, b in ranges)
+    k = min(int(parts), max(1, total // MIX_SPLIT_MIN))
+    if k <= 1:
+        return [list(ranges)]
+    target = -(-total // k)
+    groups, cur, room = [], [], target
+    for a, b in ranges:
+        while b > a:
+            take = min(b - a, room)
+            cur.append((a, a + take))
+            a += take
+            room -= take
+            if room <= 0:
+                groups.append(cur)
+                # the last group takes whatever is left
+                cur = []
+                room = target if len(groups) < k - 1 else total
+    if cur:
+        groups.append(cur)
+    return groups
+
+
 def _mix_ranges(project_db, rows, fps, n, vol_clips, track_order, ranges, out,
                 cancel=None):
-    # Mix only sample ranges [a, b) into out (int16, n samples). Same
-    # per-sample arithmetic and row order as _mix_pcm (numpy path), so each
-    # sample equals the full mix. A row's source is read only if it
-    # reaches a range.
+    # Mix only sample ranges [a, b) into out (int16, n samples), on the
+    # range mix pool (see above). Identical samples to one _mix_ranges_pcm
+    # call over all ranges.
     if not ranges:
         return
+    groups = _split_ranges(ranges, MIX_POOL_SIZE)
+    args = (project_db, rows, fps, n, vol_clips, track_order)
+    if len(groups) == 1:
+        for (a, b), pc in zip(groups[0], _mix_ranges_pcm(
+                *args, ranges=groups[0], cancel=cancel)):
+            out[a:b] = pc
+        return
+    import queue
+    stop = threading.Event()        # set when a worker fails
+    any_cancel = _AnySet(cancel, stop)
+    results = queue.Queue()
+
+    def work(group):
+        try:
+            results.put((group, _mix_ranges_pcm(*args, ranges=group,
+                                                cancel=any_cancel), None))
+        except BaseException as e:
+            results.put((group, None, e))
+
+    name = threading.current_thread().name
+    threads = [threading.Thread(target=work, args=(g,),
+                                name="%s-w%d" % (name, i))
+               for i, g in enumerate(groups)]
+    err = None
+    try:
+        for t in threads:
+            t.daemon = True
+            t.start()
+        for _ in threads:
+            group, pcs, e = results.get()
+            if e is not None:
+                if err is None:
+                    err = e
+                stop.set()
+                continue
+            if err is None:
+                for (a, b), pc in zip(group, pcs):
+                    out[a:b] = pc
+            pcs = None
+    except BaseException:
+        stop.set()
+        raise
+    finally:
+        for t in threads:
+            t.join()
+    if err is not None:
+        raise err
+
+
+def _mix_ranges_pcm(project_db, rows, fps, n, vol_clips, track_order, ranges,
+                    cancel=None):
+    # Mix sample ranges [a, b) -> one int16 array per range (private
+    # buffers, nothing shared). Same per-sample arithmetic and row order as
+    # _mix_pcm (numpy path), so each sample equals the full mix. A row's
+    # source is read only if it reaches a range.
+    if not ranges:
+        return []
     vol_clips = vol_clips or []
     track_order = track_order or {}
     accs = [np.zeros(b - a, dtype=np.float64) for a, b in ranges]
@@ -1395,10 +1515,14 @@ def _mix_ranges(project_db, rows, fps, n, vol_clips, track_order, ranges, out,
                     raise MixCancelled()
                 _mix_yield()
         src = pcm = None
+    pcs = []
     for i, (a, b) in enumerate(ranges):
         acc = accs[i]
+        pc = np.empty(b - a, dtype="<i2")
         for c0 in range(0, b - a, MIX_CHUNK):
             c1 = min(b - a, c0 + MIX_CHUNK)
-            out[a + c0:a + c1] = np.clip(acc[c0:c1], -32768, 32767)
+            pc[c0:c1] = np.clip(acc[c0:c1], -32768, 32767)
             _mix_yield()
         accs[i] = None
+        pcs.append(pc)
+    return pcs
