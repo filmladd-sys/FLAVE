@@ -194,6 +194,10 @@ class PreviewWorker(object):
         full = bool(_refresh_all[0] or _play_priority[0])
         order = (list(_forward(center, total)) if full
                  else [max(0, min(total - 1, int(center)))])
+        if _refresh_all[0]:
+            # BUILD 179: the explicit refresh walks from frame 0 (its first
+            # dirty frame: clean ones are skipped), not from the playhead
+            order = list(range(total))
         # BUILD 169: explicit refresh pass = fast mode: no bursts, yields,
         # GUI-quiet waits or sleeps (only a GUI waiting on the lock holds the
         # worker back), bigger card passes and fewer commits

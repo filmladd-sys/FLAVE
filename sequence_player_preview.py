@@ -211,19 +211,32 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     # buffers, sync, drop the decoded frames before the next track. Each
     # frame still gets its layers blended bottom first (same image as
     # composite_batch); peak decoded frames held: one layer's N.
+    # BUILD 179: a SimpleDecoder keeps its own output frames, as many as
+    # its largest get_batch_frames (N), until it is closed; dropping the
+    # returned frames frees nothing. So before each track decodes, every
+    # decoder of another clip is closed: one layer's decoders hold memory
+    # at a time (was: up to DEC_MAX decoders, each with an N-frame pool,
+    # building up as the refresh walked the sequence). Stills not in this
+    # batch are freed after it (was: every still of the sequence kept).
     cudart = _libs()[0]
     for b in bufs:
         _check(cudart.cudaMemsetAsync(b, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
     used = set()
+    stills = set()
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
             used.add(item[6][0])
+            if item[0] == "image":
+                stills.add(item[1])
     clips_by_track = snapshot[1]
     for track_id, _en, _solo, _kind in reversed(snapshot[0]):
         clips = set(c[0] for c in clips_by_track.get(track_id, [])) & used
         if not clips:
             continue
+        for key in list(self.decoders.keys()):
+            if key[0] not in clips:
+                self._close_decoder(key)
         pre = self._prefetch(frames, snapshot, clips)
         for k, fr in enumerate(frames):
             self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
@@ -231,6 +244,11 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
         pre.clear()
         del pre
+    for path in list(self.images.keys()):
+        if path not in stills:
+            item = self.images.pop(path)
+            if item is not None:
+                cudart.cudaFree(item[0])
 
 
 def host_rgb(self, bufs):
@@ -486,6 +504,9 @@ def release_refresh_pool(project_path, sequence_id):
         gen._refresh_hold = 0
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         _trim_gen(gen)
+        # BUILD 179: decoders grown to N-frame output pools by the refresh
+        # are closed (reopened on demand at the normal 1-frame size)
+        gen._close_all_decoders()
     except Exception as e:
         print(f"Refresh pool release failed: {e}")
     finally:
