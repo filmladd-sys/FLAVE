@@ -245,8 +245,11 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         if not clips:
             continue
         closed = 0
+        # BUILD 192: decoders kept open for the range (plan said all its
+        # layers' decode fits): only decoders of clips not in this batch
+        keep_dec = getattr(self, "_keep_dec", False)
         for key in list(self.decoders.keys()):
-            if key[0] not in clips:
+            if key[0] not in (used if keep_dec else clips):
                 self._close_decoder(key)
                 closed += 1
         # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
@@ -278,9 +281,12 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         # blend, coexists with the next layer, or is held while the
         # finished composites are JPEG-encoded. Peak: one layer's decode
         # surfaces plus the N sequence-size composite buffers.
-        for key in list(self.decoders.keys()):
-            if key[0] in clips:
-                self._close_decoder(key)
+        # BUILD 192: kept open for the next batch of the range (no reopen
+        # and seek) when the plan counted every layer's decode at once
+        if not keep_dec:
+            for key in list(self.decoders.keys()):
+                if key[0] in clips:
+                    self._close_decoder(key)
         for path in track_stills(self, frames, snapshot, clips):
             item = self.images.pop(path, None)
             if item is not None:
@@ -375,6 +381,26 @@ def refresh_vram_guard(project_path, sequence_id, floor):
     finally:
         _GEN_LOCK.release()
     return fv[0] >> 20, _free_mb()
+
+
+def kept_decoder_guard(project_path, sequence_id):
+    # BUILD 192: worker, after a batch of a range whose decoders are kept
+    # open: the real free VRAM (all layers decoded and held) is measured;
+    # under the refresh keep, every decoder is closed and the rest of the
+    # range closes per layer again (the plan's estimate was too low)
+    gen = _generator_for(project_path, sequence_id)
+    if gen is None or not getattr(gen, "_keep_dec", False):
+        return
+    fv = free_vram()
+    if fv is None:
+        return
+    res = refresh_vram_guard(project_path, sequence_id, _refresh_keep(fv[1]))
+    if res is not None:
+        gen._keep_dec = False
+        print("WORKER refresh decoders: free %d MB under keep %d MB with "
+              "decoders kept open; closed (free %d MB), closing per layer "
+              "for the rest of the range" % (
+                  res[0], _refresh_keep(fv[1]) >> 20, res[1]))
 
 
 def host_rgb(self, bufs):
@@ -658,6 +684,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         gen._close_all_decoders()
         gen._refresh_hold = 0
+        gen._keep_dec = False
         _free_pool(gen, None)
     finally:
         _GEN_LOCK.release()
@@ -698,23 +725,36 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
               pool_px / float(1 << 20), pool_n))
     for a, b, _sig, items in ranges:
         per, still, big_path, big_size = 0, 0, None, None
+        per_all = {}
         for it in items:
             size = _source_size(it[1]) or (int(gen.seq_w), int(gen.seq_h))
             if it[0] == "image":
                 still += 4 * size[0] * size[1]
             elif it[0] == "video":
                 cost = int(size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
+                per_all[it[6]] = cost
                 if cost > per:
                     per, big_path, big_size = cost, it[1], size
         if fv is None:
             n = 1
         else:
             n = max(1, min(pool_n, int((budget - still) // (pool_px + per))))
-        plan.append((a, b, n, per, still))
+        # BUILD 192: a range longer than one batch keeps every layer's
+        # decoders open between its batches (no reopen and seek per
+        # batch). Then all layers' decode is held at once, so N is
+        # recomputed from the sum of their costs (the same budget and
+        # keep); a range done in one batch closes per layer as before.
+        keep_dec = fv is not None and b - a + 1 > n and len(per_all) > 0
+        if keep_dec:
+            per = sum(per_all.values())
+            n = max(1, min(pool_n, int((budget - still) // (pool_px + per))))
+        plan.append((a, b, n, per, still, keep_dec))
         print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
-              "%.1f MB/frame decode, stills %d MB" % (
+              "%.1f MB/frame decode%s, stills %d MB" % (
                   a, b, n, ("%dx%d" % big_size) if big_size else "none",
-                  big_path or "", per / float(1 << 20), still >> 20))
+                  big_path or "", per / float(1 << 20),
+                  (" (%d layers, decoders kept open)" % len(per_all))
+                  if keep_dec else "", still >> 20))
     return plan
 
 
@@ -760,7 +800,7 @@ def reserve_refresh_pool(project_path, sequence_id, n):
         _GEN_LOCK.release()
 
 
-def fit_refresh_pool(project_path, sequence_id, n, per, still):
+def fit_refresh_pool(project_path, sequence_id, n, per, still, keep_dec=False):
     # BUILD 189: worker, at each plan range: hold a refresh pool of exactly
     # n (frees beyond n, reserves up to n). Then the free VRAM after the
     # reserve is checked: if n frames of decode (per bytes each) + still
@@ -769,6 +809,16 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still):
     gen = _generator_for(project_path, sequence_id)
     if gen is None:
         return 0
+    # BUILD 192: a new range starts with no decoders open (the previous
+    # range's kept ones are not in this range's free VRAM math);
+    # keep_dec: this range keeps its decoders open between batches
+    _GEN_LOCK.acquire()
+    try:
+        _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+        gen._close_all_decoders()
+        gen._keep_dec = bool(keep_dec)
+    finally:
+        _GEN_LOCK.release()
     n = max(1, int(n))
     for _ in range(4):
         if int(getattr(gen, "_refresh_hold", 0) or 0) != n:
@@ -822,6 +872,7 @@ def release_refresh_pool(project_path, sequence_id):
     _GEN_LOCK.acquire()
     try:
         gen._refresh_hold = 0
+        gen._keep_dec = False
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
         _trim_gen(gen)
         # BUILD 179: decoders grown to N-frame output pools by the refresh

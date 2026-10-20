@@ -50,6 +50,8 @@ class PreviewWorker(object):
         # at the start of an explicit refresh, freed when it finishes
         self._pool_n = 0
         self._pool_key = None
+        # BUILD 192: (inputs, plan) of the refresh pass in progress
+        self._plan = None
         self._thread = threading.Thread(target=self._run, name="PreviewWorker",
                                         daemon=True)
         self._thread.start()
@@ -125,6 +127,7 @@ class PreviewWorker(object):
                     self._done_gen = gen
                     # BUILD 166: the explicit refresh pass is finished
                     _refresh_all[0] = 0
+                    self._plan = None
                     pool = self._pool_key if self._pool_n else None
                     self._pool_n = 0
                     self._pool_key = None
@@ -223,8 +226,24 @@ class PreviewWorker(object):
             # it) and the pool is fit per range in the chunk loop
             gpu_n = gpu_low
             # BUILD 186: edit decision list: per-range N for this pass
-            from sequence_player_preview import refresh_plan, fit_refresh_pool
-            plan = refresh_plan(project, sequence_id, snapshot, total, cap)
+            from sequence_player_preview import (refresh_plan, fit_refresh_pool,
+                                                 kept_decoder_guard)
+            # BUILD 192: a refresh pass restarted before it finished (the
+            # refresh request wakes the worker, then the retarget restarts
+            # it) reuses the plan when nothing it depends on changed; a
+            # finished pass clears it. Each range's pool fit still rechecks
+            # free VRAM.
+            pkey = (project, sequence_id, total, cap, snapshot)
+            plan = None
+            if self._plan is not None:
+                try:
+                    if self._plan[0] == pkey:
+                        plan = self._plan[1]
+                except Exception:
+                    plan = None
+            if plan is None:
+                plan = refresh_plan(project, sequence_id, snapshot, total, cap)
+                self._plan = (pkey, plan)
             self._pool_n = 0
             self._pool_key = key
             self._pool_fit = None
@@ -301,13 +320,13 @@ class PreviewWorker(object):
                     # plan range holding this frame; the chunk stops at
                     # that range's end (the next chunk is the next range's)
                     limit = gpu_n
-                    for r0, r1, rn, rper, rstill in plan:
+                    for r0, r1, rn, rper, rstill, rkeep in plan:
                         if r0 <= frame <= r1:
                             range_end = r1
                             # BUILD 189: pool fit to this range's safe N
                             if self._pool_fit != r0:
                                 self._pool_n = fit_refresh_pool(
-                                    project, sequence_id, rn, rper, rstill)
+                                    project, sequence_id, rn, rper, rstill, rkeep)
                                 self._pool_fit = r0
                                 _vram_fatal_check("after reserve %d..%d" % (r0, r1))
                             limit = self._pool_n or 1
@@ -359,6 +378,8 @@ class PreviewWorker(object):
                     # (speed); the hard exit below stays
                     # _log_refresh_vram(project, sequence_id)
                     _vram_fatal_check("after batch %d..%d" % (chunk[0], chunk[-1]))
+                    # BUILD 192: kept-open decoders measured against the keep
+                    kept_decoder_guard(project, sequence_id)
                 per = dt / len(chunk)
                 sec_per_frame = per if sec_per_frame is None else (
                     0.5 * sec_per_frame + 0.5 * per)
