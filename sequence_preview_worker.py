@@ -386,9 +386,10 @@ WORKER_PASS_SEC = 0.25
 # BUILD 169: explicit refresh (F5 / Play on dirty) fast mode: one commit
 # per REFRESH_BATCH_SECONDS of frames. BUILD 170: frames per card pass from free VRAM
 # (refresh_batch_frames), previewGpuBatchFrames .. REFRESH_GPU_MAX
-# BUILD 174: one fixed N per refresh, at most REFRESH_GPU_MAX, with
-# REFRESH_NVDEC_HEADROOM kept free beyond the margin for decode surfaces
-REFRESH_GPU_MAX = 90
+# BUILD 174: one fixed N per refresh, with REFRESH_NVDEC_HEADROOM kept
+# free beyond the margin for decode surfaces. BUILD 175: REFRESH_GPU_MAX 0
+# = no cap: N is the full VRAM fit (at least previewGpuBatchFrames)
+REFRESH_GPU_MAX = 0
 REFRESH_NVDEC_HEADROOM = 1 << 30
 REFRESH_GUI_STALL_SEC = 0.3
 REFRESH_BATCH_SECONDS = 10
@@ -419,14 +420,14 @@ def _log_refresh_pool(n, got):
         if "n" in info:
             print("WORKER refresh pool: free %s of %s, margin %s (25%%), "
                   "NVDEC headroom %s, held %s, usable %s, per frame %.1f MB (buffer %.1f MB + %d video layers), "
-                  "vram fit %d -> N %d (%s, clamp %d..%d) | reserved %d | free "
+                  "vram fit %d -> N %d (%s, min %d, max %s) | reserved %d | free "
                   "after reserve %s" % (
                       _mb(info["free"]), _mb(info["total"]), _mb(info["margin"]),
                       _mb(info.get("headroom", 0)),
                       _mb(info["held"]), _mb(info["usable"]),
                       info["per"] / float(1 << 20), info["buf"] / float(1 << 20),
                       info["layers"], info["raw"], info["n"], info["why"],
-                      info["low"], info["high"], got,
+                      info["low"], info["high"] if info["high"] > 0 else "none", got,
                       _mb(after[0]) if after else "?"))
         else:
             print("WORKER refresh pool: N %d (%s) | reserved %d" % (

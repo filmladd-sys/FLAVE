@@ -387,13 +387,14 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
         margin_b = int(margin * total.value)
         usable = free.value + held - margin_b - int(headroom)
         raw = int(usable // per) if usable > 0 else 0
-        n = max(low, min(high, raw if raw > 0 else low))
+        # BUILD 175: high <= 0: no upper cap (the VRAM fit is N)
+        n = max(low, raw if high <= 0 else min(high, raw))
         _last_batch_info.update(
             free=free.value, total=total.value, margin=margin_b, held=held,
             headroom=int(headroom),
             usable=usable, per=per, buf=buf, layers=layers, raw=raw,
             low=low, high=high, n=n,
-            why=("cap" if raw > high else "floor" if raw < low else "vram"))
+            why=("cap" if 0 < high < raw else "floor" if raw < low else "vram"))
         return n
     except Exception as e:
         print(f"Refresh batch size failed: {e}")
