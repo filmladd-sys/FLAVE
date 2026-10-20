@@ -15,7 +15,10 @@ says what it owns.
   (`nvcuda.dll`, `cudart64_*.dll`, `nvjpeg64_*.dll`, `opengl32.dll`) and
   `dark_titlebar.py` calls DWM. It will not run as-is on Linux or macOS.
 - **GPU:** an NVIDIA card with NVDEC/NVENC. Device 0 is used everywhere.
-- **Python 3** (the DLL loader uses `os.add_dll_directory`, so 3.8+).
+- **Python 3.11+ recommended** (needed for fast preview audio reads,
+  `sqlite3.Connection.blobopen`). 3.8-3.10 runs (the DLL loader uses
+  `os.add_dll_directory`), but the preview audio mix is slow on long
+  sources.
 - **Python packages:** there is no requirements file. The third-party
   imports are:
   - `PySide6` -- all windows, QAudioSink playback, the Sequence Player's
@@ -174,8 +177,8 @@ composer (its own decoders, original footage instead of proxies).
 - GUI thread: windows, timeline, player presenting.
 - Preview worker thread, play reader thread, audio mix thread (it
   coordinates a pool of range mix threads, half the logical processors,
-  `MIX_POOL_SIZE` in `sequence_preview_audio.py`, sharing one locked
-  source cache per mix), render thread.
+  `MIX_POOL_SIZE` in `sequence_preview_audio.py`; the mix thread reads
+  the source spans first, the pool threads do no I/O), render thread.
 - `_GEN_LOCK` (an RLock in `sequence_player_gpu.py`) is held for every
   composite. The GUI takes it first (`_GuiGen`, bumps `_gui_wants`); the
   worker waits for GUI quiet unless a refresh is running (`_worker_fast`).
@@ -258,3 +261,16 @@ Useful console prefixes:
 - When adding a global setting with a default, add it to
   `GLOBAL_DEFAULTS` in `global_settings.py` with the same value the
   getters fall back to.
+- **Source audio storage.** `<project>.audiotmp.db` holds one blob per
+  source (mono 48 kHz s16le, the whole decoded source). The preview audio
+  mix reads only each clip's span with sqlite incremental blob I/O
+  (`blobopen`, one handle per source per mix). Measured on 3 x 50 min
+  sources, 63 clips, 3.7 min sequence: 57 MB read, about 0.4 s warm /
+  0.8 s cold, against 12-25 s when every clip loaded its whole source.
+  Seeking into a blob still walks its overflow page chain once per
+  handle (up to ~0.2 s cold per long source), and Python < 3.11 falls
+  back to loading whole blobs. If users report slow audio mixes (older
+  Python, or cold-disk seeks into very long sources), store the audio as
+  fixed-size chunk rows instead (e.g. 2^20 samples per row, keyed by
+  source and chunk index), written at import, plus a one-time conversion
+  of existing `.audiotmp.db` files from the existing blobs (no FFmpeg).

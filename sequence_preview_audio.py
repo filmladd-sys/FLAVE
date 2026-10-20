@@ -806,6 +806,7 @@ class MixJob(object):
         self.collected = False
         self.thread = None
         self.mode = None            # BUILD 139: 'partial' / 'full'
+        self.read_stats = {}        # source bytes read / sources (_read_spans)
 
 
 
@@ -919,13 +920,15 @@ def _mix_worker(job):
                 print("Preview audio partial mix failed (%s): full mix" % e)
                 pcm = None
         if pcm is None:
+            job.read_stats = {}
             n_full = _frame_to_sample(job.total_frames, job.fps)
             if _HAS_NP and n_full > 0:
                 # full mix = one range over the whole sequence, on the
                 # range mix pool (same samples as _mix_pcm)
                 pcm = np.zeros(n_full, dtype="<i2")
                 _mix_ranges(job.project_db, rows, job.fps, n_full, vols, order,
-                            [(0, n_full)], pcm, cancel=job.cancel)
+                            [(0, n_full)], pcm, cancel=job.cancel,
+                            stats=job.read_stats)
             else:
                 pcm = _mix_pcm(job.project_db, rows, job.fps, job.total_frames,
                                vols, order, cancel=job.cancel, as_array=_HAS_NP)
@@ -933,14 +936,18 @@ def _mix_worker(job):
         if job.cancel.is_set():
             raise MixCancelled()
         _write_wav_file(tmp, pcm)
+        rs = job.read_stats
+        read = (", read %.0f MB from %d sources" % (rs.get("read", 0) / 1e6,
+                                                    rs.get("sources", 0))
+                if "sources" in rs else "")
         if job.mode == "partial":
             print("WORKER audio mix: partial, %d of %d samples remixed, %d copied, "
-                  "%.2fs" % (plan["remix_len"], plan["n_new"], plan["copy_len"],
-                             time.perf_counter() - t0))
+                  "%.2fs%s" % (plan["remix_len"], plan["n_new"], plan["copy_len"],
+                               time.perf_counter() - t0, read))
         else:
-            print("WORKER audio mix: full, %d samples, %.2fs" % (
+            print("WORKER audio mix: full, %d samples, %.2fs%s" % (
                 _frame_to_sample(job.total_frames, job.fps),
-                time.perf_counter() - t0))
+                time.perf_counter() - t0, read))
         with _SWAP_LOCK:
             now = audio_timeline_signature(
                 job.project_db, job.sequence_id, job.fps, job.total_frames)
@@ -1338,27 +1345,36 @@ def _partial_pcm(job, inputs, plan):
     if job.cancel.is_set():
         raise MixCancelled()
     _mix_ranges(job.project_db, inputs["rows"], job.fps, n_new, inputs["vols"],
-                inputs["order"], plan["remix"], out, cancel=job.cancel)
+                inputs["order"], plan["remix"], out, cancel=job.cancel,
+                stats=job.read_stats)
     return out
 
 
 # Range mix pool. _mix_ranges splits the ranges to mix into at most
 # MIX_POOL_SIZE groups of contiguous, non-overlapping sample ranges (a long
 # range is cut at a sample boundary; every sample's arithmetic depends only
-# on its own position, so a cut never changes a sample). Each group is
-# mixed on its own worker thread into a private int16 buffer
-# (_mix_ranges_pcm); the calling thread (the job's coordinating thread)
-# copies each finished group into out as it arrives and does all file,
-# signature, layout and state work. The only state the workers share is
-# the call's _SourceCache (locked, see there). Numpy releases the GIL in
-# the per-chunk arithmetic, so the groups mix in parallel. Groups smaller
-# than MIX_SPLIT_MIN samples are not worth a thread: a small remix runs on
-# the calling thread as one group. Cancel (the job's event, or a failed
-# worker) is checked by every worker between rows and chunks and while it
-# waits for a source; the caller always joins every worker before it
-# returns. MIX_POOL_SIZE: half the logical processors, at least 1.
+# on its own position, so a cut never changes a sample). Before mixing, the
+# calling thread (the job's coordinating thread) reads every source span
+# the ranges need (_read_spans); each group is then mixed on its own worker
+# thread into a private int16 buffer (_mix_ranges_pcm: no I/O, the spans
+# are shared read-only). The calling thread copies each finished group
+# into out as it arrives and does all file, signature, layout and state
+# work. Numpy releases the GIL in the per-chunk arithmetic, so the groups
+# mix in parallel. Groups smaller than MIX_SPLIT_MIN samples are not worth
+# a thread: a small remix runs on the calling thread as one group. Cancel
+# (the job's event, or a failed worker) is checked between reads and by
+# every worker between rows and chunks; the caller always joins every
+# worker before it returns. MIX_POOL_SIZE: half the logical processors, at
+# least 1.
 MIX_POOL_SIZE = max(1, (os.cpu_count() or 2) // 2)
 MIX_SPLIT_MIN = 4 * MIX_CHUNK   # ~22 s at 48 kHz
+_NOTED = set()                  # one-time console notes already printed
+
+
+def _note_once(key, text):
+    if key not in _NOTED:
+        _NOTED.add(key)
+        print(text)
 
 
 class _AnySet(object):
@@ -1371,88 +1387,6 @@ class _AnySet(object):
             if e.is_set():
                 return True
         return False
-
-
-class _SourceCache(object):
-    # Source PCM for one _mix_ranges call, shared by its workers and dropped
-    # with the call. Each source is loaded once (outside the lock; other
-    # workers wanting the same source wait on it, other sources load in
-    # parallel) and kept only while a later use is still expected
-    # (uses: basename -> number of acquire calls the groups will make). A
-    # source not in use by any worker is also dropped when keeping it would
-    # put the cache over budget (workers x the largest source), so the
-    # cache never holds more than one source per worker. The arrays are
-    # read-only views of the loaded bytes (numpy refuses in-place writes);
-    # the mix only reads slices and converts copies. A load that raises
-    # removes its entry and wakes the waiters, which then load it
-    # themselves (the error reaches the job through the failing worker).
-    def __init__(self, project_db, uses, sizes, workers):
-        self.project_db = project_db
-        self.left = dict(uses)
-        self.sizes = dict(sizes)
-        self.budget = max(1, int(workers)) * max([0] + list(self.sizes.values()))
-        self.cond = threading.Condition(threading.Lock())
-        self.entries = {}       # name -> [state, array or None, pins]
-        self.total = 0          # bytes of the ready and loading entries
-        self.loads = 0
-        self.peak = 0
-
-    def _evict_for(self, size):
-        # lock held: drop unpinned entries until size more bytes fit
-        for name in list(self.entries):
-            if self.total + size <= self.budget:
-                return
-            e = self.entries[name]
-            if e[0] == "ready" and e[2] == 0:
-                del self.entries[name]
-                self.total -= self.sizes.get(name, 0)
-
-    def acquire(self, name, cancel=None):
-        # Read-only int16 array of name's source (or None), pinned until
-        # release(name)
-        with self.cond:
-            while True:
-                if cancel is not None and cancel.is_set():
-                    raise MixCancelled()
-                e = self.entries.get(name)
-                if e is None:
-                    size = self.sizes.get(name, 0)
-                    self._evict_for(size)
-                    self.entries[name] = ["loading", None, 1]
-                    self.total += size
-                    self.loads += 1
-                    self.peak = max(self.peak, self.total)
-                    break
-                if e[0] == "ready":
-                    e[2] += 1
-                    return e[1]
-                self.cond.wait(0.02)    # another worker is loading it
-        try:
-            pcm = load_audiotmp(self.project_db, name)
-            arr = (np.frombuffer(pcm, dtype="<i2", count=len(pcm) // 2)
-                   if pcm else None)
-        except BaseException:
-            with self.cond:
-                del self.entries[name]
-                self.total -= self.sizes.get(name, 0)
-                self.cond.notify_all()
-            raise
-        with self.cond:
-            e = self.entries[name]
-            e[0], e[1] = "ready", arr
-            self.cond.notify_all()
-        return arr
-
-    def release(self, name):
-        with self.cond:
-            self.left[name] = self.left.get(name, 0) - 1
-            e = self.entries.get(name)
-            if e is None:
-                return
-            e[2] -= 1
-            if e[2] <= 0 and (self.left[name] <= 0 or self.total > self.budget):
-                del self.entries[name]
-                self.total -= self.sizes.get(name, 0)
 
 
 def _row_hits(r, fps, n, ranges):
@@ -1493,28 +1427,153 @@ def _split_ranges(ranges, parts):
     return groups
 
 
+def _row_span(r, fps, n, ranges, hits, slen):
+    # Source samples [lo, hi) row r reads for ranges[hits], given its
+    # source length slen, or None when it adds nothing (same clamps as the
+    # mix: in point past the source end, clip cut by the source end or by
+    # the sequence end n)
+    dst0 = _frame_to_sample(r["start_frame"], fps)
+    count = _frame_to_sample(r["length_frames"], fps)
+    src0 = _frame_to_sample(r["in_frame"], fps)
+    if src0 >= slen:
+        return None
+    take = min(count, slen - src0)
+    if take <= 0:
+        return None
+    dst1 = min(n, dst0 + take)
+    if dst0 >= n or dst1 <= dst0:
+        return None
+    spans = [(max(ranges[i][0], dst0), min(ranges[i][1], dst1)) for i in hits]
+    spans = [(p, q) for p, q in spans if q > p]
+    if not spans:
+        return None
+    return (src0 + min(p for p, _q in spans) - dst0,
+            src0 + max(q for _p, q in spans) - dst0)
+
+
+def _read_spans(project_db, rows, fps, n, ranges, cancel=None, stats=None):
+    # Coordinating thread, before the mix: {row index: (array, base, slen)}
+    # with array = read-only int16 source samples [base, base + len) of the
+    # span the row needs for ranges, slen = the source's length in samples.
+    # Rows that read nothing are left out. Sources are read with sqlite
+    # incremental blob I/O (one read-only handle per source, spans in
+    # offset order), so only the used samples are read. Without
+    # Connection.blobopen (Python < 3.11), or when it fails for a source,
+    # that source's whole blob is loaded once (load_audiotmp, as the full
+    # mix reads it), the spans are copied out and the blob is dropped before
+    # the next source. stats: "read" (bytes) and "sources" are added.
+    want = {}                   # basename -> [row index]
+    for ri, r in enumerate(rows):
+        if _row_hits(r, fps, n, ranges):
+            want.setdefault(r["basename"], []).append(ri)
+    out = {}
+    if not want:
+        return out
+    if stats is not None:
+        stats["sources"] = stats.get("sources", 0) + len(want)
+    conn = None
+    path = audiotmp_db_path(project_db)
+    if not hasattr(sqlite3.Connection, "blobopen"):
+        _note_once("blobopen", "Preview audio: ranged audio reads need Python "
+                   "3.11+; loading whole sources (slow on long sources)")
+    elif os.path.isfile(path):
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("PRAGMA query_only = ON")
+        except sqlite3.Error:
+            conn = None
+    try:
+        for name in sorted(want):
+            if cancel is not None and cancel.is_set():
+                raise MixCancelled()
+            got = None
+            if conn is not None:
+                try:
+                    got = _read_spans_blob(conn, name, rows, fps, n, ranges,
+                                           want[name], cancel)
+                except MixCancelled:
+                    raise
+                except Exception as e:
+                    _note_once(("blob", name), "Preview audio: ranged read of %s "
+                               "failed (%s); loading the whole source" % (name, e))
+                    got = None
+            if got is None:
+                got = _read_spans_whole(project_db, name, rows, fps, n, ranges,
+                                        want[name], cancel)
+            spans, nbytes = got
+            out.update(spans)
+            if stats is not None:
+                stats["read"] = stats.get("read", 0) + nbytes
+    finally:
+        if conn is not None:
+            conn.close()
+    return out
+
+
+def _span_jobs(name_rows, rows, fps, n, ranges, slen):
+    # [(lo, hi, row index)] in source offset order for one source
+    jobs = []
+    for ri in name_rows:
+        span = _row_span(rows[ri], fps, n, ranges,
+                         _row_hits(rows[ri], fps, n, ranges), slen)
+        if span is not None:
+            jobs.append((span[0], span[1], ri))
+    jobs.sort()
+    return jobs
+
+
+def _read_spans_blob(conn, name, rows, fps, n, ranges, name_rows, cancel):
+    # ({row index: (array, base, slen)}, bytes read) via blobopen, or None
+    # when the source has no AudioTmp row (the whole-load path decides)
+    row = conn.execute("SELECT id FROM AudioTmp WHERE originalfilename = ?",
+                       (name,)).fetchone()
+    if row is None:
+        return None
+    out, nbytes = {}, 0
+    with conn.blobopen("AudioTmp", "audioblob", row[0], readonly=True) as blob:
+        slen = len(blob) // 2
+        for lo, hi, ri in _span_jobs(name_rows, rows, fps, n, ranges, slen):
+            if cancel is not None and cancel.is_set():
+                raise MixCancelled()
+            blob.seek(lo * 2)
+            data = blob.read((hi - lo) * 2)
+            if len(data) != (hi - lo) * 2:
+                raise ValueError("short blob read")
+            out[ri] = (np.frombuffer(data, dtype="<i2"), lo, slen)
+            nbytes += len(data)
+    return out, nbytes
+
+
+def _read_spans_whole(project_db, name, rows, fps, n, ranges, name_rows, cancel):
+    # ({row index: (array, base, slen)}, bytes read) from the whole blob
+    pcm = load_audiotmp(project_db, name)
+    if not pcm:
+        return {}, 0
+    src = np.frombuffer(pcm, dtype="<i2", count=len(pcm) // 2)
+    out = {}
+    for lo, hi, ri in _span_jobs(name_rows, rows, fps, n, ranges, len(src)):
+        if cancel is not None and cancel.is_set():
+            raise MixCancelled()
+        piece = src[lo:hi].copy()
+        piece.flags.writeable = False
+        out[ri] = (piece, lo, len(src))
+    return out, len(pcm)
+
+
 def _mix_ranges(project_db, rows, fps, n, vol_clips, track_order, ranges, out,
-                cancel=None):
+                cancel=None, stats=None):
     # Mix only sample ranges [a, b) into out (int16, n samples), on the
     # range mix pool (see above). Identical samples to one _mix_ranges_pcm
-    # call over all ranges.
+    # call over all ranges. stats: see _read_spans.
     if not ranges:
         return
     groups = _split_ranges(ranges, MIX_POOL_SIZE)
-    uses = {}
-    for g in groups:
-        for r in rows:
-            if _row_hits(r, fps, n, g):
-                uses[r["basename"]] = uses.get(r["basename"], 0) + 1
-    sizes = dict((name, _ident_samples(ident) * 2 if _ident_samples(ident) else 0)
-                 for name, ident in _audiotmp_idents(project_db, sorted(uses)))
-    cache = _SourceCache(project_db, uses, sizes, len(groups))
-    args = (project_db, rows, fps, n, vol_clips, track_order)
+    srcs = _read_spans(project_db, rows, fps, n, ranges, cancel, stats)
+    args = (rows, fps, n, vol_clips, track_order, srcs)
     if len(groups) == 1:
         for (a, b), pc in zip(groups[0], _mix_ranges_pcm(
-                *args, ranges=groups[0], cancel=cancel, cache=cache)):
+                *args, ranges=groups[0], cancel=cancel)):
             out[a:b] = pc
-        _mix_ranges.last_cache = (cache.loads, cache.peak)
         return
     import queue
     stop = threading.Event()        # set when a worker fails
@@ -1524,8 +1583,7 @@ def _mix_ranges(project_db, rows, fps, n, vol_clips, track_order, ranges, out,
     def work(group):
         try:
             results.put((group, _mix_ranges_pcm(*args, ranges=group,
-                                                cancel=any_cancel,
-                                                cache=cache), None))
+                                                cancel=any_cancel), None))
         except BaseException as e:
             results.put((group, None, e))
 
@@ -1555,79 +1613,68 @@ def _mix_ranges(project_db, rows, fps, n, vol_clips, track_order, ranges, out,
     finally:
         for t in threads:
             t.join()
-    # the last call's (source loads, peak cached bytes), for tests
-    _mix_ranges.last_cache = (cache.loads, cache.peak)
     if err is not None:
         raise err
 
 
-def _mix_ranges_pcm(project_db, rows, fps, n, vol_clips, track_order, ranges,
-                    cancel=None, cache=None):
+def _mix_ranges_pcm(rows, fps, n, vol_clips, track_order, srcs, ranges,
+                    cancel=None):
     # Mix sample ranges [a, b) -> one int16 array per range (private
     # buffers). Same per-sample arithmetic and row order as _mix_pcm (numpy
-    # path), so each sample equals the full mix. A row's source is read
-    # only if it reaches a range, from cache (a _SourceCache, shared with
-    # the other workers) when given.
+    # path), so each sample equals the full mix. Source samples come from
+    # srcs (_read_spans, read-only, covering these ranges); no I/O here.
     if not ranges:
         return []
     vol_clips = vol_clips or []
     track_order = track_order or {}
     accs = [np.zeros(b - a, dtype=np.float64) for a, b in ranges]
-    for r in rows:
+    for ri, r in enumerate(rows):
         if cancel is not None and cancel.is_set():
             raise MixCancelled()
         _mix_yield()
         hits = _row_hits(r, fps, n, ranges)
         if not hits:
             continue
+        ent = srcs.get(ri)
+        if ent is None:
+            continue
+        src, base, slen = ent
         dst0 = _frame_to_sample(r["start_frame"], fps)
         count = _frame_to_sample(r["length_frames"], fps)
-        if cache is None:
-            pcm = load_audiotmp(project_db, r["basename"])
-            src = (np.frombuffer(pcm, dtype="<i2", count=len(pcm) // 2)
-                   if pcm else None)
-        else:
-            src = cache.acquire(r["basename"], cancel)
-        try:
-            if src is None:
+        src0 = _frame_to_sample(r["in_frame"], fps)
+        if src0 >= slen:
+            continue
+        take = min(count, slen - src0)
+        if take <= 0:
+            continue
+        dst1 = min(n, dst0 + take)
+        if dst0 >= n or dst1 <= dst0:
+            continue
+        lin = db_to_linear(r.get("gain_db", 0.0))
+        for i in hits:
+            a, b = ranges[i]
+            p, q = max(a, dst0), min(b, dst1)
+            if q <= p:
                 continue
-            src0 = _frame_to_sample(r["in_frame"], fps)
-            if src0 >= len(src):
-                continue
-            take = min(count, len(src) - src0)
-            if take <= 0:
-                continue
-            dst1 = min(n, dst0 + take)
-            if dst0 >= n or dst1 <= dst0:
-                continue
-            lin = db_to_linear(r.get("gain_db", 0.0))
-            for i in hits:
-                a, b = ranges[i]
-                p, q = max(a, dst0), min(b, dst1)
-                if q <= p:
-                    continue
-                gain = volume_gain(vol_clips, r.get("link_id"),
-                                   track_order.get(r["track_id"]), p, q - p, fps)
-                acc = accs[i]
-                s0 = src0 + (p - dst0)
-                for c0 in range(0, q - p, MIX_CHUNK):
-                    c1 = min(q - p, c0 + MIX_CHUNK)
-                    seg = src[s0 + c0:s0 + c1].astype(np.float64)
-                    tgt = acc[p - a + c0:p - a + c1]
-                    if gain is None:
-                        if lin == 1.0:
-                            tgt += seg
-                        else:
-                            tgt += seg * lin
+            gain = volume_gain(vol_clips, r.get("link_id"),
+                               track_order.get(r["track_id"]), p, q - p, fps)
+            acc = accs[i]
+            s0 = src0 + (p - dst0) - base
+            for c0 in range(0, q - p, MIX_CHUNK):
+                c1 = min(q - p, c0 + MIX_CHUNK)
+                seg = src[s0 + c0:s0 + c1].astype(np.float64)
+                tgt = acc[p - a + c0:p - a + c1]
+                if gain is None:
+                    if lin == 1.0:
+                        tgt += seg
                     else:
-                        tgt += seg * (gain[c0:c1] * lin)
-                    if cancel is not None and cancel.is_set():
-                        raise MixCancelled()
-                    _mix_yield()
-        finally:
-            if cache is not None:
-                cache.release(r["basename"])
-        src = pcm = None
+                        tgt += seg * lin
+                else:
+                    tgt += seg * (gain[c0:c1] * lin)
+                if cancel is not None and cancel.is_set():
+                    raise MixCancelled()
+                _mix_yield()
+        src = None
     pcs = []
     for i, (a, b) in enumerate(ranges):
         acc = accs[i]
