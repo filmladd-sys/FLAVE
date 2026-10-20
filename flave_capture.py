@@ -19,7 +19,15 @@
 # Kept light so FLAVE can run in the foreground: FFmpeg runs at below
 # normal priority with no console window, its output goes nowhere, and the
 # window polls the processes once a second only while recording.
-# FFmpeg must be on PATH (same as FLAVE). ASCII only.
+# FFmpeg must be on PATH (same as FLAVE).
+#
+# Optional system audio ("Record system audio" checkbox): one extra process,
+# this script run as "flave_capture.py --audio <out.wav>", records the
+# default speaker through WASAPI loopback with the soundcard package
+# (pip install soundcard; stock FFmpeg has no loopback input) to
+#   Audio_YYYYMMDD_HHMMSS.wav   (48 kHz, stereo, 16-bit PCM)
+# It is stopped the same way as FFmpeg ("q" on stdin). It keeps normal
+# priority so the audio does not drop out. ASCII only.
 
 import ctypes
 import json
@@ -30,7 +38,7 @@ import time
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QDoubleValidator, QGuiApplication
-from PySide6.QtWidgets import (QApplication, QFormLayout, QLineEdit,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFormLayout, QLineEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -53,10 +61,10 @@ def load_settings():
         return {}
 
 
-def save_settings(folder, fps):
+def save_settings(folder, fps, audio=False):
     try:
         with open(SETTINGS_PATH, "w", encoding="ascii") as f:
-            json.dump({"folder": folder, "fps": fps}, f)
+            json.dump({"folder": folder, "fps": fps, "audio": bool(audio)}, f)
     except Exception:
         pass
 
@@ -201,6 +209,55 @@ def capture_cmd(output_idx, fps, out_path):
             "-y", out_path]
 
 
+AUDIO_RATE = 48000
+AUDIO_CHANNELS = 2
+AUDIO_BLOCK = 4800         # frames per read (100 ms)
+
+
+def soundcard_available():
+    import importlib.util
+    return importlib.util.find_spec("soundcard") is not None
+
+
+def audio_cmd(out_path):
+    # The audio recorder process: this script in --audio mode
+    return [sys.executable, os.path.abspath(__file__), "--audio", out_path]
+
+
+def record_audio(out_path):
+    # --audio mode: default speaker loopback -> 16-bit WAV until "q" or EOF
+    # on stdin. Runs in its own process, never inside the window.
+    import threading
+    import warnings
+    import wave
+    import numpy as np
+    import soundcard as sc
+    warnings.filterwarnings("ignore")   # "data discontinuity" during silence
+    stop = threading.Event()
+
+    def _wait_stdin():
+        try:
+            sys.stdin.read(1)
+        except Exception:
+            pass
+        stop.set()
+    threading.Thread(target=_wait_stdin, daemon=True).start()
+    speaker = sc.default_speaker()
+    mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
+    wav = wave.open(out_path, "wb")
+    wav.setnchannels(AUDIO_CHANNELS)
+    wav.setsampwidth(2)
+    wav.setframerate(AUDIO_RATE)
+    try:
+        with mic.recorder(samplerate=AUDIO_RATE, channels=AUDIO_CHANNELS) as rec:
+            while not stop.is_set():
+                data = rec.record(numframes=AUDIO_BLOCK)
+                pcm = (np.clip(data, -1.0, 1.0) * 32767.0).astype("<i2")
+                wav.writeframes(pcm.tobytes())
+    finally:
+        wav.close()
+
+
 class CaptureWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -210,10 +267,13 @@ class CaptureWindow(QWidget):
         self.folder_edit = QLineEdit(str(s.get("folder", "")))
         self.fps_edit = QLineEdit(str(s.get("fps", DEFAULT_FPS)))
         self.fps_edit.setValidator(QDoubleValidator(0.0, 1000.0, 3, self))
+        self.audio_check = QCheckBox("Record system audio")
+        self.audio_check.setChecked(bool(s.get("audio", False)))
         self.button = QPushButton("Start")
         form = QFormLayout()
         form.addRow("Output folder:", self.folder_edit)
         form.addRow("FPS:", self.fps_edit)
+        form.addRow("", self.audio_check)
         lay = QVBoxLayout(self)
         lay.addLayout(form)
         lay.addWidget(self.button)
@@ -236,6 +296,7 @@ class CaptureWindow(QWidget):
         self.button.setEnabled(recording or self._inputs_ok())
         self.folder_edit.setEnabled(not recording)
         self.fps_edit.setEnabled(not recording)
+        self.audio_check.setEnabled(not recording)
 
     def _toggle(self):
         if self._procs:
@@ -247,7 +308,12 @@ class CaptureWindow(QWidget):
     def _start(self):
         folder = self.folder_edit.text().strip()
         fps = parse_fps(self.fps_edit.text())
-        save_settings(folder, self.fps_edit.text().strip())
+        audio = self.audio_check.isChecked()
+        save_settings(folder, self.fps_edit.text().strip(), audio)
+        if audio and not soundcard_available():
+            self.setWindowTitle("FLAVE Capture - audio failed: "
+                                "pip install soundcard")
+            return
         stamp = time.strftime("%Y%m%d_%H%M%S")
         for idx, w, h in monitors():
             name = "Monitor%d_%dx%d_%s.mp4" % (idx + 1, w, h, stamp)
@@ -262,9 +328,21 @@ class CaptureWindow(QWidget):
                 self._stop()
                 return
             self._procs.append(p)
+        if audio:
+            name = "Audio_%s.wav" % stamp
+            try:
+                self._procs.append(subprocess.Popen(
+                    audio_cmd(os.path.join(folder, name)),
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, creationflags=NO_WINDOW))
+            except OSError as e:
+                self.setWindowTitle("FLAVE Capture - audio failed: %s" % e)
+                self._stop()
+                return
         if self._procs:
-            self.setWindowTitle("FLAVE Capture - recording %d monitor(s)"
-                                % len(self._procs))
+            self.setWindowTitle("FLAVE Capture - recording %d monitor(s)%s"
+                                % (len(self._procs) - int(audio),
+                                   " + audio" if audio else ""))
             self._timer.start()
 
     def _stop(self):
@@ -289,18 +367,21 @@ class CaptureWindow(QWidget):
         # A capture that died (bad FPS, monitor change, disk full) stops all
         if any(p.poll() is not None for p in self._procs):
             self._stop()
-            self.setWindowTitle("FLAVE Capture - FFmpeg stopped (failed)")
+            self.setWindowTitle("FLAVE Capture - a capture stopped (failed)")
             self._update_button()
 
     def closeEvent(self, event):
         if self._procs:
             self._stop()
         save_settings(self.folder_edit.text().strip(),
-                      self.fps_edit.text().strip())
+                      self.fps_edit.text().strip(), self.audio_check.isChecked())
         super().closeEvent(event)
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--audio":
+        record_audio(sys.argv[2])
+        return
     app = QApplication(sys.argv)
     w = CaptureWindow()
     w.show()
