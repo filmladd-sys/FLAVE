@@ -494,6 +494,9 @@ class SequenceTimeline(QMainWindow):
         self._audio_auto_failed = False
         self._audio_mix_kick()
         self.status_bar.showMessage("Refreshing preview", 3000)
+        self._show_refresh_dialog()
+
+    def _show_refresh_dialog(self):
         # BUILD 167: progress window, closes itself when both are done
         try:
             from refresh_preview_dialog import RefreshPreviewDialog
@@ -1569,22 +1572,45 @@ class SequenceTimeline(QMainWindow):
         self._play_from = int(self.current_frame)
         # BUILD 136: a stale audio mix starts mixing in the background now,
         # alongside any video fill; the clock waits for it (_start_clock)
-        self._audio_mix_kick()
-        if self._play_ready():
+        mixing = self._audio_mix_kick()
+        # BUILD 168: a dirty preview (any not-clean frame in the sequence)
+        # runs the F5 refresh first, in the Refreshing Preview window; the
+        # clock starts once it is done (_play_ready waits for the refresh)
+        dirty = not self._preview_all_clean()
+        if not dirty and self._play_ready():
+            if mixing:
+                self._show_refresh_dialog()
             self._start_clock()
             return
         self._play_filling = True
         try:
-            from sequence_preview_worker import set_play_priority
+            from sequence_preview_worker import set_play_priority, set_refresh_all
+            if dirty:
+                set_refresh_all(True)
             set_play_priority(True)
         except Exception as e:
             print(f"Play priority failed: {e}")
+        if dirty or mixing:
+            self._show_refresh_dialog()
         self._retarget_preview(force=True)
         self._play_fill_status()
 
+    def _preview_all_clean(self):
+        # BUILD 168: True when every frame of the sequence is a clean preview
+        try:
+            from sequence_preview import clean_set
+            clean = clean_set(self._project_db(), self.sequence_id)
+        except Exception:
+            return True
+        return all(f in clean for f in range(self.total_frames()))
+
     def _play_ready(self):
         # True when every frame from the tick to the end is a clean preview
+        # (BUILD 168: and an explicit refresh pass, if any, has finished)
         try:
+            from sequence_preview_worker import _refresh_all
+            if _refresh_all[0]:
+                return False
             from sequence_preview import clean_set
             clean = clean_set(self._project_db(), self.sequence_id)
         except Exception:
