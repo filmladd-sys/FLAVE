@@ -49,6 +49,20 @@ from sequence_timeline_tracks import (
     _run_track_menu_action, _track_display_properties, _track_row_height,
     _toggle_collapse_at, _setup_collapse_column,
 )
+# BUILD 162: clip parts of the window (same names, re-exported here)
+from sequence_timeline_clips import (
+    VIDEO_CLIP_BG, AUDIO_CLIP_BG, ClipDelegate, _SEQ_ICON_CACHE,
+    COLLAPSED_BAR_COLORS, NAME_MIN_PX, draw_clip_name, paint_collapsed_clip,
+    moving_marker_frames, sequence_clip_icon, _linked_clips, _clip_edge_at,
+    _clip_by_id, _clear_selection, _select_clip, _selected_clips, _drag_group,
+    _edge_drag_move, _snap_pixels, _snap_drag_delta, _set_snap_frame,
+    _group_delta_range, _neighbor_bounds, _clip_image_track_row, _clip_at,
+    _move_target_track, _relocate_clip, _cross_track_preview,
+    _move_drag_release, _move_preview_ranges, _preview_shift_plan,
+    _ranges_for_clips, _clip_context_menu, _edge_drag_release, _clip_track_id,
+    _clip_press_select, _clip_press_drag, _clip_edge_cursor,
+    _clip_drag_release,
+)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QStatusBar, QMessageBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QInputDialog, QAbstractItemView, QMenu, QApplication,
@@ -62,337 +76,16 @@ from PySide6.QtGui import (
 )
 
 
-# BUILD 108: clip backgrounds
-VIDEO_CLIP_BG = QColor(70, 90, 130)
 # BUILD 138: debounce after the last completed edit before the audio state
 # check (which also starts the background mix); quick edits -> one mix
 AUDIO_SETTLE_MS = 500
-AUDIO_CLIP_BG = QColor(80, 80, 80)
 
 # BUILD 158 no-track-highlight style (_TRACK_STRIP_STATES, _plain_option,
 # _NoTrackHighlightStyle, _track_table_style): BUILD 161 moved it to
 # sequence_timeline_tracks.py (imported above)
 
 
-class ClipDelegate(QStyledItemDelegate):
-    # Waveform drawing lives in sequence_timeline_audio.py
-    _draw_waveform = _draw_waveform
-
-    # Paints track background and clips in the Clips column
-    def __init__(self, timeline):
-        super().__init__(timeline.table)
-        self.timeline = timeline
-
-    def paint(self, painter, option, index):
-        if index.column() == COLLAPSE_COL:
-            # BUILD 126: down triangle = open, right triangle = collapsed
-            super().paint(painter, option, index)
-            paint_collapse_cell(self.timeline, painter, option, index)   # BUILD 161
-            return
-        if index.column() != CLIPS_COL:
-            super().paint(painter, option, index)
-            return
-        tl = self.timeline
-        rect = option.rect
-        painter.save()
-        painter.setClipRect(rect)
-        name_item = tl.table.item(index.row(), 0)
-        collapsed = bool(name_item.data(ROLE_COLLAPSED)) if name_item is not None else False
-        track_id = name_item.data(Qt.UserRole) if name_item is not None else None
-        track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
-        bg = name_item.data(Qt.UserRole + 3) if name_item is not None else ""
-        # BUILD 52 stored #403050 on keyframe tracks; treat like caption/video default (none)
-        if bg and track_type == "keyframe" and bg.lower() == "#403050":
-            bg = ""
-        if bg:
-            color = QColor(bg)
-            if color.isValid():
-                painter.fillRect(rect, color)
-        ppf = tl.pixels_per_frame
-        for clip in tl.clips_by_track.get(track_id, []):
-            (clip_id, footage_id, start_frame, length_frames, filename,
-             clip_enabled, clip_solo, in_frame) = clip[:8]
-            # Clip rect is the time span only, whatever the icon sizes
-            x = int(rect.left() + (start_frame - tl.view_start_frame) * ppf)
-            w = max(1, int(length_frames * ppf))
-            if x + w < rect.left() or x > rect.right():
-                continue
-            clip_rect = QRect(x, rect.top(), w, rect.height())
-            # Disabled clips draw dimmer
-            painter.setOpacity(1.0 if clip_enabled else 0.4)
-            if collapsed:
-                # BUILD 126: bar + outline + name only (no icons, waveform,
-                # key boxes or markers)
-                paint_collapsed_clip(painter, clip_rect, track_type,
-                                     clip_id in tl._selected_clip_ids,
-                                     (filename or "") + (" [S]" if clip_solo else ""),
-                                     visible_rect=rect)
-                painter.setOpacity(1.0)
-                continue
-            if track_type == "keyframe":
-                from keyframe import paint_keyframe_clip
-                keys = clip[9] if len(clip) > 9 else []
-                ktype = clip[10] if len(clip) > 10 else ""
-                paint_keyframe_clip(
-                    painter, clip_rect, filename or "", keys=keys,
-                    clip_start=start_frame, ppf=ppf, stored_type=ktype,
-                    linked=(len(clip) > 8 and clip[8] is not None),
-                    visible_rect=rect)
-                if clip_id in tl._selected_clip_ids:
-                    painter.setPen(QColor(255, 255, 160))
-                else:
-                    painter.setPen(QColor(160, 180, 220))
-                painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
-                painter.setOpacity(1.0)
-                continue
-            # BUILD 128: keyframe-style title bar (black, 1 px white border,
-            # white name) on top; the content (thumbnails, waveform, caption
-            # bar, SEQ icons, markers) is drawn in the rect below it
-            from keyframe import split_title_rect, paint_title_bar
-            full_rect = clip_rect
-            title_rect, clip_rect = split_title_rect(full_rect)
-            ctop, ch = clip_rect.top(), clip_rect.height()
-            if track_type == "caption":
-                paint_caption_bar(painter, clip_rect)
-            else:
-                # BUILD 108: audio clips gray; video / image keep (70, 90, 130)
-                painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
-                                 else VIDEO_CLIP_BG)
-            text_rect = QRect(clip_rect)
-            seq_ref = (getattr(tl, "_seq_refs", None) or {}).get(clip_id)
-            if track_type == "caption":
-                # Caption: plain bar with the text, no icon, no waveform
-                pass
-            elif seq_ref is not None:
-                # BUILD 105: sequence clip, left / right sequence icons and
-                # the child name (no footage icon, waveform or peaks)
-                # BUILD 108: track colors (video blue / audio gray)
-                painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
-                                 else VIDEO_CLIP_BG)
-                ih = ch
-                lpix = sequence_clip_icon(ih, False)
-                rpix = sequence_clip_icon(ih, True)
-                iw = lpix.width() if lpix is not None else 0
-                if iw and 2 * iw <= w:
-                    painter.drawPixmap(x, ctop, lpix)
-                    painter.drawPixmap(x + w - iw, ctop, rpix)
-                    text_rect.setLeft(x + iw)
-                    text_rect.setRight(x + w - iw - 1)
-                elif iw:
-                    painter.drawPixmap(x, ctop, lpix, 0, 0, min(iw, w), ih)
-                    text_rect.setLeft(x + min(iw, w))
-            elif track_type == "audio":
-                # Audio clips: waveform from stored peaks, no icons
-                self._draw_waveform(painter, tl, clip_rect, footage_id,
-                                    in_frame, length_frames)
-            else:
-                # Video clips show the source frame at their left edge; stills use 0
-                icon_frame = in_frame if track_type == "video" else 0
-                # No grabs mid-drag; generate on release
-                pix = tl.icon_pixmap(footage_id, ch, icon_frame,
-                                     generate=tl._edge_drag is None, clip_id=clip_id)
-                has_in = pix is not None and not pix.isNull()
-                # Out icon: video reads storage only (never generated in paint);
-                # stills reuse the in icon; missing draws black
-                if track_type == "video":
-                    out_pix = video_out_pixmap(tl, footage_id, ch,
-                                               in_frame, length_frames, clip_id)
-                else:
-                    out_pix = pix
-                has_out = out_pix is not None and not out_pix.isNull()
-                in_full_w = pix.width() if has_in else 0
-                if has_out:
-                    out_full_w = out_pix.width()
-                else:
-                    out_full_w = in_full_w if has_in else ch
-                # Room for icons: the whole clip; the edge handles overlap the
-                # icons on both sides
-                avail = w
-                if in_full_w + out_full_w <= avail:
-                    in_w, out_w = in_full_w, out_full_w
-                else:
-                    # No room for both: skip the out icon entirely (no black
-                    # placeholder); the in icon shows its left part
-                    out_w = 0
-                    in_w = min(in_full_w, avail)
-                if has_in and in_w > 0:
-                    painter.drawPixmap(x, ctop, pix, 0, 0, in_w, pix.height())
-                    text_rect.setLeft(x + in_w)
-                if out_w > 0:
-                    # Flush right: icon's right edge on the clip's right edge
-                    out_x = x + w - out_w
-                    if has_out:
-                        painter.drawPixmap(out_x, ctop, out_pix,
-                                           out_pix.width() - out_w, 0, out_w, out_pix.height())
-                    else:
-                        # Black only for a real missing frame: there is room,
-                        # but the out frame is past the footage end or its
-                        # icon was requested and does not exist
-                        painter.fillRect(QRect(out_x, ctop, out_w, ch),
-                                         QColor(0, 0, 0))
-                    text_rect.setRight(out_x - 1)
-            # Markers: square at the top of the content (just below the title
-            # bar) plus a line (video / image / audio only); hit-testing is
-            # by x only, so it still lines up
-            from markers import paint_markers
-            if track_type != "caption":
-                paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf,
-                              getattr(tl, "_hover_marker_id", None))
-            # Outline: drawn after the title bar (below)
-            label = filename or ""
-            if clip_solo:
-                label += " [S]"
-            if title_rect is not None:
-                # BUILD 128: the name lives in the title bar (sticky left,
-                # elided); no in-content name
-                paint_title_bar(painter, title_rect, label, rect)
-            elif clip_rect.width() > 0:
-                # Row too short for a bar: BUILD 127 in-content name
-                draw_clip_name(painter, text_rect, rect, label,
-                               caption=(track_type == "caption"),
-                               backing=(track_type == "audio" and seq_ref is None),
-                               fallback_rect=clip_rect)
-            # Outline last, around the whole clip including the title bar
-            # (selected: light yellow)
-            if clip_id in tl._selected_clip_ids:
-                painter.setPen(QColor(255, 255, 160))
-            else:
-                painter.setPen(QColor(160, 180, 220))
-            painter.drawRect(full_rect.adjusted(0, 0, -1, -1))
-            painter.setOpacity(1.0)
-        painter.restore()
-
-
-_SEQ_ICON_CACHE = {}
-
-COLLAPSED_BAR_COLORS = {"audio": AUDIO_CLIP_BG, "caption": QColor(30, 110, 110),
-                        "keyframe": QColor(30, 110, 110)}
-
-
 # BUILD 161: paint_collapse_triangle -> sequence_timeline_tracks.py
-
-
-NAME_MIN_PX = 24   # narrower than this between the icons: draw over them
-
-
-def draw_clip_name(painter, text_rect, visible_rect, label, caption=False,
-                   backing=False, pad=4, fallback_rect=None):
-    # BUILD 127: clip name, left-aligned with padding, sticky to the
-    # visible left edge of the Clips area, elided at the clip / visible
-    # right edge; vertically centered in text_rect as before. Same font and
-    # color (230, 230, 230). backing: subtle dark box behind the text.
-    # fallback_rect (the whole clip): used, with the backing, when the
-    # visible space between the in / out icons is under NAME_MIN_PX (for
-    # example only the out icon is on screen), so the name stays readable
-    from keyframe import sticky_name_rect
-    r = sticky_name_rect(text_rect, visible_rect, pad)
-    if fallback_rect is not None and (r is None or r.width() < NAME_MIN_PX):
-        r = sticky_name_rect(fallback_rect, visible_rect, pad)
-        backing = True
-    if r is None or r.width() <= 2:
-        return
-    text = " ".join(label.split()) if caption else label
-    fm = painter.fontMetrics()
-    text = fm.elidedText(text, Qt.ElideRight, r.width())
-    if not text:
-        return
-    if backing:
-        tw = min(r.width(), fm.horizontalAdvance(text))
-        th = min(r.height(), fm.height())
-        painter.fillRect(QRect(r.left() - 2, r.center().y() - th // 2 - 1, tw + 4, th + 2),
-                         QColor(0, 0, 0, 150))
-    painter.setPen(QColor(230, 230, 230))
-    painter.drawText(r, Qt.AlignLeft | Qt.AlignVCenter, text)
-
-
-def paint_collapsed_clip(painter, clip_rect, track_type, selected, label,
-                         visible_rect=None):
-    # BUILD 126: collapsed track clip: bar, outline, name in a font that
-    # fits the 16 px row, and nothing else. BUILD 127: name left-aligned
-    # and sticky like open clips (draw_clip_name).
-    from PySide6.QtGui import QFont
-    painter.fillRect(clip_rect, COLLAPSED_BAR_COLORS.get(track_type, VIDEO_CLIP_BG))
-    painter.setPen(QColor(255, 255, 160) if selected else QColor(160, 180, 220))
-    painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
-    font = QFont(painter.font())
-    font.setPixelSize(max(7, min(11, clip_rect.height() - 4)))
-    painter.save()
-    painter.setFont(font)
-    draw_clip_name(painter, clip_rect, visible_rect, label, caption=True, pad=3)
-    painter.restore()
-
-
-def moving_marker_frames(markers, group, drag_clip):
-    # BUILD 110: timeline frames, at delta 0, of the visible markers on the
-    # clips of a move drag (group entries {"clip", "start", ...}; the
-    # dragged clip itself if the group lacks it). Positive clip ids only
-    # (video / image / audio), like marker drawing.
-    from markers import visible_offset
-    out = []
-    if not markers:
-        return out
-    members = [(m["clip"], int(m.get("start", m["clip"][2]))) for m in (group or [])]
-    if drag_clip is not None and all(c[0] != drag_clip[0] for c, _s in members):
-        members.append((drag_clip, int(drag_clip[2])))
-    for c, start0 in members:
-        try:
-            if int(c[0]) <= 0:
-                continue
-        except (TypeError, ValueError):
-            continue
-        for _mid, mframe, _rgb, _name in markers.get(c[0], ()):
-            off = visible_offset(c, mframe)
-            if off is not None:
-                f = start0 + int(off)
-                if f not in out:
-                    out.append(f)
-    return out
-
-
-def sequence_clip_icon(height, right):
-    # BUILD 105: square in / out icon for sequence clips, drawn once per
-    # height: a stack of three frames with 'SEQ'; the right icon is the
-    # mirror image (like the video in / out icons at the clip edges)
-    height = int(height)
-    if height <= 0:
-        return None
-    key = (height, bool(right))
-    if key in _SEQ_ICON_CACHE:
-        return _SEQ_ICON_CACHE[key]
-    from PySide6.QtGui import QPixmap, QPainter, QFont, QTransform
-    pix = QPixmap(height, height)
-    pix.fill(QColor(40, 28, 70))
-    p = QPainter(pix)
-    try:
-        p.setRenderHint(QPainter.Antialiasing)
-        m = max(2, height // 8)
-        step = max(2, height // 10)
-        box = height - 2 * m - 2 * step
-        for i in range(3):
-            off = m + (2 - i) * step
-            r = QRect(off, m + i * step, max(2, box), max(2, box))
-            p.fillRect(r, QColor(120, 95, 180) if i < 2 else QColor(170, 140, 230))
-            p.setPen(QColor(20, 12, 40))
-            p.drawRect(r)
-    finally:
-        p.end()
-    if right:
-        # Mirror the frame stack only; the label stays readable
-        pix = pix.transformed(QTransform().scale(-1, 1))
-    p = QPainter(pix)
-    try:
-        f = QFont()
-        f.setPixelSize(max(6, box // 3))
-        f.setBold(True)
-        p.setFont(f)
-        p.setPen(QColor(30, 18, 55))
-        lx = (height - m - box) if right else m
-        p.drawText(QRect(lx, m + 2 * step, max(2, box), max(2, box)),
-                   Qt.AlignCenter, "SEQ")
-    finally:
-        p.end()
-    _SEQ_ICON_CACHE[key] = pix
-    return pix
 
 
 # BUILD 161: TrackDisplayDialog -> sequence_timeline_tracks.py
@@ -489,6 +182,37 @@ class SequenceTimeline(QMainWindow):
     _track_row_height = _track_row_height
     _toggle_collapse_at = _toggle_collapse_at
     _setup_collapse_column = _setup_collapse_column
+    # BUILD 162: clip selection / drag / trim / menu live in
+    # sequence_timeline_clips.py
+    _linked_clips = _linked_clips
+    _clip_edge_at = _clip_edge_at
+    _clip_by_id = _clip_by_id
+    _clear_selection = _clear_selection
+    _select_clip = _select_clip
+    _selected_clips = _selected_clips
+    _drag_group = _drag_group
+    _edge_drag_move = _edge_drag_move
+    _snap_pixels = _snap_pixels
+    _snap_drag_delta = _snap_drag_delta
+    _set_snap_frame = _set_snap_frame
+    _group_delta_range = _group_delta_range
+    _neighbor_bounds = _neighbor_bounds
+    _clip_image_track_row = _clip_image_track_row
+    _clip_at = _clip_at
+    _move_target_track = _move_target_track
+    _relocate_clip = _relocate_clip
+    _cross_track_preview = _cross_track_preview
+    _move_drag_release = _move_drag_release
+    _move_preview_ranges = _move_preview_ranges
+    _preview_shift_plan = _preview_shift_plan
+    _ranges_for_clips = _ranges_for_clips
+    _clip_context_menu = _clip_context_menu
+    _edge_drag_release = _edge_drag_release
+    _clip_track_id = _clip_track_id
+    _clip_press_select = _clip_press_select
+    _clip_press_drag = _clip_press_drag
+    _clip_edge_cursor = _clip_edge_cursor
+    _clip_drag_release = _clip_drag_release
 
     def __init__(self, parent=None, sequence_id=None):
         super().__init__(parent)
@@ -1089,15 +813,6 @@ class SequenceTimeline(QMainWindow):
             event.ignore()
 
 
-    def _linked_clips(self, clip):
-        # Other clips sharing clip's link_id (any track), as live lists.
-        # Footage, caption, and keyframe clips all participate.
-        link_id = clip[8] if len(clip) > 8 else None
-        if link_id is None:
-            return []
-        return [c for clips in self.clips_by_track.values() for c in clips
-                if c[0] != clip[0] and len(c) > 8 and c[8] == link_id]
-
     # BUILD 161: _track_row_height -> sequence_timeline_tracks.py
 
     def _row_collapsed(self, pos):
@@ -1352,28 +1067,8 @@ class SequenceTimeline(QMainWindow):
                 if marker_hit is not None:
                     marker_drag_start(self, marker_hit, press_pos)
                     return True
-                hit_clip = self._clip_at(press_pos)
-                edge_hit = self._clip_edge_at(press_pos)
-                if hit_clip is None and edge_hit is not None:
-                    hit_clip = edge_hit[0]
-                # Event modifiers plus the live keyboard state, so Alt is seen
-                # even if the platform drops it from the mouse event
-                mods = event.modifiers() | QApplication.queryKeyboardModifiers()
-                if hit_clip is None:
-                    if self._x_in_clips(press_pos) >= 0:
-                        self._clear_selection()
-                elif mods & Qt.AltModifier:
-                    # Alt: ONLY this clip, no link partners, solo on
-                    self._select_clip(hit_clip, "solo")
-                elif mods & Qt.ShiftModifier:
-                    self._select_clip(hit_clip, "add")
-                elif hit_clip[0] in self._selected_clip_ids:
-                    # Already selected (solo or multi): keep it so an edge
-                    # or move drag uses the same selection and does not clear
-                    # Alt solo
-                    pass
-                else:
-                    self._select_clip(hit_clip, "normal")
+                # BUILD 162: clip click selection -> sequence_timeline_clips
+                hit_clip = self._clip_press_select(event, press_pos)
                 from keyframe import hit_test_key
                 key_hit = self._hit_key(press_pos)
                 if key_hit is not None:
@@ -1388,34 +1083,8 @@ class SequenceTimeline(QMainWindow):
                         "dragging": False,
                     }
                     return True
-                hit = self._clip_edge_at(event.position().toPoint())
-                if hit is not None:
-                    clip, edge = hit
-                    self._edge_drag = {
-                        "clip": clip,
-                        "edge": edge,
-                        "orig_start": clip[2],
-                        "orig_length": clip[3],
-                        "orig_in": clip[7],
-                        "snap_px": self._snap_pixels(),
-                    }
-                    self._edge_drag["group"] = self._drag_group(clip, edge)
-                    return True
-                clip = self._clip_at(event.position().toPoint())
-                if clip is not None:
-                    press_frame = self._frame_at_clips_x(self._x_in_clips(event.position().toPoint()))
-                    self._edge_drag = {
-                        "clip": clip,
-                        "edge": "move",
-                        "orig_start": clip[2],
-                        "orig_length": clip[3],
-                        "grab_offset": press_frame - clip[2],
-                        "src_track": self._clip_track_id(clip),
-                        "target_track": None,
-                        "target_ok": True,
-                        "snap_px": self._snap_pixels(),
-                    }
-                    self._edge_drag["group"] = self._drag_group(clip, "move")
+                # BUILD 162: clip edge trim / move drag start -> sequence_timeline_clips
+                if self._clip_press_drag(event):
                     return True
                 # BUILD 150: a left-click on empty track space (Clips area)
                 # is not passed on to the table, so the track row is not
@@ -1436,10 +1105,7 @@ class SequenceTimeline(QMainWindow):
                 if getattr(self, "_edge_drag", None) is not None:
                     self._edge_drag_move(pos)
                     return True
-                if self._clip_edge_at(pos) is not None:
-                    obj.setCursor(Qt.SplitHCursor)
-                else:
-                    obj.unsetCursor()
+                self._clip_edge_cursor(obj, pos)     # BUILD 162
                 # Hovered marker: 3 px line; repaint only when it changes
                 from markers import hit_test_marker
                 mh = self._hit_marker(pos)
@@ -1454,10 +1120,7 @@ class SequenceTimeline(QMainWindow):
                     key_drag_release(self)
                     return True
                 if getattr(self, "_edge_drag", None) is not None:
-                    if self._edge_drag["edge"] == "move":
-                        self._move_drag_release()
-                    else:
-                        self._edge_drag_release()
+                    self._clip_drag_release()     # BUILD 162
                     return True
             if etype == QEvent.Leave:
                 self._set_hover_marker(None)
@@ -1478,568 +1141,12 @@ class SequenceTimeline(QMainWindow):
         # Same conversion as drop
         return max(0, self.view_start_frame + int(x_in_clips / self.pixels_per_frame))
 
-    def _clip_edge_at(self, pos):
-        # Return (clip, "left" or "right") if pos is within EDGE_HIT_PX of an
-        # image or video clip edge, else None
-        row = self.table.rowAt(pos.y())
-        if row < 0:
-            return None
-        name_item = self.table.item(row, 0)
-        if name_item is None:
-            return None
-        if (name_item.data(Qt.UserRole + 4) or "").lower() not in EDIT_TRACK_TYPES:
-            return None
-        x_in_clips = self._x_in_clips(pos)
-        if x_in_clips < -EDGE_HIT_PX:
-            return None
-        ppf = self.pixels_per_frame
-        best = None
-        best_dist = EDGE_HIT_PX + 1
-        for clip in self.clips_by_track.get(name_item.data(Qt.UserRole), []):
-            left = int((clip[2] - self.view_start_frame) * ppf)
-            width = max(1, int(clip[3] * ppf))
-            # Last painted pixel column of the clip (same rect the delegate draws)
-            right = left + width - 1
-            for edge, edge_x in (("left", left), ("right", right)):
-                dist = abs(x_in_clips - edge_x)
-                # <= so the right edge wins a tie on very narrow clips
-                if dist <= EDGE_HIT_PX and (dist < best_dist or
-                                            (edge == "right" and dist == best_dist)):
-                    best = (clip, edge)
-                    best_dist = dist
-        return best
-
-    def _clip_by_id(self, clip_id):
-        for clips in self.clips_by_track.values():
-            for c in clips:
-                if c[0] == clip_id:
-                    return c
-        return None
-
-    def _clear_selection(self):
-        if self._selected_clip_ids or self._selection_solo:
-            self._selected_clip_ids = set()
-            self._selection_order = []
-            self._selection_solo = False
-            self.table.viewport().update()
-        self._update_edit_actions()
-
-    def _select_clip(self, clip, mode):
-        # mode: "normal" = clip + link partners, "solo" = only clip with
-        # selection solo on, "add" = add clip and its link partners (keep
-        # existing selection; drop nothing)
-        if mode == "add":
-            if self._selection_solo:
-                self._selection_solo = False
-            members = [clip] + self._linked_clips(clip)
-            for m in members:
-                if m[0] not in self._selected_clip_ids:
-                    self._selected_clip_ids.add(m[0])
-                    self._selection_order.append(m[0])
-        elif mode == "solo":
-            self._selected_clip_ids = {clip[0]}
-            self._selection_order = [clip[0]]
-            self._selection_solo = True
-        else:
-            members = [clip] + self._linked_clips(clip)
-            self._selection_order = [c[0] for c in members]
-            self._selected_clip_ids = set(self._selection_order)
-            self._selection_solo = False
-        self.table.viewport().update()
-        self._update_edit_actions()
-
-    def _selected_clips(self):
-        # Live clip lists of the selection, in selection order
-        out = []
-        for cid in self._selection_order:
-            c = self._clip_by_id(cid)
-            if c is not None:
-                out.append(c)
-        return out
-
-    def _drag_group(self, clip, edge="move"):
-        # Clips that take the drag delta, each with its drag-start values
-        # and its own-track neighbor bounds (group members ignored).
-        # Solo: only clip. Move of a selected clip: every selected clip plus
-        # their link partners. Otherwise: clip plus its link partners.
-        if self._selection_solo:
-            members = [clip]
-        elif edge == "move" and clip[0] in self._selected_clip_ids:
-            members = [clip]
-            for c in self._selected_clips() + [clip]:
-                for m in [c] + self._linked_clips(c):
-                    if all(m[0] != x[0] for x in members):
-                        members.append(m)
-        else:
-            members = [clip] + self._linked_clips(clip)
-        ids = {c[0] for c in members}
-        group = []
-        from keyframe import is_keyframe_clip_id
-        for c in members:
-            prev_end, next_start = self._neighbor_bounds(c, c[2], c[3], ignore_ids=ids)
-            # BUILD 134: every non-moving clip on this member's track, for
-            # the jump-past-a-blocker move (clip_drag.py)
-            blocks = [(o[2], o[2] + o[3])
-                      for o in self.clips_by_track.get(self._clip_track_id(c), [])
-                      if o[0] not in ids]
-            entry = {"clip": c, "start": c[2], "length": c[3], "in": c[7],
-                     "prev_end": prev_end, "next_start": next_start,
-                     "blocks": blocks}
-            if is_keyframe_clip_id(c[0]) and len(c) > 9:
-                entry["keys"] = list(c[9])
-            group.append(entry)
-        return group
-
-    def _edge_drag_move(self, pos):
-        # The dragged clip asks for a frame delta; every clip in its link
-        # group takes the same delta, clamped so no member leaves its own
-        # neighbors' gap (each on its own track)
-        drag = self._edge_drag
-        clip = drag["clip"]
-        group = drag.get("group") or self._drag_group(clip)
-        drag["group"] = group
-        frame = self._frame_at_clips_x(self._x_in_clips(pos))
-        edge = drag["edge"]
-        if edge == "move":
-            target = self._move_target_track(pos, drag)
-            if target is not None:
-                # Track move only: start_frame stays at drag-start; mouse x
-                # does not change time. Release, then drag again, for time.
-                self._cross_track_preview(drag, target)
-                return
-            if drag.get("target_track") is not None:
-                # Back on the source track: return the clip to its own row
-                # and restore the drag-start start_frame before time move
-                self._relocate_clip(clip, drag["src_track"])
-                clip[2] = drag["orig_start"]
-                drag["target_track"] = None
-                drag["target_ok"] = True
-                drag["cur_delta"] = 0
-            delta = (frame - drag["grab_offset"]) - drag["orig_start"]
-        elif edge == "left":
-            delta = frame - drag["orig_start"]
-        else:
-            delta = frame - (drag["orig_start"] + drag["orig_length"])
-        delta = self._snap_drag_delta(drag, group, pos, delta)
-        if edge == "move" and all("blocks" in m for m in group):
-            # BUILD 134: waits at a blocking clip's edge, jumps past it
-            # once the mouse is past it and the whole group fits there
-            from clip_drag import legal_components, move_delta
-            comps = drag.get("legal")
-            if comps is None:
-                comps = legal_components(
-                    [(m["start"], m["length"], m["blocks"]) for m in group])
-                drag["legal"] = comps
-            delta = move_delta(comps, drag.get("cur_delta", 0), delta,
-                               drag["grab_offset"], drag["orig_length"])
-            drag["cur_delta"] = delta
-        else:
-            lo, hi = self._group_delta_range(group, edge)
-            delta = max(lo, min(hi, delta)) if lo <= hi else 0
-        for m in group:
-            c = m["clip"]
-            if edge == "move":
-                c[2] = m["start"] + delta
-                if "keys" in m:
-                    c[9] = [(item[0], item[1] + delta, item[2])
-                            for item in m["keys"]]
-            elif edge == "left":
-                c[2] = m["start"] + delta
-                c[3] = m["length"] - delta
-                c[7] = m["in"] + delta
-                if "keys" in m:
-                    c[9] = [(item[0], item[1] + delta, item[2])
-                            for item in m["keys"]]
-            else:
-                c[3] = m["length"] + delta
-        self.table.viewport().update()
-        self.status_bar.showMessage(f"Clip start {clip[2]}, length {clip[3]}")
-
-    def _snap_pixels(self):
-        # Global setting 'Pixel Snap-To' (pixels, default 2), read per drag
-        try:
-            return max(0, int(_get_global_setting("Pixel Snap-To", "2") or "2"))
-        except (TypeError, ValueError):
-            return 2
-
-    def _snap_drag_delta(self, drag, group, pos, delta):
-        # Move: the dragged clip's in or out point; trim: the dragged edge.
-        # Snaps to the nearest in/out point of any clip on any track that is
-        # not being moved or trimmed (linked partners left in place count),
-        # within snap_px pixels. Distance uses the unrounded mouse position,
-        # so it is a real pixel distance at the current zoom. The group
-        # moves by the one returned delta; the clamp after it still allows
-        # butting up to a neighbor.
-        snap_px = drag.get("snap_px", 0)
-        ppf = float(self.pixels_per_frame or 0)
-        if snap_px <= 0 or ppf <= 0:
-            self._set_snap_frame(None)
-            return delta
-        try:
-            from clip_snap import snap_delta_target, snap_targets
-            x = self._x_in_clips(pos)
-            frame_f = max(0.0, self.view_start_frame + x / ppf)
-            start, length = drag["orig_start"], drag["orig_length"]
-            edge = drag["edge"]
-            if edge == "move":
-                raw = (frame_f - drag["grab_offset"]) - start
-                edges = [start, start + length]
-                # BUILD 110: visible markers of every clip moving together
-                # are snap sources too, at their drag-start (delta 0)
-                # frames. Listed after the edges so an edge wins a tie.
-                edges += moving_marker_frames(
-                    getattr(self, "_markers", None), group, drag["clip"])
-            elif edge == "left":
-                raw = frame_f - start
-                edges = [start]
-            else:
-                raw = frame_f - (start + length)
-                edges = [start + length]
-            ids = {m["clip"][0] for m in group}
-            ids.add(drag["clip"][0])
-            from markers import marker_frames
-            targets = sorted(set(snap_targets(self.clips_by_track, ids)) | set(
-                marker_frames(getattr(self, "_markers", None), self.clips_by_track, ids)))
-            snapped, target = snap_delta_target(
-                raw, edges, targets, ppf, snap_px)
-        except Exception as e:
-            # print(f"Snap failed: {e}")
-            self._set_snap_frame(None)
-            return delta
-        self._set_snap_frame(target)
-        return delta if snapped is None else snapped
-
-    def _set_snap_frame(self, frame):
-        # White snap line frame (None = hidden); repaint ruler and tracks
-        # only when it changes
-        if getattr(self, "_snap_frame", None) == frame:
-            return
-        self._snap_frame = frame
-        try:
-            self.ruler.viewport().update()
-            self.playhead_overlay.update()
-        except Exception:
-            pass
-
-    def _group_delta_range(self, group, edge):
-        # Allowed (lo, hi) frame delta for all members at once
-        lo, hi = -10 ** 9, 10 ** 9
-        for m in group:
-            start, length, in_f = m["start"], m["length"], m["in"]
-            prev_end, next_start = m["prev_end"], m["next_start"]
-            if edge == "move":
-                # start + d >= max(0, prev_end); end + d <= next_start
-                lo = max(lo, max(0, prev_end) - start)
-                if next_start is not None:
-                    hi = min(hi, next_start - (start + length))
-            elif edge == "left":
-                # start + d >= prev_end and >= 0, in + d >= 0, length - d >= 1
-                lo = max(lo, max(0, prev_end) - start, -in_f)
-                hi = min(hi, length - 1)
-            else:
-                # length + d >= 1; end + d <= next_start
-                lo = max(lo, 1 - length)
-                if next_start is not None:
-                    hi = min(hi, next_start - (start + length))
-        return lo, hi
-
-    def _neighbor_bounds(self, clip, start, length, ignore_ids=None):
-        # (prev_end, next_start) for clip's track: end of the nearest clip
-        # before start (0 if none) and start of the nearest clip at or after
-        # start + length (None if none). The clip itself is ignored.
-        prev_end = 0
-        next_start = None
-        end = start + length
-        for c in self.clips_by_track.get(self._clip_track_id(clip), []):
-            if c[0] == clip[0] or (ignore_ids and c[0] in ignore_ids):
-                continue
-            c_start, c_end = c[2], c[2] + c[3]
-            if c_start < start:
-                prev_end = max(prev_end, c_end)
-            elif c_start >= end or c_start >= start:
-                next_start = c_start if next_start is None else min(next_start, c_start)
-        return prev_end, next_start
-
-    def _clip_image_track_row(self, pos):
-        row = self.table.rowAt(pos.y())
-        if row < 0:
-            return None
-        name_item = self.table.item(row, 0)
-        if name_item is None:
-            return None
-        if (name_item.data(Qt.UserRole + 4) or "").lower() not in EDIT_TRACK_TYPES:
-            return None
-        return name_item
-
-    def _clip_at(self, pos):
-        # Image or video clip whose body (not an edge) is under pos, else None
-        name_item = self._clip_image_track_row(pos)
-        if name_item is None:
-            return None
-        x_in_clips = self._x_in_clips(pos)
-        if x_in_clips < 0 or self._clip_edge_at(pos) is not None:
-            return None
-        ppf = self.pixels_per_frame
-        for clip in reversed(self.clips_by_track.get(name_item.data(Qt.UserRole), [])):
-            left = (clip[2] - self.view_start_frame) * ppf
-            right = left + clip[3] * ppf
-            if left <= x_in_clips <= right:
-                return clip
-        return None
-
     def _track_type(self, track_id):
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 0)
             if item is not None and item.data(Qt.UserRole) == track_id:
                 return (item.data(Qt.UserRole + 4) or "").lower()
         return ""
-
-    def _move_target_track(self, pos, drag):
-        # Track under the mouse if it differs from the source track and has
-        # the same type (video->video, audio->audio, image->image), else None
-        src = drag.get("src_track")
-        if src is None:
-            return None
-        row = self.table.rowAt(pos.y())
-        if row < 0:
-            return None
-        name_item = self.table.item(row, 0)
-        if name_item is None:
-            return None
-        tid = name_item.data(Qt.UserRole)
-        if tid is None or tid == src:
-            return None
-        if (name_item.data(Qt.UserRole + 4) or "").lower() != self._track_type(src):
-            return None
-        return tid
-
-    def _relocate_clip(self, clip, track_id):
-        # Move the in-memory clip list to another track's row (preview only)
-        for clips in self.clips_by_track.values():
-            for i, c in enumerate(clips):
-                if c is clip:
-                    del clips[i]
-                    break
-        self.clips_by_track.setdefault(track_id, []).append(clip)
-
-    def _cross_track_preview(self, drag, target):
-        # Track move only: the clicked clip changes row, start_frame stays
-        # at drag["orig_start"]. Partners stay put. Mouse x is ignored.
-        self._set_snap_frame(None)
-        clip = drag["clip"]
-        for m in drag.get("group") or []:
-            c = m["clip"]
-            if c is not clip:
-                c[2] = m["start"]
-        self._relocate_clip(clip, target)
-        clip[2] = drag["orig_start"]
-        end = clip[2] + clip[3]
-        ok = True
-        for c in self.clips_by_track.get(target, []):
-            if c is clip:
-                continue
-            if c[2] < end and c[2] + c[3] > clip[2]:
-                ok = False
-                break
-        drag["target_track"] = target
-        drag["target_ok"] = ok
-        self.table.viewport().update()
-        if ok:
-            self.status_bar.showMessage(
-                f"Move to track {target}, frame {clip[2]} (time locked)")
-        else:
-            self.status_bar.showMessage("Overlaps a clip on the target track")
-
-    def _move_drag_release(self):
-        drag = self._edge_drag
-        self._edge_drag = None
-        self._set_snap_frame(None)
-        clip = drag["clip"]
-        target = drag.get("target_track")
-        if target is not None:
-            # Track change only: start_frame stays at drag start; partner stays
-            new_start = drag["orig_start"]
-            refused = not drag.get("target_ok", True)
-            if not refused:
-                try:
-                    conn = sqlite3.connect(self._project_db())
-                    cur = conn.cursor()
-                    if self._range_overlaps(cur, target, new_start, int(clip[3])):
-                        refused = True
-                    else:
-                        from undo import push_undo
-                        push_undo(self._project_db(), "Move clip to track")
-                        table, row_id = clip_table_and_id(clip[0])
-                        cur.execute(
-                            f"UPDATE {table} SET track_id = ? WHERE id = ?",
-                            (target, row_id))
-                        conn.commit()
-                    conn.close()
-                except Exception as e:
-                    QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
-            if refused:
-                self._after_clip_change("Move refused: overlaps a clip on the target track")
-            else:
-                # BUILD 139: a track move changes the layer order only where
-                # the stack differs; the snapshot diff at the refresh marks
-                # exactly those frames (was: the clip's whole range)
-                self._after_clip_change(f"Clip moved to track {target}")
-            return
-        group = drag.get("group") or [{"clip": clip}]
-        new_start = max(0, int(clip[2]))
-        if new_start == drag["orig_start"]:
-            return
-        # BUILD 134: drop guard -- a final position that overlaps a clip on
-        # any moved clip's track (or is below 0) is refused, nothing saved
-        from clip_drag import overlaps
-        if all("blocks" in m for m in group) and overlaps(
-                [(m["clip"][2], m["clip"][3], m["blocks"]) for m in group]):
-            self._after_clip_change("Move refused: overlaps a clip")
-            return
-        from undo import push_undo
-        push_undo(self._project_db(), "Move clip")
-        try:
-            conn = sqlite3.connect(self._project_db())
-            cur = conn.cursor()
-            for m in group:
-                c = m["clip"]
-                from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
-                if is_keyframe_clip_id(c[0]):
-                    persist_keyframe_clip_time(cur, c)
-                    continue
-                table, row_id = clip_table_and_id(c[0])
-                cur.execute(f"UPDATE {table} SET start_frame = ? WHERE id = ?",
-                            (max(0, int(c[2])), row_id))
-            conn.commit()
-            conn.close()
-            # Preview: a whole linked group alone over its frames moves its
-            # clean frames with it (run right after the next forced
-            # retarget, see _retarget_preview); otherwise old and new
-            # ranges go dirty
-            # BUILD 146: no per-edit plan: the mile-marker diff at the
-            # refresh finds the pure move (and its dirty spans) by itself
-            # ranges = self._move_preview_ranges(group, drag)
-            # plan = self._preview_shift_plan(group, drag)
-            # if plan is not None:
-            #     self._preview_pending_shift = (plan, ranges)
-            # BUILD 139: otherwise the snapshot diff at the refresh marks
-            # only the frames that changed (was: old and new ranges)
-        except Exception as e:
-            QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
-        self._after_clip_change(f"Clip moved to frame {new_start}")
-        leftover = getattr(self, "_preview_pending_shift", None)
-        if leftover:
-            # The retarget did not run the shift: rebuild instead
-            self._preview_pending_shift = None
-            self._mark_preview_dirty(leftover[1])
-
-    def _move_preview_ranges(self, group, drag):
-        # Inclusive frame ranges a time move changes in the preview: old and
-        # new ranges of moved video/image and keyframe clips, plus linked
-        # partners left in place (solo drag) that composite with them.
-        from keyframe import is_keyframe_clip_id
-        ranges = []
-        ids = set()
-        kf_links = set()
-        vis_links = set()
-        for m in group:
-            c = m["clip"]
-            ids.add(c[0])
-            link_id = c[8] if len(c) > 8 else None
-            if is_keyframe_clip_id(c[0]):
-                if link_id is not None:
-                    kf_links.add(link_id)
-            elif self._track_type(self._clip_track_id(c)) in ("video", "image"):
-                if link_id is not None:
-                    vis_links.add(link_id)
-            else:
-                continue
-            ln = max(1, int(c[3]))
-            old_ln = max(1, int(m.get("length", drag.get("orig_length", c[3]))))
-            old = max(0, int(m.get("start", drag["orig_start"])))
-            new = max(0, int(c[2]))
-            ranges.append((old, old + old_ln - 1))
-            ranges.append((new, new + ln - 1))
-        if kf_links or vis_links:
-            for track_id, clips in self.clips_by_track.items():
-                kind = self._track_type(track_id)
-                for c in clips:
-                    link_id = c[8] if len(c) > 8 else None
-                    if c[0] in ids or link_id is None:
-                        continue
-                    if ((link_id in kf_links and kind in ("video", "image"))
-                            or (link_id in vis_links and is_keyframe_clip_id(c[0]))):
-                        s0 = max(0, int(c[2]))
-                        ranges.append((s0, s0 + max(1, int(c[3])) - 1))
-        return ranges
-
-    def _preview_shift_plan(self, group, drag):
-        # (first, last, delta) when the clean preview rows can move with the
-        # group (FramesShift): the whole linked group moved by one delta and
-        # no other video/image clip touches the old or new frame span. Any
-        # doubt returns None and the caller marks old and new ranges dirty.
-        if self.sequence_id is None or not group:
-            return None
-        try:
-            from keyframe import is_keyframe_clip_id
-            ids = set()
-            links = set()
-            deltas = set()
-            span = []
-            visual = False
-            for m in group:
-                c = m["clip"]
-                ids.add(c[0])
-                if len(c) > 8 and c[8] is not None:
-                    links.add(c[8])
-                old = int(m.get("start", drag["orig_start"]))
-                deltas.add(max(0, int(c[2])) - old)
-                kind = self._track_type(self._clip_track_id(c))
-                if is_keyframe_clip_id(c[0]) or kind in ("video", "image"):
-                    visual = visual or kind in ("video", "image")
-                    span.append((old, old + max(1, int(c[3])) - 1))
-            # BUILD 139: an unlinked clip (group of one) may shift too; the
-            # snapshot check (shift_ok) proves the move before it runs
-            if len(deltas) != 1 or not visual or not span:
-                return None
-            if not links and len(group) != 1:
-                return None
-            delta = deltas.pop()
-            if delta == 0:
-                return None
-            first = min(a for a, _b in span)
-            last = max(b for _a, b in span)
-            if first + delta < 0:
-                return None
-            for track_id, clips in self.clips_by_track.items():
-                kind = self._track_type(track_id)
-                for c in clips:
-                    if c[0] in ids:
-                        continue
-                    # Part of a moved link left behind: not the whole group
-                    if len(c) > 8 and c[8] is not None and c[8] in links:
-                        return None
-                    if kind not in ("video", "image"):
-                        continue
-                    s0 = int(c[2])
-                    e0 = s0 + max(1, int(c[3])) - 1
-                    for a, b in ((first, last), (first + delta, last + delta)):
-                        if s0 <= b and e0 >= a:
-                            return None
-            # print(f"Preview shift plan frames {first}..{last} by {delta}")
-            return (first, last, delta)
-        except Exception as e:
-            # print(f"Preview shift skipped: {e}")
-            return None
-
-    def _ranges_for_clips(self, clips):
-        # Inclusive (first, last) frame ranges for preview dirty marks.
-        ranges = []
-        for c in clips:
-            in_f = max(0, int(c[2]))
-            length = max(1, int(c[3]))
-            ranges.append((in_f, in_f + length - 1))
-        return ranges
 
     def _mark_preview_dirty(self, ranges):
         # Clean set drops these frames now (bar turns red); the database
@@ -2060,139 +1167,6 @@ class SequenceTimeline(QMainWindow):
             get_worker()
         except Exception as e:
             print(f"Preview dirty mark failed: {e}")
-
-    def _clip_context_menu(self, clip, pos):
-        # Right-click on an unselected clip selects it like a normal click
-        if clip[0] not in self._selected_clip_ids:
-            self._select_clip(clip, "normal")
-        from keyframe import is_keyframe_clip_id, add_key as _add_key
-        if is_keyframe_clip_id(clip[0]):
-            menu = QMenu(self)
-            clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
-            key_menu = menu.addMenu("Key")
-            key_click_action = key_menu.addAction("At Mouse Click")
-            key_tick_action = key_menu.addAction("At Timeline Tick")
-            rename_action = menu.addAction("Rename")
-            # BUILD 133: Link / Unlink from the whole selection
-            link_action, unlink_action = self._add_link_actions(menu, clip)
-            menu.addSeparator()
-            # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
-            # menu.addSeparator()
-            delete_action = menu.addAction("Delete")
-            action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            if action is None:
-                return
-            # if self._run_clipboard_action(action, clip_acts, clip):
-            if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
-                return
-            if action == key_click_action:
-                click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
-                _add_key(self, clip, click_frame)
-            elif action == key_tick_action:
-                # Playhead frame; add_key clamps it to the clip [in, out)
-                _add_key(self, clip, int(self.current_frame))
-            elif action == rename_action:
-                from keyframe import rename_keyframe_clip
-                rename_keyframe_clip(self, clip)
-            elif link_action is not None and action == link_action:
-                self.link_selected_clips(clip)
-            elif unlink_action is not None and action == unlink_action:
-                self.unlink_clips(clip)
-            elif action == delete_action:
-                self.delete_selected_clip()
-            return
-        if is_caption_id(clip[0]):
-            # Caption clip menu: Edit, Slice, Link or Unlink, Delete
-            # (BUILD 133: one of the two, same rule as the other clip menus)
-            menu = QMenu(self)
-            clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
-            edit_action = menu.addAction("Edit")
-            slice_action = menu.addAction("Slice")
-            link_action, unlink_action = self._add_link_actions(menu, clip)
-            menu.addSeparator()
-            # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
-            # menu.addSeparator()
-            delete_action = menu.addAction("Delete")
-            action = menu.exec(self.table.viewport().mapToGlobal(pos))
-            # if self._run_clipboard_action(action, clip_acts, clip):
-            if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
-                return
-            if action == edit_action:
-                self.edit_caption(clip)
-            elif action == slice_action:
-                self.slice_clip(clip, self._x_in_clips(pos))
-            elif link_action is not None and action == link_action:
-                self.link_selected_clips(clip)
-            elif unlink_action is not None and action == unlink_action:
-                self.unlink_clips(clip)
-            elif action == delete_action:
-                self.delete_selected_clip()
-            return
-        enabled = bool(clip[5])
-        menu = QMenu(self)
-        clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
-        # Gain... on audio-track clips only (the only rows the preview audio
-        # mixes); right-clicked clip only, like Enable / Solo
-        gain_action = None
-        # BUILD 105: sequence clips have no footage: no Gain / Proxy
-        is_seq_clip = clip[0] in (getattr(self, "_seq_refs", None) or {})
-        if self._track_type(self._clip_track_id(clip)) == "audio" and not is_seq_clip:
-            gain_action = menu.addAction("Gain...")
-            menu.addSeparator()
-        slice_action = menu.addAction("Slice")
-        marker_menu = menu.addMenu("Marker")
-        marker_click_action = marker_menu.addAction("Add To Mouse Click")
-        marker_tick_action = marker_menu.addAction("Add to Time Tick")
-        # BUILD 133: Link / Unlink from the whole selection
-        link_action, unlink_action = self._add_link_actions(menu, clip)
-        menu.addSeparator()
-        enable_action = menu.addAction("Disable" if enabled else "Enable")
-        solo_action = menu.addAction("Solo")
-        solo_action.setCheckable(True)
-        solo_action.setChecked(bool(clip[6]))
-        # Proxy submenu on video / image clips only (not audio)
-        proxy_actions = {}
-        if (self._track_type(self._clip_track_id(clip)) in ("video", "image")
-                and not is_seq_clip):
-            from clip_proxy import add_clip_proxy_submenu
-            proxy_actions = add_clip_proxy_submenu(self, menu, clip)
-        menu.addSeparator()
-        # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
-        # menu.addSeparator()
-        delete_action = menu.addAction("Delete")
-        action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        # if self._run_clipboard_action(action, clip_acts, clip):
-        if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
-            return
-        if action is not None and action in proxy_actions:
-            from clip_proxy import apply_clip_proxy
-            apply_clip_proxy(self, clip, proxy_actions[action])
-            return
-        if action == delete_action:
-            # Same as the Delete key: selected clips, plus link partners
-            # unless selection solo
-            self.delete_selected_clip()
-            return
-        if gain_action is not None and action == gain_action:
-            from clip_gain import edit_clip_gain
-            edit_clip_gain(self, clip)
-            return
-        if action is None:
-            return
-        if action == marker_click_action:
-            self._add_marker(clip, pos)
-        elif action == marker_tick_action:
-            self._add_marker(clip, None)
-        elif action == slice_action:
-            self.slice_clip(clip, self._x_in_clips(pos))
-        elif link_action is not None and action == link_action:
-            self.link_selected_clips(clip)
-        elif unlink_action is not None and action == unlink_action:
-            self.unlink_clips(clip)
-        elif action == enable_action:
-            self._toggle_clip_flag(clip[0], "enabled")
-        elif action == solo_action:
-            self._toggle_clip_flag(clip[0], "solo")
 
     def _add_marker(self, clip, pos):
         # Marker at the frame under the mouse, dark red, blank name (undoable)
@@ -2315,78 +1289,6 @@ class SequenceTimeline(QMainWindow):
         self.current_frame = max(0, min(self.total_frames() - 1, self.current_frame))
         self._save_view_state()
         self.status_bar.showMessage(message, 3000)
-
-
-    def _edge_drag_release(self):
-        drag = self._edge_drag
-        self._edge_drag = None
-        self._set_snap_frame(None)
-        clip = drag["clip"]
-        # print(f"ICON: edge-drag release clip_id={clip[0]} in_frame={clip[7]} "
-              # f"edge={drag['edge']} (icon requested at row height on next paint, generate=True)")
-        if (clip[2] == drag["orig_start"] and clip[3] == drag["orig_length"]
-                and clip[7] == drag["orig_in"]):
-            return
-        group = drag.get("group") or [{"clip": clip}]
-        from undo import push_undo
-        push_undo(self._project_db(), "Trim clip")
-        try:
-            conn = sqlite3.connect(self._project_db())
-            cur = conn.cursor()
-            for m in group:
-                c = m["clip"]
-                from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
-                if is_keyframe_clip_id(c[0]):
-                    persist_keyframe_clip_time(cur, c)
-                    continue
-                if is_caption_id(c[0]):
-                    cur.execute(
-                        "UPDATE captions SET start_frame = ?, length_frames = ? WHERE id = ?",
-                        (c[2], c[3], -c[0])
-                    )
-                    continue
-                cur.execute(
-                    "UPDATE clips SET start_frame = ?, length_frames = ?, in_frame = ? "
-                    "WHERE id = ?",
-                    (c[2], c[3], c[7], c[0])
-                )
-            conn.commit()
-            conn.close()
-            # Preview (BUILD 139): the snapshot diff at the refresh below
-            # marks only the frames the trim changes (the added / removed
-            # end, or the whole clip when its source or keys shift); was:
-            # old and new ranges of trimmed clips and linked partners
-        except Exception as e:
-            QMessageBox.warning(self, "Clip Edge", f"Could not save clip: {e}")
-        # The video clip of the group gets its out icon (dragged or partner)
-        video_members = [m["clip"] for m in group if self._clip_is_video(m["clip"])]
-        if video_members:
-            clip = video_members[0]
-        track_id = self._clip_track_id(clip)
-        is_video = bool(video_members)
-        self.refresh()
-        if drag["edge"] == "right" and is_video:
-            # clip is the live list edited by the drag, so clip[3] is the new
-            # length. Out frame = in_frame + length_frames - 1
-            out_frame = out_frame_for(clip[7], clip[3])
-            # print(f"ICON out release clip={clip[0]} in_frame={clip[7]} length={clip[3]} "
-                  # f"out_frame={out_frame} track_height={self._track_row_height(track_id)}")
-            self._generate_out_icon(clip[1], track_id, out_frame)
-        self.table.viewport().update()
-        self.ruler.viewport().update()
-        self._refresh_sequence_manager()
-        # Length may have changed; keep frame and view inside it
-        self._clamp_view()
-        self.current_frame = max(0, min(self.total_frames() - 1, self.current_frame))
-        self._save_view_state()
-        self.status_bar.showMessage(f"Clip start {clip[2]}, length {clip[3]}", 3000)
-
-    def _clip_track_id(self, clip):
-        for track_id, clips in self.clips_by_track.items():
-            for c in clips:
-                if c[0] == clip[0]:
-                    return track_id
-        return None
 
     def _on_section_resized(self, index, old_size, new_size):
         if index != CLIPS_COL:
