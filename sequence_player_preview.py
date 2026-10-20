@@ -272,6 +272,19 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         #         files or "none", _free_mb()))
         pre.clear()
         del pre
+        # BUILD 188: release this layer's decode surfaces as soon as it is
+        # blended (synced above): close its decoders (their N-frame output
+        # pools) and free its stills, so no source-size frame outlives its
+        # blend, coexists with the next layer, or is held while the
+        # finished composites are JPEG-encoded. Peak: one layer's decode
+        # surfaces plus the N sequence-size composite buffers.
+        for key in list(self.decoders.keys()):
+            if key[0] in clips:
+                self._close_decoder(key)
+        for path in track_stills(self, frames, snapshot, clips):
+            item = self.images.pop(path, None)
+            if item is not None:
+                cudart.cudaFree(item[0])
     freed = 0
     for path in list(self.images.keys()):
         if path not in stills:
@@ -282,6 +295,16 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
     # if freed:
     #     _refresh_trace.append("stills freed %d (free %d MB)" % (freed, _free_mb()))
+
+
+def track_stills(self, frames, snapshot, clips):
+    # BUILD 188: still paths of the given clips in these frames
+    out = set()
+    for fr in frames:
+        for item in self._layer_items(fr, snapshot):
+            if item[0] == "image" and item[6][0] in clips:
+                out.add(item[1])
+    return out
 
 
 # BUILD 180: steps of the last refresh batch (free VRAM after each)
