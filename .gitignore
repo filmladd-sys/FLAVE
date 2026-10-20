@@ -7,3 +7,4 @@ __pycache__/
 .stfolder/
 *.bak*
 *.tmp
+flave_capture.json
