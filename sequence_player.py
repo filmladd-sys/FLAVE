@@ -1312,7 +1312,13 @@ class SequencePlayer(QWindow):
         layer_list = self._layer_items(frame, snapshot)
         if clips is not None:
             layer_list = [l for l in layer_list if l[6][0] in clips]
-        self._prune_decoders(frame, snapshot)
+        # BUILD 191: not in a batch pass: _prefetch pruned at the batch's
+        # first frame and set each decoder's last use to the batch's last
+        # frame, so pruning here at an early frame of a batch longer than
+        # DEC_IDLE_FRAMES closed the decoder (freeing every frame it had
+        # just returned) before those frames were blended: CUDA error 700
+        if prefetched is None:
+            self._prune_decoders(frame, snapshot)
         for layer in layer_list:
             kind, path, src_frame = layer[0], layer[1], layer[2]
             dkey = layer[6] if len(layer) > 6 else (None, path)
@@ -1368,6 +1374,11 @@ class SequencePlayer(QWindow):
                     count = skip + 1
                 elif nxt != src_frame:
                     dec.seek_to_index(src_frame)
+                if prefetched:
+                    # BUILD 191: a decode hands this decoder's earlier
+                    # frames back to its pool; finish the queued blends
+                    # that read prefetched frames first
+                    _check(cudart.cudaStreamSynchronize(self.stream), "prefetch sync")
                 try:
                     batch = dec.get_batch_frames(count)
                 except Exception:
