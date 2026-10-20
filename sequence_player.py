@@ -1282,9 +1282,11 @@ class SequencePlayer(QWindow):
         self._present(dark, True)
 
     def _build_dst(self, frame, dark, target=None, snapshot=None, use_gl=True,
-                   prefetched=None, sync=True):
+                   prefetched=None, sync=True, clips=None, clear=True):
         # Clear, decode and blend every layer into target (default self.dst,
         # sequence size). The worker passes gen_dst, a snapshot, use_gl False.
+        # BUILD 176: clips (set of clip ids): blend only those layers;
+        # clear False: blend over what target already holds
         cudart, nvcuda, _gl = _libs()
         if use_gl:
             self.ctx.makeCurrent(self)
@@ -1293,11 +1295,14 @@ class SequencePlayer(QWindow):
         self._target = target
         if target is self.dst:
             self._dst_frame = None
-        _check(cudart.cudaMemsetAsync(target, 0 if dark else 255,
-                                      self.row * self.seq_h, self.stream), "clear")
+        if clear:
+            _check(cudart.cudaMemsetAsync(target, 0 if dark else 255,
+                                          self.row * self.seq_h, self.stream), "clear")
         if snapshot is None:
             snapshot = timeline_snapshot(self.timeline)
         layer_list = self._layer_items(frame, snapshot)
+        if clips is not None:
+            layer_list = [l for l in layer_list if l[6][0] in clips]
         self._prune_decoders(frame, snapshot)
         for layer in layer_list:
             kind, path, src_frame = layer[0], layer[1], layer[2]

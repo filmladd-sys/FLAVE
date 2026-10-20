@@ -81,9 +81,10 @@ def frames_jpeg_batch(self, frames, quality, snapshot):
             out.append(None)
     return out
 
-def _prefetch(self, frames, snapshot):
+def _prefetch(self, frames, snapshot, clips=None):
     # {((clip_id, path), src_frame): decoded frame} per clip whose source
-    # frames run consecutively across the batch (one decoder per clip)
+    # frames run consecutively across the batch (one decoder per clip).
+    # BUILD 176: clips (set of clip ids): only those clips' layers
     reqs = {}
     last = {}
     if frames:
@@ -91,6 +92,8 @@ def _prefetch(self, frames, snapshot):
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
             kind, path, src = item[0], item[1], item[2]
+            if clips is not None and item[6][0] not in clips:
+                continue
             if kind == "video" and os.path.isfile(path):
                 key = item[6] if len(item) > 6 else (None, path)
                 reqs.setdefault(key, []).append(src)
@@ -185,6 +188,10 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
     nvcuda = _libs()[1]
     self._tm = _new_tm()
     _check(nvcuda.cuCtxSetCurrent(self.cuda_ctx), "ctx")
+    if getattr(self, "_refresh_hold", 0) and len(frames) > 1:
+        # BUILD 176: explicit refresh (pool reserved): one layer at a time
+        _composite_by_layer(self, frames, snapshot, dark, bufs)
+        return sink(self, bufs)
     # 1) decode
     pre = self._prefetch(frames, snapshot)
     # 2) composite all N on the card (prefetched blends are stream
@@ -196,6 +203,34 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
     out = sink(self, bufs)
     del pre
     return out
+
+
+def _composite_by_layer(self, frames, snapshot, dark, bufs):
+    # BUILD 176: explicit refresh: clear all N buffers, then per track,
+    # bottom first: decode that track's N frames, blend them into the N
+    # buffers, sync, drop the decoded frames before the next track. Each
+    # frame still gets its layers blended bottom first (same image as
+    # composite_batch); peak decoded frames held: one layer's N.
+    cudart = _libs()[0]
+    for b in bufs:
+        _check(cudart.cudaMemsetAsync(b, 0 if dark else 255,
+                                      self.row * self.seq_h, self.stream), "clear")
+    used = set()
+    for fr in frames:
+        for item in self._layer_items(fr, snapshot):
+            used.add(item[6][0])
+    clips_by_track = snapshot[1]
+    for track_id, _en, _solo, _kind in reversed(snapshot[0]):
+        clips = set(c[0] for c in clips_by_track.get(track_id, [])) & used
+        if not clips:
+            continue
+        pre = self._prefetch(frames, snapshot, clips)
+        for k, fr in enumerate(frames):
+            self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
+                            clips=clips, clear=False)
+        _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
+        pre.clear()
+        del pre
 
 
 def host_rgb(self, bufs):

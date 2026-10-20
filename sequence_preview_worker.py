@@ -388,8 +388,9 @@ WORKER_PASS_SEC = 0.25
 # (refresh_batch_frames), previewGpuBatchFrames .. REFRESH_GPU_MAX
 # BUILD 174: one fixed N per refresh, with REFRESH_NVDEC_HEADROOM kept
 # free beyond the margin for decode surfaces. BUILD 175: REFRESH_GPU_MAX 0
-# = no cap: N is the full VRAM fit (at least previewGpuBatchFrames)
-REFRESH_GPU_MAX = 0
+# = no cap: N is the full VRAM fit (at least previewGpuBatchFrames).
+# BUILD 176: capped at 120 (VRAM fit still computed, N never above it)
+REFRESH_GPU_MAX = 120
 REFRESH_NVDEC_HEADROOM = 1 << 30
 REFRESH_GUI_STALL_SEC = 0.3
 REFRESH_BATCH_SECONDS = 10
