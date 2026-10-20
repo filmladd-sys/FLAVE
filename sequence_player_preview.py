@@ -258,16 +258,6 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
             self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
                             clips=clips, clear=False)
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
-        # BUILD 184: frames each decoder was asked for in one batch (its
-        # output pool), for the next chunk's N (refresh_chunk_frames)
-        counts = {}
-        for fr in frames:
-            for item in self._layer_items(fr, snapshot):
-                if item[0] == "video" and item[6][0] in clips:
-                    counts[item[6]] = counts.get(item[6], 0) + 1
-        dec_frames = self.__dict__.setdefault("_dec_frames", {})
-        for key, cnt in counts.items():
-            dec_frames[key] = max(dec_frames.get(key, 0), cnt)
         vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
             track_id, frames[0], frames[-1], files or "none"))
         _refresh_trace.append(
@@ -581,62 +571,72 @@ def _source_size(path):
     return _src_size[path]
 
 
-def refresh_chunk_frames(project_path, sequence_id, snapshot, frames,
-                         margin=0.25, headroom=0):
-    # BUILD 184: worker, explicit refresh: frames for this chunk (at most
-    # len(frames), the pool N). One layer decodes at a time, so the cost is
-    # the largest video source the chunk opens (proxy or original, its
-    # real width x height): REFRESH_DECODE_BYTES_PX per pixel per frame.
-    # Fit: free VRAM + what the open decoders already hold (closed or
-    # reused before the next layer decodes) - the safety exit limit - a
-    # cushion (BUILD 185; margin / headroom unused here). The composite buffers are the reserved pool (in
-    # use, so already out of free). At least 1.
-    n = len(frames)
+def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
+    # BUILD 186: worker, explicit refresh, once per pass before any chunk:
+    # an edit decision list of the sequence. Ranges are cut at every clip
+    # edge (any track) and merged while the layers decoded stay the same
+    # (same clip / file on every track); gaps are ranges too. Each range
+    # gets its own N once, from the real width x height (ffprobe, cached)
+    # of the largest video source decoded in it (proxy or original):
+    # REFRESH_DECODE_BYTES_PX per pixel per frame, one layer decoding at a
+    # time; plus its stills (RGBA, 4 per pixel, once). Budget: free VRAM
+    # with every decoder closed - the safety exit limit - a cushion (the
+    # composite buffers are the reserved pool, already out of free).
+    # N = budget / per frame, 1..pool_n; a range with no video gets pool_n.
+    # Chunks never cross a range end (the worker cuts them), so no chunk
+    # mixes two ranges' sources. Returns [(start, end, n)], end inclusive.
     gen = _generator_for(project_path, sequence_id)
-    if gen is None or n <= 1:
-        return n
+    if gen is None or total <= 0:
+        return []
     _GEN_LOCK.acquire()
     try:
-        big, big_path, big_size = 0, None, None
-        for fr in frames:
-            for item in gen._layer_items(fr, snapshot):
-                if item[0] != "video":
-                    continue
-                size = _source_size(item[1]) or (int(gen.seq_w), int(gen.seq_h))
-                if size[0] * size[1] > big:
-                    big, big_path, big_size = size[0] * size[1], item[1], size
-        if not big:
-            return n
-        fv = free_vram()
-        if fv is None:
-            return n
-        per = int(big * REFRESH_DECODE_BYTES_PX)
-        dec_frames = gen.__dict__.setdefault("_dec_frames", {})
-        held = 0
-        for key in list(dec_frames.keys()):
-            if key not in gen.decoders:
-                dec_frames.pop(key)
-                continue
-            size = _source_size(key[1]) or (int(gen.seq_w), int(gen.seq_h))
-            held += int(dec_frames[key] * size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
-        # BUILD 185: keep only the safety exit limit plus a cushion (was
-        # max(25% margin, limit) + 1 GB headroom: N 1 for a 4680x3120
-        # source with about 3.3 GB free)
-        keep = (REFRESH_VRAM_FATAL_MB + REFRESH_CHUNK_CUSHION_MB) << 20
-        usable = fv[0] + held - keep
-        k = max(1, min(n, int(usable // per) if usable > 0 else 1))
-        print("WORKER refresh chunk: N %d of %d, frames %d..%d | largest source "
-              "%dx%d %s, %.1f MB/frame decode | free %d MB, decoders hold %d MB, "
-              "keep %d MB" % (
-                  k, n, frames[0], frames[k - 1], big_size[0], big_size[1],
-                  big_path, per / float(1 << 20), fv[0] >> 20, held >> 20,
-                  keep >> 20))
-        return k
-    except Exception as e:
-        print("Refresh chunk size failed: %s" % e)
-        return n
+        _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+        gen._close_all_decoders()
     finally:
         _GEN_LOCK.release()
+    fv = free_vram()
+    keep = (REFRESH_VRAM_FATAL_MB + REFRESH_CHUNK_CUSHION_MB) << 20
+    budget = (fv[0] - keep) if fv else 0
+    cuts = set([0, int(total)])
+    for clips in snapshot[1].values():
+        for clip in clips:
+            for f in (int(clip[2]), int(clip[2]) + int(clip[3])):
+                if 0 < f < total:
+                    cuts.add(f)
+    cuts = sorted(cuts)
+    ranges = []
+    for a, b in zip(cuts[:-1], cuts[1:]):
+        items = gen._layer_items(a, snapshot)
+        sig = tuple(sorted((it[0], it[6]) for it in items))
+        if ranges and ranges[-1][2] == sig:
+            ranges[-1][1] = b - 1
+        else:
+            ranges.append([a, b - 1, sig, items])
+    plan = []
+    print("WORKER refresh plan: %d ranges, free %s MB, keep %d MB, pool N %d" % (
+        len(ranges), (fv[0] >> 20) if fv else "?", keep >> 20, pool_n))
+    for a, b, _sig, items in ranges:
+        per, still, big_path, big_size = 0, 0, None, None
+        for it in items:
+            size = _source_size(it[1]) or (int(gen.seq_w), int(gen.seq_h))
+            if it[0] == "image":
+                still += 4 * size[0] * size[1]
+            elif it[0] == "video":
+                cost = int(size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
+                if cost > per:
+                    per, big_path, big_size = cost, it[1], size
+        if per <= 0:
+            n = pool_n
+        elif fv is None:
+            n = 1
+        else:
+            n = max(1, min(pool_n, int((budget - still) // per)))
+        plan.append((a, b, n))
+        print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
+              "%.1f MB/frame decode, stills %d MB" % (
+                  a, b, n, ("%dx%d" % big_size) if big_size else "none",
+                  big_path or "", per / float(1 << 20), still >> 20))
+    return plan
 
 
 def reserve_refresh_pool(project_path, sequence_id, n):

@@ -232,6 +232,9 @@ class PreviewWorker(object):
                 _log_refresh_pool(n, self._pool_n)
                 _vram_fatal_check("after reserve")
             gpu_n = max(gpu_low, self._pool_n)
+            # BUILD 186: edit decision list: per-range N for this pass
+            from sequence_player_preview import refresh_plan
+            plan = refresh_plan(project, sequence_id, snapshot, total, gpu_n)
             burst_left = 1 << 30
             bursts = 1
             burst_t0 = time.perf_counter()
@@ -299,27 +302,24 @@ class PreviewWorker(object):
                 chunk = [frame]
                 j = i + 1
                 left_s = WORKER_BURST_SEC - (time.perf_counter() - burst_t0)
+                range_end = total
                 if fast:
-                    # BUILD 174: no time budget: every card pass is the
-                    # full reserved N (only the dirty run end cuts it)
+                    # BUILD 174: no time budget. BUILD 186: the N of the
+                    # plan range holding this frame; the chunk stops at
+                    # that range's end (the next chunk is the next range's)
                     limit = gpu_n
+                    for r0, r1, rn in plan:
+                        if r0 <= frame <= r1:
+                            limit, range_end = rn, r1
+                            break
                 else:
                     budget = min(WORKER_PASS_SEC, left_s)
                     limit = max(1, min(gpu_n, burst_left,
                                        pass_frame_limit(sec_per_frame, budget)))
-                while (len(chunk) < limit and j < len(order)
+                while (len(chunk) < limit and j < len(order) and order[j] <= range_end
                        and order[j] == chunk[-1] + 1 and order[j] not in clean):
                     chunk.append(order[j])
                     j += 1
-                if fast and len(chunk) > 1:
-                    # BUILD 184: the chunk's N from the real size of the
-                    # largest video source it decodes (never above the pool)
-                    from sequence_player_preview import refresh_chunk_frames
-                    k = refresh_chunk_frames(project, sequence_id, snapshot, chunk,
-                                             headroom=REFRESH_NVDEC_HEADROOM)
-                    if k < len(chunk):
-                        chunk = chunk[:k]
-                        j = i + k
                 # Let the GUI thread run between card passes (GIL and the lock)
                 if not fast:
                     time.sleep(0.005)
