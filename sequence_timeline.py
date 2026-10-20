@@ -48,6 +48,7 @@ from sequence_timeline_tracks import (
     TRACK_ADD_ITEMS, _track_add_items, _add_track_actions, _add_track_menu_items,
     _run_track_menu_action, _track_display_properties, _track_row_height,
     _toggle_collapse_at, _setup_collapse_column, NameCellDelegate,
+    _track_name_click,
 )
 # BUILD 162: clip parts of the window (same names, re-exported here)
 from sequence_timeline_clips import (
@@ -182,6 +183,7 @@ class SequenceTimeline(QMainWindow):
     _track_row_height = _track_row_height
     _toggle_collapse_at = _toggle_collapse_at
     _setup_collapse_column = _setup_collapse_column
+    _track_name_click = _track_name_click
     # BUILD 162: clip selection / drag / trim / menu live in
     # sequence_timeline_clips.py
     _linked_clips = _linked_clips
@@ -377,6 +379,9 @@ class SequenceTimeline(QMainWindow):
         self.table.setItemDelegateForColumn(COLLAPSE_COL, ClipDelegate(self))
         # BUILD 163: Name cell outline while the track menu is open
         self._menu_track_row = -1
+        # Track selection (Name cell click / Shift+click): track ids
+        self._selected_track_ids = set()
+        self._track_anchor_id = None
         self.table.setItemDelegateForColumn(0, NameCellDelegate(self))
         self.table.setAcceptDrops(True)
         self.table.viewport().setAcceptDrops(True)
@@ -751,6 +756,10 @@ class SequenceTimeline(QMainWindow):
         if track_id is None:
             return
         enabled = bool(name_item.data(Qt.UserRole + 1))
+        # Right-click a track outside the track selection: select just it
+        if track_id not in self._selected_track_ids:
+            self._selected_track_ids = {track_id}
+            self._track_anchor_id = track_id
 
         menu = QMenu(self)
         # BUILD 157: empty track space: Paste (at the playhead, same as
@@ -1151,6 +1160,8 @@ class SequenceTimeline(QMainWindow):
                 # BUILD 126: triangle cell toggles collapsed (nothing else)
                 if self._toggle_collapse_at(press_pos):
                     return True
+                # Name column: track selection, then the usual press handling
+                self._track_name_click(event, press_pos)
                 # Marker under the mouse: marker drag only (no clip select /
                 # drag, no edit popup)
                 from markers import hit_test_marker, marker_drag_start

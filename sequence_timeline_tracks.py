@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from sequence_timeline_sql import (
     DEFAULT_TRACK_HEIGHT, COLLAPSE_COL, COLLAPSE_COL_WIDTH, COLLAPSED_ROW_HEIGHT,
-    ROLE_COLLAPSED, ROLE_OPEN_HEIGHT,
+    ROLE_COLLAPSED, ROLE_OPEN_HEIGHT, track_has_collapsed,
 )
 
 
@@ -75,9 +75,12 @@ class NameCellDelegate(QStyledItemDelegate):
         super().__init__(timeline.table)
         self.timeline = timeline
 
+    # and on every selected track (tl._selected_track_ids)
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
-        if index.row() != getattr(self.timeline, "_menu_track_row", -1):
+        tl = self.timeline
+        if (index.row() != getattr(tl, "_menu_track_row", -1)
+                and index.data(Qt.UserRole) not in getattr(tl, "_selected_track_ids", ())):
             return
         painter.save()
         painter.setPen(MENU_TRACK_OUTLINE)
@@ -145,6 +148,66 @@ def _toggle_collapse_at(self, pos):
         return False
     self._toggle_track_flag(tid, "collapsed")
     return True
+
+
+# ---------------------------------------------------------------- track selection
+# Left-click a Name cell: select only that track (yellow Name outline, same
+# as the right-click menu outline). Shift+left-click: select every track
+# from the last plain-clicked track to this one. Click the Name column below
+# the tracks: clear. Kept by track id in self._selected_track_ids, so it
+# survives refresh and track moves. Open / Collapse in the track menu acts
+# on these tracks.
+
+def _track_row_ids(self):
+    # Track id of each table row, top to bottom (None for a row without one)
+    ids = []
+    for row in range(self.table.rowCount()):
+        item = self.table.item(row, 0)
+        ids.append(item.data(Qt.UserRole) if item is not None else None)
+    return ids
+
+
+def _track_name_click(self, event, pos):
+    # Left press: update the track selection when it is in the Name column
+    if self.table.columnAt(pos.x()) != 0:
+        return False
+    row = self.table.rowAt(pos.y())
+    ids = _track_row_ids(self)
+    if row < 0 or row >= len(ids) or ids[row] is None:
+        self._selected_track_ids = set()
+        self._track_anchor_id = None
+    elif (event.modifiers() & Qt.ShiftModifier) and self._track_anchor_id in ids:
+        lo, hi = sorted((ids.index(self._track_anchor_id), row))
+        self._selected_track_ids = {t for t in ids[lo:hi + 1] if t is not None}
+    else:
+        self._selected_track_ids = {ids[row]}
+        self._track_anchor_id = ids[row]
+    self.table.viewport().update()
+    return True
+
+
+def _set_selected_tracks_collapsed(self, mode):
+    # mode "open" / "collapse" / "invert" (flip each track); selected tracks
+    # only; no undo step, like the triangle toggle
+    ids = [t for t in _track_row_ids(self) if t in self._selected_track_ids]
+    value = {"open": "0", "collapse": "1",
+             "invert": "CASE WHEN COALESCE(collapsed, 0) = 0 THEN 1 ELSE 0 END"}[mode]
+    if not ids:
+        return
+    try:
+        conn = sqlite3.connect(self._project_db())
+        cur = conn.cursor()
+        if not track_has_collapsed(cur):
+            conn.close()
+            return
+        cur.executemany(f"UPDATE tracks SET collapsed = {value} WHERE id = ?",
+                        [(t,) for t in ids])
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Track", f"Could not update tracks: {e}")
+        return
+    self._after_track_change()
 
 
 # ---------------------------------------------------------------- row height
@@ -215,10 +278,17 @@ def _add_track_menu_items(self, menu, name_item, enabled):
     solo_action = menu.addAction("Solo")
     solo_action.setCheckable(True)
     solo_action.setChecked(bool(name_item.data(Qt.UserRole + 2)))
+    # Open / Collapse: every selected track (see _track_name_click)
+    coll_menu = menu.addMenu("Open / Collapse Selected")
+    open_action = coll_menu.addAction("Open")
+    collapse_action = coll_menu.addAction("Collapse")
+    invert_action = coll_menu.addAction("Invert")
     display_action = menu.addAction("Track Display Properties")
     return {"up": up_action, "down": down_action, "top": top_action,
             "bottom": bottom_action, "enable": enable_action,
-            "solo": solo_action, "display": display_action}
+            "solo": solo_action, "display": display_action,
+            "open": open_action, "collapse": collapse_action,
+            "invert": invert_action}
 
 
 def _run_track_menu_action(self, action, acts, track_id):
@@ -242,6 +312,9 @@ def _run_track_menu_action(self, action, acts, track_id):
         self._toggle_track_flag(track_id, "solo")
     elif action == display_action:
         self._track_display_properties(track_id)
+    elif action in (acts["open"], acts["collapse"], acts["invert"]):
+        mode = [k for k in ("open", "collapse", "invert") if acts[k] == action][0]
+        _set_selected_tracks_collapsed(self, mode)
     else:
         return False
     return True
