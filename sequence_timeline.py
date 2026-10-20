@@ -319,6 +319,7 @@ class SequenceTimeline(QMainWindow):
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(0)
         controls_row.addStretch(0)
+        self._control_buttons = {}   # BUILD 163: name -> button (active cue)
         for label, name in (("<<", "Jump to home"),
                             ("|<", "Jump to previous edit"),
                             ("<", "Play in reverse"),
@@ -331,6 +332,7 @@ class SequenceTimeline(QMainWindow):
             btn.setToolTip(name)
             btn.clicked.connect(lambda checked=False, n=name: self._on_play_control(n))
             controls_row.addWidget(btn)
+            self._control_buttons[name] = btn
         controls_row.addStretch(1)
         self._controls_row = controls_row
         self._apply_controls_alignment()
@@ -1507,6 +1509,12 @@ class SequenceTimeline(QMainWindow):
         else:
             print(name)
 
+    def _set_control_active(self, name, on):
+        # BUILD 163: dark green background while the control's action runs
+        btn = getattr(self, "_control_buttons", {}).get(name)
+        if btn is not None:
+            btn.setStyleSheet("background-color: rgb(0, 125, 0);" if on else "")
+
     def _toggle_play(self):
         # Same as the Pause button while playing or filling, else Play
         if self._playing or self._play_filling or self._play_mixing:
@@ -1521,6 +1529,7 @@ class SequenceTimeline(QMainWindow):
         if total <= 0 or self.sequence_id is None:
             return
         self._stop_play()
+        self._set_control_active("Play", True)    # BUILD 163: until _stop_play
         try:
             from sequence_player import open_player_for
             open_player_for(self)
@@ -1899,6 +1908,7 @@ class SequenceTimeline(QMainWindow):
         self._play_filling = False
         self._play_prime_tries = 0
         self._play_timer.stop()
+        self._set_control_active("Play", False)   # BUILD 163
         try:
             from sequence_preview_worker import set_play_priority
             set_play_priority(False)
