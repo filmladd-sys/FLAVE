@@ -47,7 +47,7 @@ from sequence_timeline_tracks import (
     paint_collapse_triangle, paint_collapse_cell, TrackDisplayDialog,
     TRACK_ADD_ITEMS, _track_add_items, _add_track_actions, _add_track_menu_items,
     _run_track_menu_action, _track_display_properties, _track_row_height,
-    _toggle_collapse_at, _setup_collapse_column,
+    _toggle_collapse_at, _setup_collapse_column, NameCellDelegate,
 )
 # BUILD 162: clip parts of the window (same names, re-exported here)
 from sequence_timeline_clips import (
@@ -373,6 +373,9 @@ class SequenceTimeline(QMainWindow):
         self._out_paint_miss = {}   # clip_id -> (frame, height) last printed miss
         self.table.setItemDelegateForColumn(CLIPS_COL, ClipDelegate(self))
         self.table.setItemDelegateForColumn(COLLAPSE_COL, ClipDelegate(self))
+        # BUILD 163: Name cell outline while the track menu is open
+        self._menu_track_row = -1
+        self.table.setItemDelegateForColumn(0, NameCellDelegate(self))
         self.table.setAcceptDrops(True)
         self.table.viewport().setAcceptDrops(True)
         # Clip edge dragging: hover cursor needs mouse tracking
@@ -708,7 +711,12 @@ class SequenceTimeline(QMainWindow):
             # BUILD 157: empty track space: Paste (at the playhead, same as
             # Ctrl+V) when the clipboard has items, hidden when empty
             # paste_action = self._add_empty_paste_action(menu)
+        # BUILD 163: yellow outline on this track's Name cell while open
+        self._menu_track_row = item.row()
+        self.table.viewport().update()
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        self._menu_track_row = -1
+        self.table.viewport().update()
         # if paste_action is not None and action == paste_action:
         #     self._clip_paste_tic()
         #     return

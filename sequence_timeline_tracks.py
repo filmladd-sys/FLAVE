@@ -13,7 +13,7 @@ import sqlite3
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QHeaderView, QDialog, QVBoxLayout, QHBoxLayout,
     QPushButton, QCheckBox, QLineEdit, QLabel, QColorDialog, QDialogButtonBox,
-    QProxyStyle, QStyle, QStyleFactory
+    QProxyStyle, QStyle, QStyleFactory, QStyledItemDelegate
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
@@ -61,6 +61,29 @@ def _track_table_style(table):
     style = _NoTrackHighlightStyle(base) if base is not None else _NoTrackHighlightStyle()
     style.setParent(table)
     return style
+
+
+# BUILD 163: yellow outline around the Name cell of the track whose
+# right-click menu is open, so the user sees which track the menu acts on.
+# Same yellow as the selected clip outline (sequence_timeline_clips.py).
+MENU_TRACK_OUTLINE = QColor(255, 255, 160)
+
+
+class NameCellDelegate(QStyledItemDelegate):
+    # Name column (0): default paint, plus the outline on tl._menu_track_row
+    def __init__(self, timeline):
+        super().__init__(timeline.table)
+        self.timeline = timeline
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if index.row() != getattr(self.timeline, "_menu_track_row", -1):
+            return
+        painter.save()
+        painter.setPen(MENU_TRACK_OUTLINE)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+        painter.restore()
 
 
 # ---------------------------------------------------------------- collapse
