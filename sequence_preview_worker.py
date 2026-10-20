@@ -311,6 +311,15 @@ class PreviewWorker(object):
                        and order[j] == chunk[-1] + 1 and order[j] not in clean):
                     chunk.append(order[j])
                     j += 1
+                if fast and len(chunk) > 1:
+                    # BUILD 184: the chunk's N from the real size of the
+                    # largest video source it decodes (never above the pool)
+                    from sequence_player_preview import refresh_chunk_frames
+                    k = refresh_chunk_frames(project, sequence_id, snapshot, chunk,
+                                             headroom=REFRESH_NVDEC_HEADROOM)
+                    if k < len(chunk):
+                        chunk = chunk[:k]
+                        j = i + k
                 # Let the GUI thread run between card passes (GIL and the lock)
                 if not fast:
                     time.sleep(0.005)

@@ -258,6 +258,16 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
             self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False,
                             clips=clips, clear=False)
         _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
+        # BUILD 184: frames each decoder was asked for in one batch (its
+        # output pool), for the next chunk's N (refresh_chunk_frames)
+        counts = {}
+        for fr in frames:
+            for item in self._layer_items(fr, snapshot):
+                if item[0] == "video" and item[6][0] in clips:
+                    counts[item[6]] = counts.get(item[6], 0) + 1
+        dec_frames = self.__dict__.setdefault("_dec_frames", {})
+        for key, cnt in counts.items():
+            dec_frames[key] = max(dec_frames.get(key, 0), cnt)
         vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
             track_id, frames[0], frames[-1], files or "none"))
         _refresh_trace.append(
@@ -551,6 +561,77 @@ def refresh_batch_frames(project_path, sequence_id, snapshot, low, high,
         print(f"Refresh batch size failed: {e}")
         _last_batch_info["why"] = "error"
         return low
+
+
+# BUILD 184: device bytes per decoded frame per source pixel: the RGB
+# output frame a SimpleDecoder keeps (3) plus its NV12 decode surface (1.5)
+REFRESH_DECODE_BYTES_PX = 4.5
+_src_size = {}      # path -> (w, h) via ffprobe, or None
+
+
+def _source_size(path):
+    if path not in _src_size:
+        try:
+            from proxy_manager import probe_size
+            _src_size[path] = probe_size(path)
+        except Exception:
+            _src_size[path] = None
+    return _src_size[path]
+
+
+def refresh_chunk_frames(project_path, sequence_id, snapshot, frames,
+                         margin=0.25, headroom=0):
+    # BUILD 184: worker, explicit refresh: frames for this chunk (at most
+    # len(frames), the pool N). One layer decodes at a time, so the cost is
+    # the largest video source the chunk opens (proxy or original, its
+    # real width x height): REFRESH_DECODE_BYTES_PX per pixel per frame.
+    # Fit: free VRAM + what the open decoders already hold (closed or
+    # reused before the next layer decodes) - max(margin, the safety exit
+    # limit) - headroom. The composite buffers are the reserved pool (in
+    # use, so already out of free). At least 1.
+    n = len(frames)
+    gen = _generator_for(project_path, sequence_id)
+    if gen is None or n <= 1:
+        return n
+    _GEN_LOCK.acquire()
+    try:
+        big, big_path, big_size = 0, None, None
+        for fr in frames:
+            for item in gen._layer_items(fr, snapshot):
+                if item[0] != "video":
+                    continue
+                size = _source_size(item[1]) or (int(gen.seq_w), int(gen.seq_h))
+                if size[0] * size[1] > big:
+                    big, big_path, big_size = size[0] * size[1], item[1], size
+        if not big:
+            return n
+        fv = free_vram()
+        if fv is None:
+            return n
+        per = int(big * REFRESH_DECODE_BYTES_PX)
+        dec_frames = gen.__dict__.setdefault("_dec_frames", {})
+        held = 0
+        for key in list(dec_frames.keys()):
+            if key not in gen.decoders:
+                dec_frames.pop(key)
+                continue
+            size = _source_size(key[1]) or (int(gen.seq_w), int(gen.seq_h))
+            held += int(dec_frames[key] * size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
+        keep = max(int(margin * fv[1]), REFRESH_VRAM_FATAL_MB << 20) + int(headroom)
+        usable = fv[0] + held - keep
+        k = max(1, min(n, int(usable // per) if usable > 0 else 1))
+        print("WORKER refresh chunk: N %d of %d, frames %d..%d | largest source "
+              "%dx%d %s, %.1f MB/frame decode | free %d MB, decoders hold %d MB, "
+              "keep %d MB" % (
+                  k, n, frames[0], frames[k - 1], big_size[0], big_size[1],
+                  big_path, per / float(1 << 20), fv[0] >> 20, held >> 20,
+                  keep >> 20))
+        return k
+    except Exception as e:
+        print("Refresh chunk size failed: %s" % e)
+        return n
+    finally:
+        _GEN_LOCK.release()
 
 
 def reserve_refresh_pool(project_path, sequence_id, n):
