@@ -356,6 +356,8 @@ RULER_LABEL_MIN_PX = 60
 ZOOM_MIN_PPF = 0.01
 ZOOM_MAX_PPF = 20.0
 ZOOM_STEP = 1.25
+# Alt+wheel zoom step per notch (finer than the zoom keys)
+WHEEL_ZOOM_STEP = 1.10
 
 
 def clamp_zoom(ppf):

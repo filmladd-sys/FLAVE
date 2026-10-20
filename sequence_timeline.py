@@ -7,7 +7,7 @@ import math
 import os
 import sqlite3
 from sequence_timeline_ruler import (
-    CLIPS_COL, RULER_HEIGHT, ZOOM_MIN_PPF, ZOOM_MAX_PPF, ZOOM_STEP,
+    CLIPS_COL, RULER_HEIGHT, ZOOM_MIN_PPF, ZOOM_MAX_PPF, ZOOM_STEP, WHEEL_ZOOM_STEP,
     RulerHeader, clamp_zoom, ruler_label_interval, ruler_label_text,
     PlayheadOverlay, view_max_start,
 )
@@ -1033,10 +1033,7 @@ class SequenceTimeline(QMainWindow):
             # frame under the mouse in place
             x_in_clips = event.position().x() - self.ruler.sectionViewportPosition(CLIPS_COL)
             anchor = self.view_start_frame + max(0.0, x_in_clips) / self.pixels_per_frame
-            if dy > 0:
-                self.zoom_in()
-            else:
-                self.zoom_out()
+            self._zoom_by(WHEEL_ZOOM_STEP if dy > 0 else 1.0 / WHEEL_ZOOM_STEP)
             if x_in_clips >= 0:
                 self.view_start_frame = max(0, int(round(
                     anchor - x_in_clips / self.pixels_per_frame)))
@@ -1408,6 +1405,15 @@ class SequenceTimeline(QMainWindow):
     def zoom_in(self):
         if self.pixels_per_frame < ZOOM_MAX_PPF:
             self.pixels_per_frame = clamp_zoom(self.pixels_per_frame * ZOOM_STEP)
+            self._update_clips_width()
+            self._update_status()
+            self._save_view_state()
+
+    def _zoom_by(self, factor):
+        # Multiply the zoom by factor, within ZOOM_MIN_PPF..ZOOM_MAX_PPF
+        ppf = clamp_zoom(self.pixels_per_frame * factor)
+        if ppf != self.pixels_per_frame:
+            self.pixels_per_frame = ppf
             self._update_clips_width()
             self._update_status()
             self._save_view_state()
