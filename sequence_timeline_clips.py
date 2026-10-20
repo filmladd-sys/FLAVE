@@ -556,12 +556,11 @@ def _edge_drag_move(self, pos):
                 c[9] = [(item[0], item[1] + delta, item[2])
                         for item in m["keys"]]
         elif edge == "left":
+            # Start trim: keyframe keys keep their sequence frames (the
+            # edge reveals or hides them); only a move shifts them
             c[2] = m["start"] + delta
             c[3] = m["length"] - delta
             c[7] = m["in"] + delta
-            if "keys" in m:
-                c[9] = [(item[0], item[1] + delta, item[2])
-                        for item in m["keys"]]
         else:
             c[3] = m["length"] + delta
     self.table.viewport().update()
@@ -1120,7 +1119,8 @@ def _edge_drag_release(self):
             c = m["clip"]
             from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
             if is_keyframe_clip_id(c[0]):
-                persist_keyframe_clip_time(cur, c)
+                # edge trim: keys stay at their sequence frames
+                persist_keyframe_clip_time(cur, c, shift_keys=False)
                 continue
             if is_caption_id(c[0]):
                 cur.execute(

@@ -427,9 +427,16 @@ def graph_points(keys, stored_type, clip_start, length, ppf, left, top, height):
         y = bottom - (v - low) / span * (max(1, height) - 1)
         return int(round(x)), int(round(y))
 
-    out = [xy(int(clip_start), pts[0][1])]
+    # Keys may lie outside the clip after an edge trim (kept, hidden): the
+    # flat lead-in / tail is added only where the first / last key is
+    # inside the clip; the painter clips the rest to the clip rect
+    end = int(clip_start) + int(length)
+    out = []
+    if pts[0][0] > int(clip_start):
+        out.append(xy(int(clip_start), pts[0][1]))
     out += [xy(f, v) for f, v in pts]
-    out.append(xy(int(clip_start) + int(length), pts[-1][1]))
+    if pts[-1][0] < end:
+        out.append(xy(end, pts[-1][1]))
     return out
 
 
@@ -551,9 +558,15 @@ def keyframe_range_overlaps(cur, track_id, start, length, ignore_id=None):
     return cur.fetchone() is not None
 
 
-def persist_keyframe_clip_time(cur, clip):
-    # Memory start/length -> in_frame/out_frame. Keyframes store absolute
-    # sequence frames; shift them by the same delta so they stay with the clip.
+def persist_keyframe_clip_time(cur, clip, shift_keys=True):
+    # Memory start/length -> in_frame/out_frame. Keys store absolute
+    # sequence frames. shift_keys True (a move of the whole clip: body
+    # drag, ripple): keys shift by the start delta so they stay with the
+    # clip. shift_keys False (an edge trim): keys keep their frames, so the
+    # trim only reveals or hides keys and they stay pinned to the media
+    # they are linked with. Keys outside [in, out) are kept, not deleted:
+    # extending the clip again shows them, and they still shape the
+    # interpolated curve inside the clip exactly as if they were visible.
     db_id = db_id_from_mem(clip[0])
     in_f = max(0, int(clip[2]))
     length = max(1, int(clip[3]))
@@ -565,7 +578,7 @@ def persist_keyframe_clip_time(cur, clip):
         "UPDATE keyframe_clips SET in_frame = ?, out_frame = ? WHERE id = ?",
         (in_f, in_f + length, db_id)
     )
-    if delta != 0:
+    if delta != 0 and shift_keys:
         cur.execute(
             "UPDATE keyframes SET frame = frame + ? WHERE keyframe_clip_id = ?",
             (delta, db_id)
@@ -1042,6 +1055,10 @@ def hit_test_key(timeline, pos):
             if len(item) >= 3:
                 key_id, frame, value = item[0], item[1], item[2]
             else:
+                continue
+            if not (start <= int(frame) < start + length):
+                # hidden key outside the clip (after an edge trim): not
+                # drawn, so not hittable
                 continue
             _text, sq, _cx, _bt = key_mark_layout(
                 clip_rect, frame, value, start, ppf, stored_type, fm)
