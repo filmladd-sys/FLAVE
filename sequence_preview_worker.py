@@ -7,6 +7,10 @@
 # frames are composited headless on the GPU (sequence_preview_gpu).
 # BUILD 145: always on that headless composer (the one frame engine), with
 # or without a player open; the player only presents.
+# BUILD 166: explicit refresh model. During normal editing a pass builds
+# only the playhead frame (scrub / edit stays realtime). Every not-clean
+# frame (dirty or missing) is built only after an explicit refresh (F5 /
+# Refresh Preview, set_refresh_all) or while Play fills (set_play_priority).
 
 import threading
 import time
@@ -115,6 +119,8 @@ class PreviewWorker(object):
                 if gen == self._gen:
                     # Done, or cannot generate (no player): wait for a wake
                     self._done_gen = gen
+                    # BUILD 166: the explicit refresh pass is finished
+                    _refresh_all[0] = 0
                     # Idle: the timeline status clears (BUILD 129)
                     self.progress = None
 
@@ -166,7 +172,11 @@ class PreviewWorker(object):
         # Frames per card pass, read at the start of a pass
         gpu_n = _setting_int("previewGpuBatchFrames", 8, 1, 30)
         from sequence_player import FrameGenerateBatch
-        order = list(_forward(center, total))
+        # BUILD 166: whole range only on an explicit refresh or Play fill;
+        # otherwise just the playhead frame
+        full = bool(_refresh_all[0] or _play_priority[0])
+        order = (list(_forward(center, total)) if full
+                 else [max(0, min(total - 1, int(center)))])
         # BUILD 129: status percent = clean frames / total frames, from the
         # clean count in 0..total-1 at pass start plus rows committed since
         # (no db COUNT). Shown only when something needs generating.
@@ -174,7 +184,7 @@ class PreviewWorker(object):
             clean0 = sum(1 for f in clean if 0 <= f < total)
         self._done = 0
         self.progress = ((project, sequence_id, clean0, total)
-                         if clean0 < total else None)
+                         if full and clean0 < total else None)
         sec_per_frame = None     # measured card pass time per frame (EWMA)
         t_pass0 = time.perf_counter()
         made = 0
@@ -361,6 +371,24 @@ def _release_headless():
 _worker = None
 # Play is waiting for the remainder to be green. Skip the idle yield.
 _play_priority = [0]
+
+
+# BUILD 166: an explicit refresh (F5) asked for every not-clean frame;
+# cleared when that pass finishes
+_refresh_all = [0]
+
+
+def set_refresh_all(on):
+    # Set under the worker lock with a gen bump, so a pass that ends now
+    # (old gen) cannot clear the new request
+    w = _worker
+    if w is None:
+        _refresh_all[0] = 1 if on else 0
+        return
+    with w._cond:
+        _refresh_all[0] = 1 if on else 0
+        w._gen += 1
+        w._cond.notify()
 
 
 def set_play_priority(on):

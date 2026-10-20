@@ -424,6 +424,8 @@ class SequenceTimeline(QMainWindow):
         QShortcut(QKeySequence("Ctrl+C"), self, activated=self._key_copy)
         QShortcut(QKeySequence("Ctrl+X"), self, activated=self._key_cut)
         QShortcut(QKeySequence("Ctrl+V"), self, activated=self._key_paste)
+        # BUILD 166: F5 = Refresh Preview (dirty video frames + audio mix)
+        QShortcut(QKeySequence(Qt.Key_F5), self, activated=self.refresh_preview)
 
         self._create_menus()
         self.refresh()
@@ -471,6 +473,27 @@ class SequenceTimeline(QMainWindow):
         render_action = QAction("Render", self)
         render_action.triggered.connect(lambda checked=False: self.open_render_manager())
         menubar.addAction(render_action)
+
+        # BUILD 166: Refresh Preview (also F5, the QShortcut above)
+        refresh_action = QAction("Refresh Preview (F5)", self)
+        refresh_action.triggered.connect(lambda checked=False: self.refresh_preview())
+        menubar.addAction(refresh_action)
+
+    def refresh_preview(self):
+        # BUILD 166: explicit refresh. The worker builds every not-clean
+        # preview frame (dirty marks kept as before) and the audio mix
+        # starts; normal editing only rebuilds the playhead frame
+        if self.sequence_id is None:
+            return
+        try:
+            from sequence_preview_worker import set_refresh_all
+            set_refresh_all(True)
+        except Exception as e:
+            print(f"Refresh preview failed: {e}")
+        self._retarget_preview(force=True)
+        self._audio_auto_failed = False
+        self._audio_mix_kick()
+        self.status_bar.showMessage("Refreshing preview", 3000)
 
     def _project_db(self):
         return _get_global_setting("current_project", "")
@@ -1639,7 +1662,9 @@ class SequenceTimeline(QMainWindow):
                     # / keep the running mix
                     settle_audio_state(db, self.sequence_id, float(self.fps or 30),
                                        int(self.total_frames()))
-                    self._audio_mix_kick()
+                    # BUILD 166: no restart here (explicit refresh model:
+                    # F5 or Play mixes)
+                    # self._audio_mix_kick()
                 elif not settle_audio_state(db, self.sequence_id,
                                             float(self.fps or 30),
                                             int(self.total_frames())):
@@ -1650,7 +1675,9 @@ class SequenceTimeline(QMainWindow):
                         self._audio_auto_wanted = True
                     else:
                         self._audio_auto_wanted = False
-                        self._audio_mix_kick()
+                        # BUILD 166: no background mix while editing; F5 or
+                        # Play starts it
+                        # self._audio_mix_kick()
         except Exception as e:
             print(f"Audio state check failed: {e}")
         try:
