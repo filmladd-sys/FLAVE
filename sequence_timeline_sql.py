@@ -241,7 +241,8 @@ def _load_sequence_fps(sequence_id):
 
 
 def _add_track(self, track_type, title, name=None, language="", bg_color=None,
-               caption_type=None):
+               caption_type=None, undo=True):
+    # undo=False: the caller already pushed one undo step (+ Video/Audio)
     project_db = self._project_db()
     if not project_db:
         QMessageBox.warning(self, title, "No project open")
@@ -254,7 +255,8 @@ def _add_track(self, track_type, title, name=None, language="", bg_color=None,
         if not ok or not name:
             return
     from undo import push_undo
-    push_undo(project_db, "Add track")
+    if undo:
+        push_undo(project_db, "Add track")
     try:
         ensure_tracks_table(project_db)
         conn = sqlite3.connect(project_db)

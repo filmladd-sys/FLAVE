@@ -15,7 +15,7 @@ from sequence_timeline_image import IMAGE_EXTENSIONS, _add_image_track
 from sequence_timeline_keyframe import _add_keyframe_track
 from sequence_timeline_video import (
     VIDEO_EXTENSIONS, out_frame_for, video_out_pixmap,
-    _add_video_track, _generate_out_icon, _clip_is_video,
+    _add_video_track, _add_video_audio_track, _generate_out_icon, _clip_is_video,
 )
 from sequence_timeline_audio import (
     AUDIO_EXTENSIONS, _draw_waveform, _add_audio_track, _peaks_seconds,
@@ -148,6 +148,7 @@ class SequenceTimeline(QMainWindow):
     peaks_for = peaks_for
     # Video methods live in sequence_timeline_video.py
     _add_video_track = _add_video_track
+    _add_video_audio_track = _add_video_audio_track
     _generate_out_icon = _generate_out_icon
     _clip_is_video = _clip_is_video
     # Image methods live in sequence_timeline_image.py

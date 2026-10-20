@@ -33,6 +33,27 @@ def _add_video_track(self):
     self._add_track("video", "+ Video")
 
 
+def _add_video_audio_track(self):
+    # + Video/Audio: one video and one audio track at the bottom (video
+    # above audio), default names (Video02, Audio02, ...), no name prompt,
+    # one undo step
+    project_db = self._project_db()
+    if not project_db:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(self, "+ Video/Audio", "No project open")
+        return
+    from track_names import next_default_name, sequence_track_names
+    from undo import push_undo
+    names = sequence_track_names(project_db, self.sequence_id)
+    vname = next_default_name("video", names)
+    aname = next_default_name("audio", names)
+    push_undo(project_db, "Add video/audio tracks")
+    self._add_track("video", "+ Video/Audio", name=vname, undo=False)
+    self._add_track("audio", "+ Video/Audio", name=aname, undo=False)
+    self.status_bar.showMessage(
+        f"Added video/audio tracks: {vname}, {aname}", 3000)
+
+
 def _generate_out_icon(self, footage_id, track_id, out_frame):
     # Make, store and cache the out-point icon at track height (same
     # ensure_footage_icon path as the in icon). Called on drop and on

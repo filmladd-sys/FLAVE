@@ -244,6 +244,7 @@ def _track_row_height(self, track_id):
 # Shared by the Tracks menu bar menu and the empty-space right-click.
 TRACK_ADD_ITEMS = (
     ("+ Video", "_add_video_track"),
+    ("+ Video/Audio", "_add_video_audio_track"),
     ("+ Audio", "_add_audio_track"),
     ("+ Image", "_add_image_track"),
     ("+ Caption", "_add_caption_track"),
