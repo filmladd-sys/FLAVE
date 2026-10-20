@@ -302,7 +302,7 @@ def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
     total = max(1, int(total))
     width = max(1, int(width))
     view = int(view)
-    max_start = max(0, total - max(1, int(visible)))
+    max_start = view_max_start(total, visible, ppf)
     m = max(0, min(int(margin), (width - 1) // 3))
     left_m, right_m = m, width - m
 
@@ -334,6 +334,21 @@ def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
             return view, at(x, view), 0.0
         return view, at(right_m, view), rem
     return view, at(x, view), 0.0
+
+
+# Empty track space kept to the right of the last frame (view padding
+# only: the sequence length, playhead clamp, mix and render are unchanged).
+# The view can scroll past the end by this many pixels, rounded up to whole
+# frames (view_start_frame is a frame), so it is the same at any zoom.
+TIMELINE_RIGHT_PAD_PX = 120
+
+
+def view_max_start(total, visible, ppf):
+    # Largest view_start_frame: the last frame plus TIMELINE_RIGHT_PAD_PX
+    # of empty track space fit in the visible frames
+    ppf = float(ppf) if ppf and ppf > 0 else 1.0
+    pad = int(math.ceil(TIMELINE_RIGHT_PAD_PX / ppf))
+    return max(0, int(total) + pad - max(1, int(visible)))
 
 
 RULER_LABEL_INTERVALS = (1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200)

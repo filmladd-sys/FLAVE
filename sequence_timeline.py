@@ -9,7 +9,7 @@ import sqlite3
 from sequence_timeline_ruler import (
     CLIPS_COL, RULER_HEIGHT, ZOOM_MIN_PPF, ZOOM_MAX_PPF, ZOOM_STEP,
     RulerHeader, clamp_zoom, ruler_label_interval, ruler_label_text,
-    PlayheadOverlay,
+    PlayheadOverlay, view_max_start,
 )
 from sequence_timeline_image import IMAGE_EXTENSIONS, _add_image_track
 from sequence_timeline_keyframe import _add_keyframe_track
@@ -990,7 +990,9 @@ class SequenceTimeline(QMainWindow):
         self._save_view_state()
 
     def go_end(self):
-        self.view_start_frame = max(0, self.total_frames() - self.visible_frames())
+        # last frame in view with the right padding after it
+        self.view_start_frame = view_max_start(
+            self.total_frames(), self.visible_frames(), self.pixels_per_frame)
         self._clamp_view()
         self.current_frame = self.total_frames() - 1
         self.ruler.viewport().update()
@@ -1005,7 +1007,9 @@ class SequenceTimeline(QMainWindow):
         return max(1, int(self.ruler.sectionSize(CLIPS_COL) / self.pixels_per_frame))
 
     def _clamp_view(self):
-        max_start = max(0, self.total_frames() - self.visible_frames())
+        # may scroll TIMELINE_RIGHT_PAD_PX past the last frame (view_max_start)
+        max_start = view_max_start(self.total_frames(), self.visible_frames(),
+                                   self.pixels_per_frame)
         self.view_start_frame = max(0, min(max_start, int(self.view_start_frame)))
 
     def _update_clips_width(self):
