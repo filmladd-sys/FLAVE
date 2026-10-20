@@ -485,14 +485,16 @@ class SequenceTimeline(QMainWindow):
         # starts; normal editing only rebuilds the playhead frame
         if self.sequence_id is None:
             return
+        # BUILD 169: the audio mix thread starts first, then runs alongside
+        # the image pass
+        self._audio_auto_failed = False
+        self._audio_mix_kick()
         try:
             from sequence_preview_worker import set_refresh_all
             set_refresh_all(True)
         except Exception as e:
             print(f"Refresh preview failed: {e}")
         self._retarget_preview(force=True)
-        self._audio_auto_failed = False
-        self._audio_mix_kick()
         self.status_bar.showMessage("Refreshing preview", 3000)
         self._show_refresh_dialog()
 

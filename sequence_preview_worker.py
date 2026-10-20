@@ -177,6 +177,16 @@ class PreviewWorker(object):
         full = bool(_refresh_all[0] or _play_priority[0])
         order = (list(_forward(center, total)) if full
                  else [max(0, min(total - 1, int(center)))])
+        # BUILD 169: explicit refresh pass = fast mode: no bursts, yields,
+        # GUI-quiet waits or sleeps (only a GUI waiting on the lock holds the
+        # worker back), bigger card passes and fewer commits
+        fast = bool(_refresh_all[0])
+        if fast:
+            gpu_n = max(gpu_n, REFRESH_GPU_FRAMES)
+            sp._worker_burst[0] = True
+            burst_left = 1 << 30
+            bursts = 1
+            burst_t0 = time.perf_counter()
         # BUILD 129: status percent = clean frames / total frames, from the
         # clean count in 0..total-1 at pass start plus rows committed since
         # (no db COUNT). Shown only when something needs generating.
@@ -188,7 +198,8 @@ class PreviewWorker(object):
         sec_per_frame = None     # measured card pass time per frame (EWMA)
         t_pass0 = time.perf_counter()
         made = 0
-        bursts = 0
+        if not fast:
+            bursts = 0
         hold_max = 0.0
         retried = False
         i = 0
@@ -200,7 +211,7 @@ class PreviewWorker(object):
                 if frame in clean:
                     i += 1
                     continue
-                if (burst_left > 0 and (sp._gui_wants[0] > 0
+                if (not fast and burst_left > 0 and (sp._gui_wants[0] > 0
                         or time.perf_counter() - burst_t0 >= WORKER_BURST_SEC)):
                     # BUILD 129: time-based burst end (~1 s), or at once when
                     # the GUI waits on _GEN_LOCK ('scrub waiting')
@@ -231,6 +242,8 @@ class PreviewWorker(object):
                 if not batch.pending:
                     # Batch start: previewBatchSeconds worth of frames
                     batch_frames = run * _setting_int("previewBatchSeconds", 1, 1, 10)
+                    if fast:
+                        batch_frames = max(batch_frames, run * REFRESH_BATCH_SECONDS)
                 # Card pass: up to gpu_n sequential, not-clean frames, never
                 # more than the burst has left (a burst still yields on time)
                 # and (BUILD 129) no more than WORKER_PASS_SEC of measured
@@ -238,15 +251,16 @@ class PreviewWorker(object):
                 chunk = [frame]
                 j = i + 1
                 left_s = WORKER_BURST_SEC - (time.perf_counter() - burst_t0)
+                budget = REFRESH_PASS_SEC if fast else min(WORKER_PASS_SEC, left_s)
                 limit = max(1, min(gpu_n, burst_left,
-                                   pass_frame_limit(sec_per_frame,
-                                                    min(WORKER_PASS_SEC, left_s))))
+                                   pass_frame_limit(sec_per_frame, budget)))
                 while (len(chunk) < limit and j < len(order)
                        and order[j] == chunk[-1] + 1 and order[j] not in clean):
                     chunk.append(order[j])
                     j += 1
                 # Let the GUI thread run between card passes (GIL and the lock)
-                time.sleep(0.005)
+                if not fast:
+                    time.sleep(0.005)
                 # Dirty mark number before the build: an edit made while
                 # this chunk renders (old snapshot) keeps its frames dirty
                 seq0 = dirty_seq()
@@ -310,6 +324,12 @@ class PreviewWorker(object):
 WORKER_BURST_SEC = 1.0
 WORKER_YIELD_SEC = 0.03
 WORKER_PASS_SEC = 0.25
+# BUILD 169: explicit refresh (F5 / Play on dirty) fast mode: card pass up
+# to REFRESH_GPU_FRAMES frames and REFRESH_PASS_SEC of work, one commit per
+# REFRESH_BATCH_SECONDS of frames
+REFRESH_GPU_FRAMES = 30
+REFRESH_PASS_SEC = 2.0
+REFRESH_BATCH_SECONDS = 10
 
 
 def pass_frame_limit(sec_per_frame, budget=None):
