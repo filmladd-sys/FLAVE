@@ -164,8 +164,8 @@ def _apply_relocate(project_path, sequence_id, relocs, seq):
                 "AND dirty = 0 AND jpeg IS NOT NULL", (a, b)).fetchall()
             got.append((d, rows))
         for a, b, d in relocs:
-            conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
-                         (a + d, b + d))
+            conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
+                         "AND dirty = 0", (a + d, b + d))
         for d, rows in got:
             for frame, jpeg in rows:
                 nf = int(frame) + d
@@ -194,10 +194,10 @@ def _apply_shift(project_path, sequence_id, first, last, delta, seq):
         rows = conn.execute(
             "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
             "AND dirty = 0 AND jpeg IS NOT NULL", (first, last)).fetchall()
-        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
-                     (first, last))
-        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
-                     (first + delta, last + delta))
+        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
+                     "AND dirty = 0", (first, last))
+        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
+                     "AND dirty = 0", (first + delta, last + delta))
         moved = []
         for frame, jpeg in rows:
             nf = int(frame) + delta
@@ -224,6 +224,8 @@ def _apply_shift(project_path, sequence_id, first, last, delta, seq):
 def apply_dirty_queue():
     # Write queued dirty marks (preview worker thread). A missing preview
     # file is not created: it has no clean rows anyway.
+    # Marks touch only clean rows (dirty = 0): an already dirty row is left
+    # alone, so a whole-sequence mark costs only the clean frames.
     with _CLEAN_LOCK:
         items = list(_DIRTY_QUEUE)
         del _DIRTY_QUEUE[:]
@@ -273,8 +275,8 @@ def apply_dirty_queue():
         conn = _connect(project_path, sequence_id)
         t_c = time.perf_counter()
         try:
-            cur = conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ?",
-                               (first, last))
+            cur = conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
+                               "AND dirty = 0", (first, last))
             t_u = time.perf_counter()
             conn.commit()
             t_m = time.perf_counter()
