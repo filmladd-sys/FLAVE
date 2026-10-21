@@ -214,28 +214,46 @@ def map_source_frame(src_idx, ratio, proxy_frames=None):
     return max(0, idx)
 
 
-def source_frame_count(owner, key, dec):
-    # BUILD 240: frames the decoder's file holds (len(SimpleDecoder): the
-    # scanned count, need_scanned_stream_metadata=True), cached per
-    # decoder key; None when unknown (no pre-check then)
-    cache = getattr(owner, "_dec_frames", None)
-    if cache is None:
-        cache = owner._dec_frames = {}
-    if key not in cache:
-        try:
-            n = int(len(dec))
-        except Exception:
-            n = 0
-        cache[key] = n if n > 0 else None
-    return cache[key]
+# BUILD 241: out-of-range source frames (BUILD 240) are learned from the
+# decoder's own IndexError, never from len(SimpleDecoder): with
+# need_scanned_stream_metadata=True, len() waits for the background scan
+# of the whole file, which stalled preview generation (under _GEN_LOCK,
+# again at every decoder reopen). _SOURCE_END: (path, size, mtime) ->
+# smallest source index that raised (every index from there is past the
+# end). Nothing is known until a seek fails, so normal decoding is exactly
+# as before BUILD 240; after the first failure later frames past the end
+# are skipped without asking the decoder (one native INVALID INDEX line
+# per file at most).
+_SOURCE_END = {}
+
+
+def _source_ident(path):
+    try:
+        st = os.stat(path)
+        return (path, st.st_size, int(st.st_mtime))
+    except OSError:
+        return None
+
+
+def learn_source_end(key, src_frame):
+    # The decoder refused src_frame: it and every later index are past the end
+    ident = _source_ident(key[1])
+    if ident is not None and src_frame >= 0:
+        old = _SOURCE_END.get(ident)
+        _SOURCE_END[ident] = src_frame if old is None else min(old, src_frame)
 
 
 def source_index_ok(owner, key, dec, src_frame):
-    # BUILD 240: False when src_frame is past the source (or negative): the
-    # layer is skipped, i.e. fully transparent, and lower layers show. The
-    # decoder is never asked for it, so it prints / raises nothing
-    n = source_frame_count(owner, key, dec)
-    return src_frame >= 0 and (n is None or src_frame < n)
+    # BUILD 240/241: False when src_frame is negative or at / past an index
+    # this file's decoder already refused: the layer is skipped (fully
+    # transparent) and lower layers show. Never calls into the decoder.
+    if src_frame < 0:
+        return False
+    if not _SOURCE_END:
+        return True
+    ident = _source_ident(key[1])
+    end = _SOURCE_END.get(ident) if ident is not None else None
+    return end is None or src_frame < end
 
 
 def is_out_of_range_error(exc):
@@ -794,9 +812,6 @@ class SequencePlayer(QWindow):
         self.dec_next.pop(key, None)
         self.dec_used.pop(key, None)
         self.dec_last.pop(key, None)
-        cache = getattr(self, "_dec_frames", None)
-        if cache is not None:
-            cache.pop(key, None)        # BUILD 240: frame count
         if dec is not None:
             # print(f"DECODER close {key}")
             del dec
@@ -1481,6 +1496,7 @@ class SequencePlayer(QWindow):
                         self.dec_next.pop(dkey, None)
                         self.dec_last.pop(dkey, None)
                         if is_out_of_range_error(e):
+                            learn_source_end(dkey, src_frame)   # BUILD 241
                             continue        # BUILD 240: transparent layer
                         raise
                 if prefetched:
