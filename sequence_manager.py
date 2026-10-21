@@ -137,6 +137,19 @@ def format_duration(frames, fps):
     return "%02d:%02d:%02d:%02d" % (hh, mm, ss, ff)
 
 
+def _captions_busy(parent, sequence_id, title):
+    # BUILD 233: refuse while Generate Captions runs on that sequence
+    try:
+        from sequence_timeline_captions import caption_job_active
+        busy = caption_job_active(sequence_id)
+    except Exception:
+        busy = False
+    if busy:
+        QMessageBox.information(parent, title, "Generate Captions is running on "
+                                "this sequence; try again when it is done.")
+    return busy
+
+
 def _retitle_windows(sequence_id, name):
     # Open timeline (and its player) titles follow a rename
     win = _open_windows.get(sequence_id) if _open_windows is not None else None
@@ -346,6 +359,8 @@ class SequenceManager(QMainWindow):
         if edit_sequence is None:
             QMessageBox.warning(self, "Settings", "sequence_add.py not found")
             return
+        if _captions_busy(self, sequence_id, "Settings"):
+            return
         if edit_sequence(self, self.project_db, sequence_id):
             self.refresh()
             self.status_bar.showMessage("Sequence updated")
@@ -354,6 +369,8 @@ class SequenceManager(QMainWindow):
         QMessageBox.information(self, "Replace", f"Replace stub for sequence id {sequence_id}")
 
     def _remove_sequence(self, sequence_id):
+        if _captions_busy(self, sequence_id, "Remove"):
+            return
         reply = QMessageBox.question(
             self,
             "Remove",

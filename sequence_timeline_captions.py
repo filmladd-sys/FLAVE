@@ -238,6 +238,13 @@ def edit_caption(self, clip):
 
 # ---- Generate Captions (BUILD 225): audio clip right-click
 
+_active = set()     # BUILD 233: (sequence_id, clip_id) of runs with an open window
+
+
+def caption_job_active(sequence_id):
+    # True while a Generate Captions run on that sequence has its window open
+    return any(sid == int(sequence_id) for sid, _cid in _active)
+
 def _gen_bridge(self):
     # One QObject per timeline; done(clip_id, result, error) and
     # stage(clip_id, name, a, b) are queued from the worker thread to the
@@ -371,15 +378,18 @@ def _mmss(seconds):
 
 
 def _open_progress(self, cid, job):
-    # BUILD 232: one non-modal progress window for the whole run, under the
+    # BUILD 232: one progress window for the whole run, under the
     # timeline's menu bar (window_place key caption_progress). Text and bar
     # per stage (_on_stage; the download bytes from a 250 ms timer); Cancel
-    # (or closing it) cancels the run (_cancel_generate)
+    # (or closing it) cancels the run (_cancel_generate). BUILD 233:
+    # window-modal to the timeline (Qt also blocks the timeline's parent
+    # windows: Sequence Manager / Project Manager), undo / redo blocked and
+    # the sequence marked busy (caption_job_active) until it closes
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QProgressDialog
     dlg = QProgressDialog("Reading audio...", "Cancel", 0, 0, self)
     dlg.setWindowTitle("Generate Captions")
-    dlg.setWindowModality(Qt.NonModal)
+    dlg.setWindowModality(Qt.WindowModal)
     dlg.setAutoClose(False)
     dlg.setAutoReset(False)
     dlg.setMinimumDuration(0)
@@ -391,11 +401,20 @@ def _open_progress(self, cid, job):
     timer.setInterval(250)
     timer.timeout.connect(lambda: _poll_download(self, cid))
     job["dlg"], job["timer"] = dlg, timer
+    key = (int(self.sequence_id), int(cid))
+    _active.add(key)
+    import undo
+    undo.set_blocked("captions:%d:%d" % key, True)
     dlg.show()
 
 
 def _close_progress(job):
-    # Close the window without it counting as Cancel
+    # Close the window without it counting as Cancel; the sequence is
+    # editable again and undo / redo work
+    key = (int(job["info"]["sequence_id"]), int(job["info"]["clip_id"]))
+    _active.discard(key)
+    import undo
+    undo.set_blocked("captions:%d:%d" % key, False)
     job["timer"].stop()
     dlg = job["dlg"]
     try:

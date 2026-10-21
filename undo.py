@@ -300,8 +300,22 @@ def _refresh_after_restore(project_path, message):
             print(f"Undo refresh failed: {e}")
 
 
+_blocked = set()     # BUILD 233: keys of running jobs that forbid undo / redo
+
+
+def set_blocked(key, on):
+    # While any key is set, perform() does nothing (Generate Captions run)
+    if on:
+        _blocked.add(key)
+    else:
+        _blocked.discard(key)
+
+
 def perform(which, project_path=None):
-    # GUI entry: "undo" or "redo" on the current project
+    # GUI entry: "undo" or "redo" on the current project; refused (False)
+    # while set_blocked holds a key
+    if _blocked:
+        return False
     project_path = project_path or current_project()
     try:
         label = undo(project_path) if which == "undo" else redo(project_path)
