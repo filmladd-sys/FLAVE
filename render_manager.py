@@ -886,6 +886,10 @@ def open_render_manager(timeline):
             _window_class.append(_make_window_class())
         win = _window_class[0](timeline)
         _open_windows[sid] = win
+        # BUILD 229: under the timeline's menu bar (no geometry memory:
+        # every new window)
+        from window_place import place_under_parent
+        place_under_parent(win, timeline, "render_manager")
     else:
         # BUILD 224: opened again: suggest the next free version
         win.refresh_output_path()

@@ -130,6 +130,11 @@ def open_timeline(parent, sequence_id):
         return win
     win = SequenceTimeline(parent, sequence_id)
     _open_windows[sequence_id] = win
+    # BUILD 229: under the opener's menu bar on first open / monitor change
+    # / off-screen (window_place); memory per sequence like the geometry
+    from window_place import place_under_parent
+    place_under_parent(win, parent, "SequenceTimeline_%d" % int(sequence_id),
+                       ("SequenceTimeline_%d_w" % int(sequence_id),))
     win.show()
     return win
 
@@ -550,6 +555,10 @@ class SequenceTimeline(QMainWindow):
             from refresh_preview_dialog import RefreshPreviewDialog
             if getattr(self, "_refresh_dialog", None) is None:
                 self._refresh_dialog = RefreshPreviewDialog(self)
+                # BUILD 229: under this timeline's menu bar when created
+                # (no geometry memory: every new dialog)
+                from window_place import place_under_parent
+                place_under_parent(self._refresh_dialog, self, "refresh_preview")
             self._refresh_dialog.start()
             QApplication.processEvents()    # BUILD 172: paint it now
         except Exception as e:

@@ -878,6 +878,10 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
 
     win = ProxyManagerWindow()
     _open_windows.append(win)
+    # BUILD 229: under the opener's menu bar (Footage Manager; no geometry
+    # memory: every new window)
+    from window_place import place_under_parent
+    place_under_parent(win, parent, "proxy_manager")
     win.show()
     win.raise_()
     win.activateWindow()

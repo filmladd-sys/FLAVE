@@ -1711,8 +1711,15 @@ def open_player_for(timeline):
         return player
     player = SequencePlayer(timeline)
     timeline._player = player
-    player.show()
+    # BUILD 229: top-level QWindow; only its geometry is set here, before
+    # show: under the timeline's menu bar on first open / monitor change /
+    # off-screen (window_place), memory per sequence like the geometry
     sid = getattr(timeline, "sequence_id", None)
+    if sid is not None:
+        from window_place import place_under_parent
+        place_under_parent(player, timeline, "sequence_player_%s" % sid,
+                           ("sequence_player_%s_geometry" % sid,))
+    player.show()
     if sid is not None:
         _add_open_player_id(sid)
     return player
