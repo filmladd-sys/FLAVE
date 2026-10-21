@@ -77,6 +77,13 @@ def _check(err, name):
         raise RuntimeError("%s failed: %s" % (name, err))
 
 
+def _cuda_toolkit_dir():
+    # BUILD 231: the CUDA toolkit install folder under Program Files
+    # (%ProgramW6432% / %ProgramFiles%), "" when neither is set (not Windows)
+    base = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles") or ""
+    return os.path.join(base, "NVIDIA GPU Computing Toolkit", "CUDA") if base else ""
+
+
 def _cuda_bin_dirs():
     # CUDA_PATH / CUDA_PATH_V* bin folders, then the toolkit v*\bin folders,
     # each also with an x64 subfolder
@@ -86,8 +93,9 @@ def _cuda_bin_dirs():
         if key.upper() == "CUDA_PATH" or key.upper().startswith("CUDA_PATH_V"):
             if val:
                 cuda_dirs.append(os.path.join(val, "bin"))
-    toolkit = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-    cuda_dirs += sorted(glob.glob(os.path.join(toolkit, "v*", "bin")), reverse=True)
+    toolkit = _cuda_toolkit_dir()
+    if toolkit:
+        cuda_dirs += sorted(glob.glob(os.path.join(toolkit, "v*", "bin")), reverse=True)
     cuda_dirs += [os.path.join(d, "x64") for d in list(cuda_dirs)]
     return cuda_dirs
 
@@ -353,8 +361,9 @@ def _load_cudart():
         if key.upper() == "CUDA_PATH" or key.upper().startswith("CUDA_PATH_V"):
             if val:
                 cuda_dirs.append(os.path.join(val, "bin"))
-    toolkit = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-    cuda_dirs += sorted(glob.glob(os.path.join(toolkit, "v*", "bin")), reverse=True)
+    toolkit = _cuda_toolkit_dir()
+    if toolkit:
+        cuda_dirs += sorted(glob.glob(os.path.join(toolkit, "v*", "bin")), reverse=True)
     cuda_dirs += [os.path.join(d, "x64") for d in list(cuda_dirs)]
     for d in cuda_dirs:
         for full in sorted(glob.glob(os.path.join(d, "cudart64_*.dll")), reverse=True):

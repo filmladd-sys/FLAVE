@@ -306,6 +306,19 @@ def generate_captions(self, clip):
         return
     if info is None:
         return
+    # BUILD 231: a model missing from the local cache is downloaded only
+    # after Yes here (the check is local only)
+    info["allow_download"] = False
+    if not cg.model_present():
+        ans = QMessageBox.question(
+            self, title,
+            'Generate Captions needs the Whisper "%s" model (about %s). '
+            'Download it now to:\n%s?' % (cg.WHISPER_MODEL, cg.model_size_text(),
+                                          cg.model_cache_dir()),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ans != QMessageBox.Yes:
+            return
+        info["allow_download"] = True
     import threading
     cancel = threading.Event()
     self._caption_gen_jobs[cid] = (info, cancel)
@@ -325,8 +338,9 @@ def generate_captions(self, clip):
             pass   # timeline closed
 
     threading.Thread(target=work, name="GenerateCaptions", daemon=True).start()
-    self.status_bar.showMessage("Generating captions for %s ..." % (
-        info["basename"] or "clip"))
+    self.status_bar.showMessage("%s captions for %s ..." % (
+        "Downloading the Whisper model and generating" if info["allow_download"]
+        else "Generating", info["basename"] or "clip"))
 
 
 def _finish_generate(self, clip_id, result, error):

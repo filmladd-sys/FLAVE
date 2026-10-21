@@ -32,7 +32,8 @@ says what it owns.
     `WARNING: numpy not installed ...` line at launch when it is missing.
   - `faster-whisper` -- optional, only for Generate Captions (audio clip
     right-click; `pip install faster-whisper`). The `small` model (about
-    460 MB) downloads on first use to the `models` folder next to the
+    460 MB) downloads on first use, after a Yes to a download prompt, to the
+    `models` folder next to the
     FLAVE .py files (Project Manager sets HF_HOME there at startup). It runs on CUDA (float16)
     when ctranslate2 finds cuBLAS and cuDNN 9 for CUDA 12 (for example
     `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`), otherwise on the
@@ -43,7 +44,7 @@ says what it owns.
 - **CUDA runtime and nvJPEG DLLs:** found by `_load_cudart()` and
   `_load_nvjpeg()` in `sequence_player_gpu.py`. Search order: the `bin`
   (and `bin\x64`) folders of every `CUDA_PATH` / `CUDA_PATH_V*` environment
-  variable, then `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin`,
+  variable, then `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\v*\bin`,
   then plain DLL names on PATH. If nvJPEG is missing, preview JPEGs are
   encoded by Qt instead (slower; console prints `nvJPEG not found, using Qt`).
 - **CUDA kernels:** written as PTX text (`PTX` in `sequence_player_gpu.py`)

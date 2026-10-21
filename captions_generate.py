@@ -33,6 +33,10 @@ LANGUAGE_639_2 = {"en": "eng", "es": "spa", "fr": "fra", "de": "deu",
 
 INSTALL_HINT = "pip install faster-whisper"
 
+# BUILD 231: approximate download size per model, for the download prompt
+MODEL_SIZES = {"tiny": "75 MB", "base": "145 MB", "small": "460 MB",
+               "medium": "1.5 GB", "large-v3": "3 GB", "large-v3-turbo": "1.6 GB"}
+
 
 class CaptionGenError(Exception):
     pass
@@ -157,14 +161,44 @@ def pcm_from_ffmpeg(source_path, start_s, dur_s, wav_path, cancel=None):
 _models = {}
 
 
-def _load_model(device):
+def model_size_text(name=WHISPER_MODEL):
+    return MODEL_SIZES.get(name, "unknown size")
+
+
+def model_cache_dir():
+    # The Hugging Face hub cache the model is read from / downloaded to
+    # (HF_HOME\hub; project_manager.py sets HF_HOME to models next to the
+    # code files)
+    try:
+        from huggingface_hub import constants
+        return constants.HF_HUB_CACHE
+    except Exception:
+        home = os.environ.get("HF_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface")
+        return os.environ.get("HF_HUB_CACHE") or os.path.join(home, "hub")
+
+
+def model_present(name=WHISPER_MODEL):
+    # True when the model's files are already in the local cache. Local
+    # lookup only (local_files_only=True): never downloads, no network.
+    try:
+        from faster_whisper.utils import download_model
+        path = download_model(name, local_files_only=True)
+    except Exception:
+        return False
+    return bool(path) and os.path.isfile(os.path.join(path, "model.bin"))
+
+
+def _load_model(device, allow_download=False):
     # One WhisperModel per device, kept for the session. cuda: float16;
-    # cpu: int8.
+    # cpu: int8. allow_download False: local files only (BUILD 231: a
+    # download needs the user's Yes in generate_captions first).
     from faster_whisper import WhisperModel
     m = _models.get(device)
     if m is None:
         ctype = "float16" if device == "cuda" else "int8"
-        m = WhisperModel(WHISPER_MODEL, device=device, compute_type=ctype)
+        m = WhisperModel(WHISPER_MODEL, device=device, compute_type=ctype,
+                         local_files_only=not allow_download)
         _models[device] = m
     return m
 
@@ -181,21 +215,25 @@ def _run_whisper(model, audio, cancel):
     return words, getattr(info, "language", "") or ""
 
 
-def transcribe(audio, cancel=None):
+def transcribe(audio, cancel=None, allow_download=False):
     # (words [(start_s, end_s, text)], language 2-letter, device used).
     # CUDA first (float16); any CUDA / cuDNN failure falls back to CPU int8.
+    # Without allow_download a model missing from the cache is an error
+    # (nothing is downloaded).
     try:
         import faster_whisper  # noqa: F401
     except ImportError:
         raise MissingWhisper(INSTALL_HINT)
+    if not allow_download and not model_present():
+        raise CaptionGenError('The Whisper "%s" model is not downloaded.' % WHISPER_MODEL)
     try:
-        words, lang = _run_whisper(_load_model("cuda"), audio, cancel)
+        words, lang = _run_whisper(_load_model("cuda", allow_download), audio, cancel)
         return words, lang, "cuda"
     except CaptionGenError:
         raise
     except Exception:
         _models.pop("cuda", None)
-    words, lang = _run_whisper(_load_model("cpu"), audio, cancel)
+    words, lang = _run_whisper(_load_model("cpu", allow_download), audio, cancel)
     return words, lang, "cpu"
 
 
@@ -219,10 +257,15 @@ def clip_audio(info, cancel=None):
 def generate(info, cancel=None, transcribe_fn=None):
     # Worker-thread job: audio + transcription + grouping. Returns
     # {"groups": [(start_s, end_s, text)], "language": "eng", "device": ...}
-    # (times from the clip's source in). transcribe_fn replaces transcribe
+    # (times from the clip's source in). info["allow_download"]: the user
+    # said Yes to the model download. transcribe_fn replaces transcribe
     # (tests).
     audio = clip_audio(info, cancel)
-    words, lang, device = (transcribe_fn or transcribe)(audio, cancel)
+    if transcribe_fn is not None:
+        words, lang, device = transcribe_fn(audio, cancel)
+    else:
+        words, lang, device = transcribe(audio, cancel,
+                                         bool(info.get("allow_download")))
     return {"groups": group_words(words),
             "language": LANGUAGE_639_2.get((lang or "").lower(), lang or "eng"),
             "device": device, "words": len(words)}
