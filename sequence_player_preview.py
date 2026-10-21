@@ -96,6 +96,8 @@ def _prefetch(self, frames, snapshot, clips=None):
     # (the explicit refresh decodes one track at a time)
     reqs = {}
     last = {}
+    import preview_log      # BUILD 247
+    t_pre = time.perf_counter()
     if frames:
         self._prune_decoders(frames[0], snapshot)
     for fr in frames:
@@ -137,12 +139,16 @@ def _prefetch(self, frames, snapshot, clips=None):
                 continue        # decoded per frame (and skipped) in _build_dst
             raise
         got = list(got or [])
+        if got:
+            preview_log.first_decode(key, len(got))     # BUILD 247
         for k, f in enumerate(got):
             pre[(key, srcs[0] + k)] = f
         if got:
             self.dec_next[key] = srcs[0] + len(got)
         else:
             self.dec_next.pop(key, None)
+    preview_log.once("first prefetch", "first prefetch: %d frames, %d decoded "
+                     "(%.3fs)" % (len(frames), len(pre), time.perf_counter() - t_pre))
     return pre
 
 # Composite buffers / nvJPEG states a composer keeps after a normal pass.

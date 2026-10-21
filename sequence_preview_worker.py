@@ -20,6 +20,8 @@
 import threading
 import time
 
+import preview_log as plog     # BUILD 247: startup timing lines
+
 from sequence_preview import (PreviewBatch, apply_dirty_queue, clean_set,
                               dirty_seq, dirty_queue_pending, _CLEAN_LOCK)
 
@@ -130,6 +132,7 @@ class PreviewWorker(object):
                 self.progress = None
             with self._cond:
                 if gen == self._gen:
+                    plog.end()      # BUILD 247: summary of a timed session
                     # Done, or cannot generate (no player): wait for a wake
                     self._done_gen = gen
                     # the explicit refresh pass (if any) is finished: its
@@ -160,6 +163,12 @@ class PreviewWorker(object):
         apply_dirty_queue()
         if total <= 0:
             return
+        if _refresh_all[0] or _play_priority[0]:
+            # BUILD 247: a full pass (F5 refresh or Play fill) is timed
+            plog.begin("F5 refresh" if _refresh_all[0] else "Play fill",
+                       "sequence %s, %d frames, %d tracks, %d clips" % (
+                           sequence_id, total, len(snapshot[0]),
+                           sum(len(v) for v in snapshot[1].values())))
         # One transaction per second of frames (fps, or 30 if missing)
         batch = PreviewBatch(project, sequence_id)
         try:
@@ -180,6 +189,7 @@ class PreviewWorker(object):
             batch.commit()
             self.saved += n
             self._done += n
+            plog.once("first commit", "first frames written (%d)" % n)
 
     def _gui_busy(self, sp):
         # The GUI wants the lock or was active within the idle time.
@@ -193,7 +203,10 @@ class PreviewWorker(object):
     def _pass_batched(self, FrameGenerate, sp, batch, project, sequence_id,
                       center, total, snapshot, run, gen):
         # run = frames per second (sequence fps, or 30 if missing)
+        t_c0 = time.perf_counter()
         clean = clean_set(project, sequence_id)
+        plog.once("clean set", "clean set read: %d clean (%.3fs)" % (
+            len(clean), time.perf_counter() - t_c0))
         burst_left = 0
         burst_t0 = 0.0
         batch_frames = run
@@ -246,8 +259,11 @@ class PreviewWorker(object):
                 except Exception:
                     plan = None
             if plan is None:
+                t_p0 = time.perf_counter()
                 plan = refresh_plan(project, sequence_id, snapshot, total, cap)
                 self._plan = (pkey, plan)
+                plog.once("plan", "refresh plan: %d ranges (%.3fs)" % (
+                    len(plan), time.perf_counter() - t_p0))
             self._pool_n = 0
             self._pool_key = key
             self._pool_fit = None
@@ -262,6 +278,7 @@ class PreviewWorker(object):
         self._done = 0
         self.progress = ((project, sequence_id, clean0, total)
                          if full and clean0 < total else None)
+        plog.pass_started(total - clean0)
         sec_per_frame = None     # measured card pass time per frame (EWMA)
         t_pass0 = time.perf_counter()
         made = 0
@@ -378,6 +395,8 @@ class PreviewWorker(object):
                     jpegs = FrameGenerateBatch(project, sequence_id, chunk, snapshot)
                 dt = time.perf_counter() - t_c
                 hold_max = max(hold_max, dt)
+                plog.once("first composite", "first card pass: %d frames "
+                          "composited (%.3fs)" % (len(chunk), dt))
                 if fast and len(chunk) > 1:
                     _log_refresh_batch(chunk, self._pool_n, dt)
                     # after each batch: the hard VRAM exit, then the decoders
@@ -401,6 +420,7 @@ class PreviewWorker(object):
                     if jpeg is None:
                         return
                     batch.add(f, jpeg, seq0)
+                    plog.frames_done(1)
                     made += 1
                     burst_left -= 1
                     if len(batch.pending) >= batch_frames:
@@ -575,6 +595,10 @@ _gui_beat = [0.0]
 def set_refresh_all(on):
     # Set under the worker lock with a gen bump, so a pass that ends now
     # (old gen) cannot clear the new request
+    if on:
+        plog.begin("F5 refresh", "requested")     # BUILD 247
+    else:
+        plog.end("cancelled")
     w = _worker
     if w is None:
         _refresh_all[0] = 1 if on else 0

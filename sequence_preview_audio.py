@@ -896,6 +896,8 @@ def start_mix(project_db, sequence_id, fps, total_frames, sig):
                          name="PreviewAudioMix-%d" % job.token)
     t.daemon = True             # never blocks app exit
     job.thread = t
+    import preview_log      # BUILD 247
+    preview_log.log("audio mix start (job %d)" % job.token)
     t.start()
     return job
 
@@ -996,6 +998,8 @@ def _mix_worker(job):
         except OSError:
             pass
         job.done = True
+        import preview_log      # BUILD 247
+        preview_log.log("audio mix end (job %d, %s)" % (job.token, job.status))
 
 
 def collect_mix(job):

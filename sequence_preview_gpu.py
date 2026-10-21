@@ -183,8 +183,13 @@ def headless_for(project, sequence_id):
         if "frame_jpeg" not in HeadlessComposer.__dict__:
             _borrow()
         comp = HeadlessComposer(project, sequence_id, w, h)
+        import time
+        import preview_log      # BUILD 247
+        t_setup = time.perf_counter()
         try:
             comp.setup()
+            preview_log.log("headless composer setup %dx%d (%.3fs)" % (
+                w, h, time.perf_counter() - t_setup))
         except Exception as e:
             comp.failed = True
             comp.release_locked()

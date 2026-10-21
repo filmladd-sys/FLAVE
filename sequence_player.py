@@ -28,6 +28,7 @@ DEC_SKIP_MAX = 4      # BUILD 119: decode through gaps up to this, else seek
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QImage, QWindow, QOpenGLContext
 
+import preview_log      # BUILD 247: preview generation timing lines
 from sequence_timeline_sql import (
     _get_global_setting, _set_global_setting, _load_sequence_name,
     _add_open_player_id, _remove_open_player_id,
@@ -241,6 +242,8 @@ def learn_source_end(key, src_frame):
     if ident is not None and src_frame >= 0:
         old = _SOURCE_END.get(ident)
         _SOURCE_END[ident] = src_frame if old is None else min(old, src_frame)
+        preview_log.log("source end learned: %s at index %d" % (
+            os.path.basename(str(key[1])), _SOURCE_END[ident]))
 
 
 def source_index_ok(owner, key, dec, src_frame):
@@ -861,6 +864,8 @@ class SequencePlayer(QWindow):
         dec = self.decoders.get(key)
         if dec is None:
             import PyNvVideoCodec as nvc
+            import time as _time
+            t_open = _time.perf_counter()
             dec = nvc.SimpleDecoder(
                 path,
                 gpu_id=0,
@@ -869,6 +874,8 @@ class SequencePlayer(QWindow):
                 output_color_type=nvc.OutputColorType.RGB,
             )
             self.decoders[key] = dec
+            # BUILD 247: open time on the console (preview_log)
+            preview_log.decoder_opened(path, _time.perf_counter() - t_open)
             # print(f"DECODER open {key} total={len(self.decoders)}")
             if getattr(self, "_refresh_hold", 0):
                 # BUILD 182: explicit refresh: hard VRAM exit check
@@ -1521,6 +1528,7 @@ class SequencePlayer(QWindow):
                     self.dec_last.pop(dkey, None)
                     continue
                 self.dec_next[dkey] = src_frame + 1
+                preview_log.first_decode(dkey, len(batch))   # BUILD 247
                 f = batch[-1]
                 self.dec_last[dkey] = (src_frame, f, dec)
             shape = [int(v) for v in f.shape]
