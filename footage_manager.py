@@ -17,6 +17,73 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
 
 
+def footage_usage(cur, footage_id):
+    # BUILD 235: [(sequence_id, name)] of sequences with clips of this
+    # footage (any proxy of it is the same footage row; sequence clips carry
+    # footage_id NULL and never match), by sequence id
+    rows = cur.execute(
+        "SELECT DISTINCT s.id, s.name FROM clips c "
+        "JOIN tracks t ON t.id = c.track_id "
+        "JOIN sequences s ON s.id = t.sequence_id "
+        "WHERE c.footage_id = ? ORDER BY s.id", (int(footage_id),)).fetchall()
+    used = [(int(i), n or "") for i, n in rows]
+    if used:
+        # Sequence names can repeat: those get their id added
+        names = [r[0] or "" for r in cur.execute("SELECT name FROM sequences")]
+        used = [(i, n if names.count(n) < 2 else "%s (id %d)" % (n, i))
+                for i, n in used]
+    return used
+
+
+def usage_warning_text(used):
+    # 'This footage is used in sequences "A" and "B". Removing it will ...'
+    q = ['"%s"' % n for _i, n in used]
+    names = q[0] if len(q) == 1 else ", ".join(q[:-1]) + " and " + q[-1]
+    return ("This footage is used in sequence%s %s. Removing it will also "
+            "remove its clips from %s." % ("" if len(q) == 1 else "s", names,
+                                           "that sequence" if len(q) == 1
+                                           else "those sequences"))
+
+
+def delete_footage_clips(cur, footage_id):
+    # Deletes every clip of this footage and their markers, like the
+    # timeline's Delete (sequence_timeline_sql.delete_selected_clip).
+    # Linked partners of other footage, keyframe clips and captions stay
+    # (a link group left with one member counts as unlinked). Returns count
+    ids = [int(r[0]) for r in cur.execute(
+        "SELECT id FROM clips WHERE footage_id = ?", (int(footage_id),))]
+    if ids:
+        cur.execute("DELETE FROM clips WHERE footage_id = ?", (int(footage_id),))
+        from markers import delete_markers
+        delete_markers(cur, ids)
+    return len(ids)
+
+
+def _refresh_sequences(project_db, sequence_ids):
+    # Open timelines of the affected sequences reload (their refresh marks
+    # the changed preview ranges, as after a timeline clip delete; their
+    # players follow); every affected sequence's preview audio is dirty
+    if not sequence_ids:
+        return
+    try:
+        from sequence_preview_audio import mark_preview_audio_dirty
+        for sid in sequence_ids:
+            mark_preview_audio_dirty(project_db, sid)
+    except Exception:
+        pass
+    try:
+        import sequence_timeline
+        for tl in list(sequence_timeline._open_windows.values()):
+            if (tl.sequence_id in sequence_ids and os.path.abspath(tl._project_db())
+                    == os.path.abspath(project_db)):
+                tl._selected_clip_ids = set()
+                tl._selection_order = []
+                tl._selection_solo = False
+                tl._after_clip_change("Footage removed")
+    except Exception as e:
+        print(f"Footage remove timeline refresh failed: {e}")
+
+
 def footage_is_image(project_db, footage_id):
     # True when the footage filename or path ends in an image extension
     try:
@@ -405,15 +472,42 @@ class FootageManager(QMainWindow):
             QMessageBox.information(self, "Remove", "Generate Captions is running; "
                                     "try again when it is done.")
             return
-        reply = QMessageBox.question(
-            self,
-            "Remove",
-            f"Remove footage id {footage_id} from the project?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            return
+        # BUILD 235: footage used in sequences -> warning naming them (Cancel
+        # default / Confirm Remove); unused -> the plain Yes / No question
+        try:
+            conn = sqlite3.connect(self.project_db)
+            try:
+                used = footage_usage(conn.cursor(), footage_id)
+            finally:
+                conn.close()
+        except Exception:
+            used = []
+        if used:
+            box = QMessageBox(QMessageBox.Warning, "Remove",
+                              usage_warning_text(used), parent=self)
+            confirm = box.addButton("Confirm Remove", QMessageBox.DestructiveRole)
+            cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+            box.setDefaultButton(cancel)
+            box.setEscapeButton(cancel)
+            box.exec()
+            if box.clickedButton() is not confirm:
+                return
+        else:
+            reply = QMessageBox.question(
+                self,
+                "Remove",
+                f"Remove footage id {footage_id} from the project?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        # One undo step (used or unused): footage row, its icons (thumbnail
+        # rows, in undo SNAP_TABLES), its clips and their markers. Proxies
+        # rows, proxy files and peaks are left in place (never deleted here),
+        # so undo needs nothing for them; no files are deleted
+        from undo import push_undo
+        push_undo(self.project_db, "Remove footage")
         try:
             conn = sqlite3.connect(self.project_db)
             cur = conn.cursor()
@@ -421,12 +515,15 @@ class FootageManager(QMainWindow):
             if cur.fetchall():
                 cur.execute("DELETE FROM icons WHERE footage_id = ?", (footage_id,))
             cur.execute("DELETE FROM footage WHERE id = ?", (footage_id,))
+            removed = delete_footage_clips(cur, footage_id)
             conn.commit()
             conn.close()
         except Exception as e:
             QMessageBox.warning(self, "Remove", f"Could not remove footage: {e}")
             return
-        self.status_bar.showMessage("Removed footage")
+        _refresh_sequences(self.project_db, {sid for sid, _n in used})
+        self.status_bar.showMessage("Removed footage" + (
+            " and %d clip(s)" % removed if removed else ""))
         self.refresh()
 
     def _sort_by_name(self):
