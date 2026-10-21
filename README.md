@@ -66,7 +66,7 @@ Project Manager exits the app.
 | File | Job |
 |---|---|
 | `project_manager.py` | Entry point and main window (File / Edit / Settings / Windows menus); restores open windows; prints the build number |
-| `new_project.py` | New Project dialog; `_init_db` creates the project SQLite schema |
+| `new_project.py` | `_init_db` creates the project SQLite schema; project name checks for File > New Project (folder + name) |
 | `global_settings.py` | Global Settings window; owns the global settings DB (`_get_global_setting` / `_set_global_setting`, defaults); dark mode theme |
 | `project_settings.py` | Per-project settings (project DB `settings` table) |
 | `footage_manager.py` | Footage Manager window (import, sort, replace, remove) |

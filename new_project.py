@@ -1,15 +1,53 @@
 # new_project.py
-# New Project window for Ladd Video Editor
-# Single text box for full path (folder + filename). Creates the SQLite database.
-# ASCII only.
+# Project database creation for Ladd Video Editor (_init_db: every project
+# table). Project Manager's File > New Project picks a folder and a name and
+# calls create_project_db (BUILD 226); NewProjectWindow (one full-path text
+# box) also creates through _init_db. ASCII only.
 
 import os
+import re
 import sqlite3
 from PySide6.QtWidgets import (
     QMainWindow, QLabel, QVBoxLayout, QWidget,
     QPushButton, QLineEdit, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
+
+
+PROJECT_EXT = ".db"
+# Characters Windows does not allow in a file name, plus control characters
+_BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_NAMES = set(["CON", "PRN", "AUX", "NUL"] +
+                      ["COM%d" % i for i in range(1, 10)] +
+                      ["LPT%d" % i for i in range(1, 10)])
+
+
+def project_name_error(name):
+    # "" when name is usable as a Windows file name stem, else the reason
+    name = name or ""
+    if name.lower().endswith(PROJECT_EXT):
+        name = name[:-len(PROJECT_EXT)]
+    if not name.strip():
+        return "A project name is required."
+    if _BAD_NAME_CHARS.search(name):
+        return 'A project name cannot contain any of: < > : " / \\ | ? *'
+    if name != name.rstrip(". ") or name != name.lstrip(" "):
+        return "A project name cannot start with a space or end with a space or a dot."
+    if name.split(".")[0].upper() in _RESERVED_NAMES:
+        return "%s is a reserved name on Windows." % name
+    return ""
+
+
+def project_path_for(folder, name):
+    # folder + name + ".db" (a typed ".db" is not doubled)
+    if name.lower().endswith(PROJECT_EXT):
+        name = name[:-len(PROJECT_EXT)]
+    return os.path.join(folder, name + PROJECT_EXT)
+
+
+def create_project_db(db_path):
+    # Create the project database at db_path (raises on failure)
+    NewProjectWindow._init_db(None, db_path)
 
 
 class NewProjectWindow(QMainWindow):

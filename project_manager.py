@@ -8,7 +8,7 @@ import os
 import sqlite3
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QMenuBar, QMenu,
-    QFileDialog, QMessageBox, QStatusBar
+    QFileDialog, QMessageBox, QStatusBar, QInputDialog, QLineEdit
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence
@@ -20,11 +20,11 @@ except ImportError:
     GlobalSettingsWindow = None
     apply_dark_mode = None
 
-# Stub import for the new project window
+# Project creation (File > New Project)
 try:
-    from new_project import NewProjectWindow
+    import new_project
 except ImportError:
-    NewProjectWindow = None
+    new_project = None
 
 # Stub import for the project settings window
 try:
@@ -155,8 +155,10 @@ class ProjectManager(QMainWindow):
         open_action.triggered.connect(self._open_project)
         file_menu.addAction(open_action)
 
+        # Shown only while a project is open (_update_windows_menu)
         self.close_action = QAction("Close Project", self)
         self.close_action.setEnabled(False)
+        self.close_action.setVisible(False)
         self.close_action.triggered.connect(self._close_project)
         file_menu.addAction(self.close_action)
 
@@ -166,20 +168,21 @@ class ProjectManager(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Edit menu: snapshot undo/redo (undo.py). Ctrl+Z / Ctrl+Y are
-        # application-wide shortcuts on these actions, so they fire from
-        # every QWidget window; the Sequence Player QWindow forwards them.
-        edit_menu = menubar.addMenu("Edit")
+        # Snapshot undo/redo (undo.py), no menu (BUILD 226: the Edit menu
+        # is gone). Ctrl+Z / Ctrl+Y are application-wide shortcuts on these
+        # two actions, added to this window, so they fire from every QWidget
+        # window (Sequence Manager, Footage Manager, timelines, ...); the
+        # Sequence Player QWindow forwards them.
         self.undo_action = QAction("Undo", self)
         self.undo_action.setShortcut(QKeySequence("Ctrl+Z"))
         self.undo_action.setShortcutContext(Qt.ApplicationShortcut)
         self.undo_action.triggered.connect(lambda: self._undo_redo("undo"))
-        edit_menu.addAction(self.undo_action)
+        self.addAction(self.undo_action)
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         self.redo_action.setShortcutContext(Qt.ApplicationShortcut)
         self.redo_action.triggered.connect(lambda: self._undo_redo("redo"))
-        edit_menu.addAction(self.redo_action)
+        self.addAction(self.redo_action)
         try:
             import undo
             undo.add_listener(self._update_undo_actions)
@@ -246,6 +249,7 @@ class ProjectManager(QMainWindow):
         self.seq_mgr_action.setEnabled(enabled)
         self.footage_mgr_action.setEnabled(enabled)
         self.close_action.setEnabled(enabled)
+        self.close_action.setVisible(enabled)
         self.project_settings_action.setEnabled(enabled)
 
     def _autoload_project(self):
@@ -260,16 +264,45 @@ class ProjectManager(QMainWindow):
             self._update_windows_menu()
 
     def _new_project(self):
-        if NewProjectWindow is None:
-            QMessageBox.warning(self, "New Project", "new_project.py not found")
+        # BUILD 226: folder browser, then a name prompt; creates
+        # <folder>/<name>.db. Cancel at either step changes nothing. An
+        # invalid name or an existing file shows why and asks again. The
+        # folder browser starts in the open project's folder, else
+        # last_project_folder. The current project is closed (Close Project
+        # routine) only once the new file is about to be created.
+        title = "New Project"
+        if new_project is None:
+            QMessageBox.warning(self, title, "new_project.py not found")
             return
-        # Close the current project first (same routine as Close Project).
-        # Cancelling the New Project window leaves no project open.
+        start_dir = (os.path.dirname(self.current_project) if self.current_project
+                     else _get_global_setting("last_project_folder", ""))
+        folder = QFileDialog.getExistingDirectory(self, title + ": choose a folder",
+                                                  start_dir or "")
+        if not folder:
+            return
+        name = ""
+        while True:
+            name, ok = QInputDialog.getText(self, title, "Project name:",
+                                            QLineEdit.Normal, name)
+            if not ok:
+                return
+            name = (name or "").strip()
+            err = new_project.project_name_error(name)
+            if not err:
+                db_path = new_project.project_path_for(folder, name)
+                if os.path.exists(db_path):
+                    err = "That file already exists:\n%s" % db_path
+            if not err:
+                break
+            QMessageBox.warning(self, title, err)
         if self.current_project:
             self._close_project()
-        self.new_project_window = NewProjectWindow(self)
-        self.new_project_window.project_created.connect(self._on_project_created)
-        self.new_project_window.show()
+        try:
+            new_project.create_project_db(db_path)
+        except Exception as e:
+            QMessageBox.critical(self, title, f"Could not create project:\n{e}")
+            return
+        self._on_project_created(db_path)
 
     def _on_project_created(self, db_path):
         self.current_project = db_path
