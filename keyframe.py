@@ -18,9 +18,13 @@ from PySide6.QtWidgets import (
 #                        "crop_x", "crop_y")
 # BUILD 154: gamma / brightness / contrast (color, CUDA blend only)
 # BUILD 219: rotate (degrees, default 0, CUDA blend only)
+# BUILD 220: outline (border outline width in sequence px, 0 = off) and
+# outline_r / outline_g / outline_b / outline_a (its RGBA color 0..255,
+# 255 each when there is no such key); CUDA blend only
 KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
                        "crop_x", "crop_y", "gamma", "brightness", "contrast",
-                       "rotate")
+                       "rotate", "outline", "outline_r", "outline_g",
+                       "outline_b", "outline_a")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -35,6 +39,11 @@ KEYFRAME_TYPE_CHOICES = (
     ("Brightness", "brightness"),     # BUILD 154
     ("Contrast", "contrast"),         # BUILD 154
     ("Rotate", "rotate"),             # BUILD 219
+    ("Border Outline", "outline"),    # BUILD 220
+    ("Outline R", "outline_r"),       # BUILD 220
+    ("Outline G", "outline_g"),       # BUILD 220
+    ("Outline B", "outline_b"),       # BUILD 220
+    ("Outline A", "outline_a"),       # BUILD 220
 )
 
 # Value range per stored type (others unbounded). Volume and opacity are
@@ -44,11 +53,16 @@ KEYFRAME_TYPE_CHOICES = (
 # none), contrast 0..5 (1 = none); the blend clamps the same way
 KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0),
                     "gamma": (0.1, 5.0), "brightness": (-100.0, 100.0),
-                    "contrast": (0.0, 5.0)}
+                    "contrast": (0.0, 5.0),
+                    "outline": (0.0, 1000.0), "outline_r": (0.0, 255.0),
+                    "outline_g": (0.0, 255.0), "outline_b": (0.0, 255.0),
+                    "outline_a": (0.0, 255.0)}
 # BUILD 219: rotate is degrees and unbounded (any angle; 360 = a full
 # turn, so keys like 0 -> 720 spin twice). Its Add / Edit Key spin box
-# steps 1 degree; every other type steps 0.1.
-KEY_VALUE_STEPS = {"rotate": 1.0}
+# steps 1 degree; BUILD 220: the outline width and color types step 1
+# (whole pixels / color levels); every other type steps 0.1.
+KEY_VALUE_STEPS = {"rotate": 1.0, "outline": 1.0, "outline_r": 1.0,
+                   "outline_g": 1.0, "outline_b": 1.0, "outline_a": 1.0}
 
 
 def clamp_key_value(stored_type, value):
@@ -325,6 +339,37 @@ def rotate_degrees_for_link(rotate_clips, clip_link_id, frame, clip_order):
     return float(value)
 
 
+OUTLINE_COLOR_TYPES = ("outline_r", "outline_g", "outline_b", "outline_a")
+
+
+def outline_for_link(outline_clips, color_clips, clip_link_id, frame,
+                     clip_order):
+    # BUILD 220: linked type-outline keyframe above this clip (same rule as
+    # scale / position / crop / rotate): (width, r, g, b, a) with width the
+    # outline thickness in whole sequence pixels (value rounded, >= 1) and
+    # r, g, b, a 0..255 ints, each from its own linked outline_r / _g / _b /
+    # _a keyframe above the clip, or 255 when there is none. color_clips is
+    # (r_clips, g_clips, b_clips, a_clips). None when there is no outline
+    # key or the width rounds to 0 (no outline, unchanged output).
+    keys = _pick_above_keyframe(outline_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    width = int(round(clamp_key_value("outline", value)))
+    if width <= 0:
+        return None
+    rgba = []
+    for stored, clips in zip(OUTLINE_COLOR_TYPES, color_clips):
+        ckeys = _pick_above_keyframe(clips, clip_link_id, frame, clip_order)
+        cval = evaluate_keyframes(ckeys, frame) if ckeys is not None else None
+        if cval is None:
+            cval = 255.0
+        rgba.append(int(round(clamp_key_value(stored, cval))))
+    return (width, rgba[0], rgba[1], rgba[2], rgba[3])
+
+
 def collect_scale_clips(clips_by_track, track_order=None):
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "scale")
@@ -379,6 +424,14 @@ def collect_rotate_clips(clips_by_track, track_order=None):
     # BUILD 219
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "rotate")
+
+
+def collect_outline_clips(clips_by_track, track_order=None):
+    # BUILD 220: (outline_clips, (r_clips, g_clips, b_clips, a_clips))
+    return (_collect_keyframe_clips_of_type(
+                clips_by_track, track_order, "outline"),
+            tuple(_collect_keyframe_clips_of_type(clips_by_track, track_order, t)
+                  for t in OUTLINE_COLOR_TYPES))
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
@@ -689,7 +742,8 @@ def persist_keyframe_link_id(cur, clip_mem_id, link_id):
 
 
 class AddKeyframeClipDialog(QDialog):
-    # Name + type (X / Y / Scale / ... / X Crop / Y Crop / ... / Rotate) + Add
+    # Name + type (X / Y / Scale / ... / X Crop / Y Crop / ... / Rotate /
+    # Border Outline / Outline R / G / B / A) + Add
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Keyframe Clip")
@@ -886,8 +940,11 @@ def default_key_value(timeline, stored_type):
     # BUILD 154: gamma 1.0, contrast 1.0 (no change); brightness 0 below
     if stored_type in ("gamma", "contrast"):
         return 1.0
+    # BUILD 220: outline color channels 255 (opaque white)
+    if stored_type in OUTLINE_COLOR_TYPES:
+        return 255.0
     # BUILD 147: crop_x / crop_y = 0 (no crop); BUILD 219: rotate = 0
-    # (upright); others 0 as before
+    # (upright); BUILD 220: outline width = 0 (off); others 0 as before
     return 0.0
 
 

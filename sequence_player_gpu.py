@@ -525,6 +525,22 @@ GL_QUADS = 0x0007
 # u starts as dx * cos (mul.rn) and adds dy * sin (fma.rn); v likewise
 # from dy * cos and dx * -sin. At cos 1, sin 0 both are exact (x * 1 = x,
 # x + y * 0 = x), so no rotation is bit-exact with the unrotated kernel.
+# BUILD 220: outline_w / outline_rgba (border outline keyframes; width in
+# sequence pixels, 0 = off; color r | g << 8 | b << 16 | a << 24). A dest
+# pixel the layer does not draw (its sample is outside the source or the
+# crop) goes to OUTLINE instead of DONE. With width 0 it ends there
+# (bit-exact with no outline). Otherwise the visible source rect is the
+# pixel range the bounds and crop tests accept, columns
+# max(0, ceil(crop_x - 0.5)) .. min(sw - 1, floor(sw - crop_x - 0.5)),
+# whose edges in the pre-round sample coordinate fx are those - 0.5 / +
+# 0.5 (rows the same with crop_y, sh); an empty rect draws nothing. The
+# distance of fx (fy) outside that range, divided by inv_scale
+# (inv_scale_y), is the distance in sequence pixels along the clip's own
+# rotated axes. The pixel is outline when both distances are < width (a
+# band width pixels thick around the outside, square corners, turning
+# with the clip); it then blends the outline RGB at alpha outline_a *
+# opacity through the same COLOR_DONE math (color keyframes do not apply
+# to it). Pixels the layer draws are unchanged.
 # BUILD 154: color_flags / contrast / brightness / inv_gamma: per source
 # RGB channel c = v / 255, in this order, each step only when its flag bit
 # is set (identity = not set): 1 contrast (c - 0.5) * contrast + 0.5,
@@ -558,7 +574,8 @@ PTX = b"""
     .param .f32 inv_scale_y, .param .f32 opacity,
     .param .f32 crop_x, .param .f32 crop_y,
     .param .u32 color_flags, .param .f32 contrast, .param .f32 brightness,
-    .param .f32 inv_gamma, .param .f32 rot_cos, .param .f32 rot_sin)
+    .param .f32 inv_gamma, .param .f32 rot_cos, .param .f32 rot_sin,
+    .param .f32 outline_w, .param .u32 outline_rgba)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
@@ -570,6 +587,8 @@ PTX = b"""
     .reg .u32 cflag, cfl;
     .reg .f32 fcon, fbri, figm, fcc;
     .reg .f32 frc, frs, frns, fru, frv;
+    .reg .f32 fow, fol, fohi, foe, fod, fodb;
+    .reg .u32 orgba;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -631,13 +650,13 @@ PTX = b"""
     cvt.rni.s32.f32 sx, fx;
     cvt.rni.s32.f32 sy, fy;
     setp.lt.s32 p, sx, 0;
-    @p bra DONE;
+    @p bra OUTLINE;
     setp.lt.s32 p, sy, 0;
-    @p bra DONE;
+    @p bra OUTLINE;
     setp.ge.s32 p, sx, swv;
-    @p bra DONE;
+    @p bra OUTLINE;
     setp.ge.s32 p, sy, shv;
-    @p bra DONE;
+    @p bra OUTLINE;
     ld.param.f32 fcrx, [crop_x];
     ld.param.f32 fcry, [crop_y];
     // BUILD 151: crop_x removes fcrx source px from the left and from the
@@ -646,31 +665,31 @@ PTX = b"""
     cvt.rn.f32.s32 fsx, sx;
     add.f32 fsx, fsx, 0f3F000000;
     setp.lt.f32 p, fsx, fcrx;
-    @p bra DONE;
+    @p bra OUTLINE;
     cvt.rn.f32.u32 fsw, swv;
     sub.f32 fsw, fsw, fcrx;
     setp.gt.f32 p, fsx, fsw;
-    @p bra DONE;
+    @p bra OUTLINE;
     // BUILD 152: crop_y the same way, top and bottom (was a shift):
     // add.f32 fy, fy, fcry;
     cvt.rn.f32.s32 fsy, sy;
     add.f32 fsy, fsy, 0f3F000000;
     setp.lt.f32 p, fsy, fcry;
-    @p bra DONE;
+    @p bra OUTLINE;
     cvt.rn.f32.u32 fsh, shv;
     sub.f32 fsh, fsh, fcry;
     setp.gt.f32 p, fsy, fsh;
-    @p bra DONE;
+    @p bra OUTLINE;
     cvt.rni.s32.f32 sx, fx;
     cvt.rni.s32.f32 sy, fy;
     setp.lt.s32 p, sx, 0;
-    @p bra DONE;
+    @p bra OUTLINE;
     setp.lt.s32 p, sy, 0;
-    @p bra DONE;
+    @p bra OUTLINE;
     setp.ge.s32 p, sx, swv;
-    @p bra DONE;
+    @p bra OUTLINE;
     setp.ge.s32 p, sy, shv;
-    @p bra DONE;
+    @p bra OUTLINE;
     cvt.u32.s32 usx, sx;
     cvt.u32.s32 usy, sy;
     mul.lo.u32 off32, usy, ssv;
@@ -779,6 +798,64 @@ COLOR_DONE:
     st.global.u8 [addr], r;
     st.global.u8 [addr+1], g;
     st.global.u8 [addr+2], b;
+    bra DONE;
+OUTLINE:
+    // BUILD 220: border outline for a pixel the layer does not draw
+    ld.param.f32 fow, [outline_w];
+    setp.gt.f32 p, fow, 0f00000000;
+    @!p bra DONE;
+    ld.param.f32 fcrx, [crop_x];
+    ld.param.f32 fcry, [crop_y];
+    // x: visible columns lo..hi -> fx edges lo - 0.5 .. hi + 0.5
+    sub.f32 fol, fcrx, 0f3F000000;
+    cvt.rpi.f32.f32 fol, fol;
+    max.f32 fol, fol, 0f00000000;
+    sub.f32 fol, fol, 0f3F000000;
+    cvt.rn.f32.u32 fohi, swv;
+    sub.f32 foe, fohi, 0f3F800000;
+    sub.f32 fohi, fohi, fcrx;
+    sub.f32 fohi, fohi, 0f3F000000;
+    cvt.rmi.f32.f32 fohi, fohi;
+    min.f32 fohi, fohi, foe;
+    add.f32 fohi, fohi, 0f3F000000;
+    setp.ge.f32 p, fol, fohi;
+    @p bra DONE;
+    sub.f32 fod, fol, fx;
+    sub.f32 foe, fx, fohi;
+    max.f32 fod, fod, foe;
+    max.f32 fod, fod, 0f00000000;
+    div.rn.f32 fod, fod, invs;
+    setp.ge.f32 p, fod, fow;
+    @p bra DONE;
+    // y: the same with crop_y and sh
+    sub.f32 fol, fcry, 0f3F000000;
+    cvt.rpi.f32.f32 fol, fol;
+    max.f32 fol, fol, 0f00000000;
+    sub.f32 fol, fol, 0f3F000000;
+    cvt.rn.f32.u32 fohi, shv;
+    sub.f32 foe, fohi, 0f3F800000;
+    sub.f32 fohi, fohi, fcry;
+    sub.f32 fohi, fohi, 0f3F000000;
+    cvt.rmi.f32.f32 fohi, fohi;
+    min.f32 fohi, fohi, foe;
+    add.f32 fohi, fohi, 0f3F000000;
+    setp.ge.f32 p, fol, fohi;
+    @p bra DONE;
+    sub.f32 fodb, fol, fy;
+    sub.f32 foe, fy, fohi;
+    max.f32 fodb, fodb, foe;
+    max.f32 fodb, fodb, 0f00000000;
+    div.rn.f32 fodb, fodb, invsy;
+    setp.ge.f32 p, fodb, fow;
+    @p bra DONE;
+    ld.param.u32 orgba, [outline_rgba];
+    and.b32 r, orgba, 255;
+    shr.b32 g, orgba, 8;
+    and.b32 g, g, 255;
+    shr.b32 b, orgba, 16;
+    and.b32 b, b, 255;
+    shr.b32 a, orgba, 24;
+    bra COLOR_DONE;
 DONE:
     ret;
 }

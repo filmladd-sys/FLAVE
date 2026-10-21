@@ -149,7 +149,8 @@ whose functions take the timeline as `self` and are attached to the class)
 **One frame engine.** All compositing happens on the GPU: each layer is
 decoded by NVDEC (`PyNvVideoCodec.SimpleDecoder`, RGB in device memory)
 or uploaded once (stills), then the PTX kernel scales, positions, rotates,
-crops, color-adjusts and blends it into a sequence-size RGB buffer. The code is
+crops, color-adjusts, outlines (border outline keyframes) and blends it
+into a sequence-size RGB buffer. The code is
 `SequencePlayer._build_dst`; the headless composer in
 `sequence_preview_gpu.py` borrows the player's methods, so the preview
 and the render produce the same picture.
