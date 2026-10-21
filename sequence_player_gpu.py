@@ -512,6 +512,19 @@ GL_QUADS = 0x0007
 # opacity (0..1) multiplies the layer alpha (opacity keyframes).
 # Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
 # inv_scale 1, and a scaled proxy frames to the same pixels as the original.
+# BUILD 219: rot_cos / rot_sin (cos and sin of the rotate keyframe angle;
+# 1, 0 = no rotation). The layer turns about its center on screen (the
+# dest center plus pos_dx / pos_dy); a positive angle turns the picture
+# clockwise (y down). Per dest pixel the offset from that center
+# (dx, dy) is turned back first, u = cos * dx + sin * dy and
+# v = -sin * dx + cos * dy, then scaled by inv_scale / inv_scale_y and
+# mapped to the source as before, so scale and the proxy factors stay in
+# source axes and crop_x / crop_y crop the source before it turns. Dest
+# pixels whose sample falls outside the source (or the crop) are not
+# drawn, so the corners a turn uncovers keep the destination as it is.
+# u starts as dx * cos (mul.rn) and adds dy * sin (fma.rn); v likewise
+# from dy * cos and dx * -sin. At cos 1, sin 0 both are exact (x * 1 = x,
+# x + y * 0 = x), so no rotation is bit-exact with the unrotated kernel.
 # BUILD 154: color_flags / contrast / brightness / inv_gamma: per source
 # RGB channel c = v / 255, in this order, each step only when its flag bit
 # is set (identity = not set): 1 contrast (c - 0.5) * contrast + 0.5,
@@ -545,7 +558,7 @@ PTX = b"""
     .param .f32 inv_scale_y, .param .f32 opacity,
     .param .f32 crop_x, .param .f32 crop_y,
     .param .u32 color_flags, .param .f32 contrast, .param .f32 brightness,
-    .param .f32 inv_gamma)
+    .param .f32 inv_gamma, .param .f32 rot_cos, .param .f32 rot_sin)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
@@ -556,6 +569,7 @@ PTX = b"""
     .reg .pred pc, pb, pg;
     .reg .u32 cflag, cfl;
     .reg .f32 fcon, fbri, figm, fcc;
+    .reg .f32 frc, frs, frns, fru, frv;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -591,10 +605,21 @@ PTX = b"""
     cvt.rn.f32.s32 fdy, pdy;
     sub.f32 fx, fx, fcx;
     sub.f32 fx, fx, fdx;
-    mul.f32 fx, fx, invs;
-    add.f32 fx, fx, fcx;
     sub.f32 fy, fy, fcy;
     sub.f32 fy, fy, fdy;
+    // BUILD 219: inverse rotation of (dx, dy) about the layer center,
+    // u = c * dx + s * dy, v = -s * dx + c * dy (exact at c 1, s 0)
+    ld.param.f32 frc, [rot_cos];
+    ld.param.f32 frs, [rot_sin];
+    neg.f32 frns, frs;
+    mul.rn.f32 fru, fx, frc;
+    fma.rn.f32 fru, fy, frs, fru;
+    mul.rn.f32 frv, fy, frc;
+    fma.rn.f32 frv, fx, frns, frv;
+    mov.f32 fx, fru;
+    mov.f32 fy, frv;
+    mul.f32 fx, fx, invs;
+    add.f32 fx, fx, fcx;
     mul.f32 fy, fy, invsy;
     add.f32 fy, fy, fcy;
     cvt.rn.f32.s32 fox, oxv;

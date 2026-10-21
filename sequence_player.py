@@ -324,11 +324,14 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     gamma_clips = collect_gamma_clips(tl.clips_by_track, track_order)
     brightness_clips = collect_brightness_clips(tl.clips_by_track, track_order)
     contrast_clips = collect_contrast_clips(tl.clips_by_track, track_order)
+    # BUILD 219: rotate keyframe clips (snapshot[13])
+    from keyframe import collect_rotate_clips
+    rotate_clips = collect_rotate_clips(tl.clips_by_track, track_order)
     # return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
     #         proxies, opacity_clips, crop_x_clips, crop_y_clips)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
-            gamma_clips, brightness_clips, contrast_clips)
+            gamma_clips, brightness_clips, contrast_clips, rotate_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -668,6 +671,9 @@ class SequencePlayer(QWindow):
         gamma_clips = snapshot[10] if len(snapshot) >= 11 else []
         brightness_clips = snapshot[11] if len(snapshot) >= 12 else []
         contrast_clips = snapshot[12] if len(snapshot) >= 13 else []
+        # BUILD 219: rotate keyframes; layer items gain rotate degrees ([14])
+        rotate_clips = snapshot[13] if len(snapshot) >= 14 else []
+        from keyframe import rotate_degrees_for_link
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -717,9 +723,12 @@ class SequencePlayer(QWindow):
                         brightness_clips, link_id, frame, clip_order)
                     contrast = color_value_for_link(
                         contrast_clips, link_id, frame, clip_order)
+                    rotate = rotate_degrees_for_link(
+                        rotate_clips, link_id, frame, clip_order)
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
                                    pos_dy, (clip[0], path), orig_size, opacity,
-                                   crop_x, crop_y, gamma, brightness, contrast))
+                                   crop_x, crop_y, gamma, brightness, contrast,
+                                   rotate))
                 break
         return layers
 
@@ -825,7 +834,7 @@ class SequencePlayer(QWindow):
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
                pos_dx=None, pos_dy=None, orig_size=None, opacity=None,
                crop_x=None, crop_y=None, gamma=None, brightness=None,
-               contrast=None):
+               contrast=None, rotate=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -895,6 +904,19 @@ class SequencePlayer(QWindow):
         k_ = _num(contrast, 1.0, 0.0, 5.0)
         cflags = ((1 if k_ != 1.0 else 0) | (2 if b_ != 0.0 else 0)
                   | (4 if g_ != 1.0 else 0))
+        # BUILD 219: rotate keyframe in degrees (None = 0), positive =
+        # clockwise on screen, about the layer center (sequence center plus
+        # pos_dx / pos_dy). The kernel gets cos / sin and samples the source
+        # at the inverse rotation. Multiples of 90 degrees use exact 0 / +-1
+        # so quarter turns map whole pixels; 0 passes cos 1, sin 0, which
+        # the kernel's mul / fma ordering keeps bit-exact with no rotate.
+        rot = _num(rotate, 0.0, -1.0e9, 1.0e9) % 360.0
+        if rot % 90.0 == 0.0:
+            rot_cs = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0),
+                      (0.0, -1.0))[int(rot // 90.0) % 4]
+        else:
+            rad = math.radians(rot)
+            rot_cs = (math.cos(rad), math.sin(rad))
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -915,7 +937,8 @@ class SequencePlayer(QWindow):
         vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
                  ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y,
                  opacity_f, crops[0], crops[1], ctypes.c_uint32(cflags),
-                 ctypes.c_float(k_), ctypes.c_float(b_), ctypes.c_float(1.0 / g_)]
+                 ctypes.c_float(k_), ctypes.c_float(b_), ctypes.c_float(1.0 / g_),
+                 ctypes.c_float(rot_cs[0]), ctypes.c_float(rot_cs[1])]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -1335,6 +1358,7 @@ class SequencePlayer(QWindow):
             gamma = layer[11] if len(layer) > 11 else None     # BUILD 154
             brightness = layer[12] if len(layer) > 12 else None
             contrast = layer[13] if len(layer) > 13 else None
+            rotate = layer[14] if len(layer) > 14 else None    # BUILD 219
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
@@ -1342,7 +1366,8 @@ class SequencePlayer(QWindow):
                                 scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
                                 orig_size=orig_size, opacity=opacity,
                                 crop_x=crop_x, crop_y=crop_y,
-                                gamma=gamma, brightness=brightness, contrast=contrast)
+                                gamma=gamma, brightness=brightness, contrast=contrast,
+                                rotate=rotate)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -1356,7 +1381,8 @@ class SequencePlayer(QWindow):
                             scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
                             orig_size=orig_size, opacity=opacity,
                             crop_x=crop_x, crop_y=crop_y,
-                            gamma=gamma, brightness=brightness, contrast=contrast)
+                            gamma=gamma, brightness=brightness, contrast=contrast,
+                            rotate=rotate)
                 continue
             dec = self._decoder(dkey, frame)
             nxt = self.dec_next.get(dkey)
@@ -1407,7 +1433,8 @@ class SequencePlayer(QWindow):
                         scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
                         orig_size=orig_size, opacity=opacity,
                         crop_x=crop_x, crop_y=crop_y,
-                        gamma=gamma, brightness=brightness, contrast=contrast)
+                        gamma=gamma, brightness=brightness, contrast=contrast,
+                        rotate=rotate)
         self._sync()
         self._target = None
         if target is self.dst:

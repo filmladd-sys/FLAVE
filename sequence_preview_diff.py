@@ -50,7 +50,8 @@ def _bracket(pts, f, d=0):
 
 class _Effect(object):
     # One effect type (scale / position X / position Y / opacity / crop_x /
-    # crop_y, BUILD 147; gamma / brightness / contrast, BUILD 154): linked
+    # crop_y, BUILD 147; gamma / brightness / contrast, BUILD 154; rotate,
+    # BUILD 219): linked
     # keyframe clips indexed by link_id, as keyframe._pick_above_keyframe
     def __init__(self, clips):
         self.by_link = {}
@@ -97,8 +98,11 @@ class SnapshotIndex(object):
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7, 8, 9)]
         # BUILD 154: + gamma / brightness / contrast (snap[10], [11], [12])
+        # self.effects = [_Effect(snap[i] if len(snap) > i else [])
+        #                 for i in (2, 3, 5, 7, 8, 9, 10, 11, 12)]
+        # BUILD 219: + rotate (snap[13])
         self.effects = [_Effect(snap[i] if len(snap) > i else [])
-                        for i in (2, 3, 5, 7, 8, 9, 10, 11, 12)]
+                        for i in (2, 3, 5, 7, 8, 9, 10, 11, 12, 13)]
         any_solo = any(solo for _t, _e, solo, _k in rows)
         self.tracks = []    # bottom first: (kind, order, starts, clips, sorted)
         for track_id, enabled, solo, kind in reversed(rows):

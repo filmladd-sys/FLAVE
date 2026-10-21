@@ -17,8 +17,10 @@ from PySide6.QtWidgets import (
 # KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
 #                        "crop_x", "crop_y")
 # BUILD 154: gamma / brightness / contrast (color, CUDA blend only)
+# BUILD 219: rotate (degrees, default 0, CUDA blend only)
 KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
-                       "crop_x", "crop_y", "gamma", "brightness", "contrast")
+                       "crop_x", "crop_y", "gamma", "brightness", "contrast",
+                       "rotate")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -32,6 +34,7 @@ KEYFRAME_TYPE_CHOICES = (
     ("Gamma", "gamma"),               # BUILD 154
     ("Brightness", "brightness"),     # BUILD 154
     ("Contrast", "contrast"),         # BUILD 154
+    ("Rotate", "rotate"),             # BUILD 219
 )
 
 # Value range per stored type (others unbounded). Volume and opacity are
@@ -42,6 +45,10 @@ KEYFRAME_TYPE_CHOICES = (
 KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0),
                     "gamma": (0.1, 5.0), "brightness": (-100.0, 100.0),
                     "contrast": (0.0, 5.0)}
+# BUILD 219: rotate is degrees and unbounded (any angle; 360 = a full
+# turn, so keys like 0 -> 720 spin twice). Its Add / Edit Key spin box
+# steps 1 degree; every other type steps 0.1.
+KEY_VALUE_STEPS = {"rotate": 1.0}
 
 
 def clamp_key_value(stored_type, value):
@@ -305,6 +312,19 @@ def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
     return out
 
 
+def rotate_degrees_for_link(rotate_clips, clip_link_id, frame, clip_order):
+    # BUILD 219: linked type-rotate keyframe above this clip (same rule as
+    # scale / position / crop): the angle in degrees (positive = clockwise
+    # on screen, about the layer center), or None when there is no effect.
+    keys = _pick_above_keyframe(rotate_clips, clip_link_id, frame, clip_order)
+    if keys is None:
+        return None
+    value = evaluate_keyframes(keys, frame)
+    if value is None:
+        return None
+    return float(value)
+
+
 def collect_scale_clips(clips_by_track, track_order=None):
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "scale")
@@ -353,6 +373,12 @@ def collect_contrast_clips(clips_by_track, track_order=None):
     # BUILD 154
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "contrast")
+
+
+def collect_rotate_clips(clips_by_track, track_order=None):
+    # BUILD 219
+    return _collect_keyframe_clips_of_type(
+        clips_by_track, track_order, "rotate")
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
@@ -663,7 +689,7 @@ def persist_keyframe_link_id(cur, clip_mem_id, link_id):
 
 
 class AddKeyframeClipDialog(QDialog):
-    # Name + type (X / Y / Scale / ... / X Crop / Y Crop) + Add
+    # Name + type (X / Y / Scale / ... / X Crop / Y Crop / ... / Rotate) + Add
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Keyframe Clip")
@@ -776,7 +802,7 @@ class AddKeyDialog(QDialog):
                                       (-1000000000.0, 1000000000.0))
         self.spin.setRange(lo, hi)
         self.stored_type = stored_type
-        self.spin.setSingleStep(0.1)
+        self.spin.setSingleStep(KEY_VALUE_STEPS.get(stored_type or "", 0.1))
         if initial is not None:
             self.spin.setValue(float(initial))
         row.addWidget(self.spin)
@@ -796,6 +822,7 @@ class AddKeyDialog(QDialog):
         self.value_label.setText("%s:" % label)
         lo, hi = KEY_VALUE_RANGES.get(stored, (-1000000000.0, 1000000000.0))
         self.spin.setRange(lo, hi)
+        self.spin.setSingleStep(KEY_VALUE_STEPS.get(stored, 0.1))
         if self._defaults is not None:
             try:
                 self.spin.setValue(float(self._defaults(stored)))
@@ -859,7 +886,8 @@ def default_key_value(timeline, stored_type):
     # BUILD 154: gamma 1.0, contrast 1.0 (no change); brightness 0 below
     if stored_type in ("gamma", "contrast"):
         return 1.0
-    # BUILD 147: crop_x / crop_y = 0 (no crop); others 0 as before
+    # BUILD 147: crop_x / crop_y = 0 (no crop); BUILD 219: rotate = 0
+    # (upright); others 0 as before
     return 0.0
 
 
