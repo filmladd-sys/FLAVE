@@ -367,7 +367,8 @@ def add_caption(self, track_id, click_frame):
     self._after_clip_change(f"Added caption at frame {start_frame}")
 
 def edit_caption(self, clip):
-    # Edit: dialog filled from the captions row; OK saves the changes
+    # Edit: dialog filled from the captions row; OK saves the changes as one
+    # undo step (nothing is recorded on Cancel or when no field changed)
     from caption_edit import CaptionEditDialog
     cap_id = -clip[0]
     try:
@@ -391,6 +392,13 @@ def edit_caption(self, clip):
     v = dlg.values()
     if v is None:
         return
+    # Nothing changed: no write, no undo step
+    old = dict(zip(keys, row))
+    if all(v.get(k) == old[k] for k in keys):
+        return
+    # One undo step for the whole dialog save (like the in-place text edit)
+    from undo import push_undo
+    push_undo(self._project_db(), "Edit caption")
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
