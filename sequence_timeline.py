@@ -80,6 +80,17 @@ from PySide6.QtGui import (
 # BUILD 138: debounce after the last completed edit before the audio state
 # check (which also starts the background mix); quick edits -> one mix
 AUDIO_SETTLE_MS = 500
+# BUILD 244: Play A/V lock. Audio position is the master clock. The tick
+# used to show one queued frame per tick (the frame after the last one
+# shown), so when ticks plus present ran slower than the frame rate the
+# video fell behind the audio and never caught up. Now: (1) each tick, if
+# the next frame is behind the due frame and the due frame is decoded, it
+# jumps to the due frame (older queued frames dropped); (2) every
+# RESYNC_INTERVAL_S, if the next frame is still behind the due frame, the
+# cursor is moved to the due frame even when it is not decoded yet (the
+# tick then fills at due). Ahead of the clock -> the current frame is held
+# until the clock reaches the next one (no stepping back, no decode).
+RESYNC_INTERVAL_S = 1.0
 
 # BUILD 158 no-track-highlight style (_TRACK_STRIP_STATES, _plain_option,
 # _NoTrackHighlightStyle, _track_table_style): BUILD 161 moved it to
@@ -1878,6 +1889,7 @@ class SequenceTimeline(QMainWindow):
         self._play_last_shown = None
         self._play_audio_clock = False
         self._play_prime_tries = 0
+        self._play_resync_t = None      # BUILD 244: first resync 1 s after the first frame
         self._playing = True
         self._play_timer.stop()
         self._play_prime_once()
@@ -1980,6 +1992,22 @@ class SequenceTimeline(QMainWindow):
         due = int(clock)
         batch = self._play_batch_n()
 
+        # BUILD 244: periodic resync (see RESYNC_INTERVAL_S). _play_cursor
+        # is the next frame to show; behind = it is before the due frame
+        if self._play_audio_clock:
+            now = time.perf_counter()
+            last_sync = getattr(self, "_play_resync_t", None)
+            if last_sync is None:
+                self._play_resync_t = now
+            elif now - last_sync >= RESYNC_INTERVAL_S:
+                self._play_resync_t = now
+                if self._play_cursor < due:
+                    try:
+                        player.play_drop_before(due)
+                    except Exception:
+                        pass
+                    self._play_cursor = due
+
         # Fill-ahead: top up the queue toward due + one batch
         try:
             hi = player.play_queue_hi()
@@ -1996,6 +2024,18 @@ class SequenceTimeline(QMainWindow):
 
         if self._play_cursor > due:
             return
+
+        # BUILD 244: per-tick catch-up. When the next frame is already
+        # behind the due frame and the due frame is decoded, jump to it
+        # (older queued frames are dropped) instead of showing the late
+        # frames one per tick, which never closes the gap
+        if self._play_audio_clock and self._play_cursor < due:
+            try:
+                if player.play_has(due):
+                    player.play_drop_before(due)
+                    self._play_cursor = due
+            except Exception:
+                pass
 
         shown = None
         if player.play_has(self._play_cursor):
