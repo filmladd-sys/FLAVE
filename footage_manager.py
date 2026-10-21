@@ -394,6 +394,17 @@ class FootageManager(QMainWindow):
         QMessageBox.information(self, "Replace", f"Replace stub for id {footage_id}")
 
     def _remove_footage(self, footage_id):
+        # BUILD 234: the only removal path (row context menu Remove; no menu
+        # item or Delete key). Refused while any Generate Captions run is active
+        try:
+            from sequence_timeline_captions import any_caption_job_active
+            busy = any_caption_job_active()
+        except Exception:
+            busy = False
+        if busy:
+            QMessageBox.information(self, "Remove", "Generate Captions is running; "
+                                    "try again when it is done.")
+            return
         reply = QMessageBox.question(
             self,
             "Remove",

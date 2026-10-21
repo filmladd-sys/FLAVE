@@ -245,6 +245,11 @@ def caption_job_active(sequence_id):
     # True while a Generate Captions run on that sequence has its window open
     return any(sid == int(sequence_id) for sid, _cid in _active)
 
+
+def any_caption_job_active():
+    # True while any Generate Captions run (any sequence) has its window open
+    return bool(_active)
+
 def _gen_bridge(self):
     # One QObject per timeline; done(clip_id, result, error) and
     # stage(clip_id, name, a, b) are queued from the worker thread to the
