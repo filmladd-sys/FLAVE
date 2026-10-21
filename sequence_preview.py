@@ -9,15 +9,20 @@ import sqlite3
 import threading
 
 
+def project_name(project_path):
+    # ProjectName: the project db file name without its extension
+    # (C:\Videos\test7.db -> test7)
+    return os.path.splitext(os.path.basename(os.path.abspath(project_path)))[0]
+
+
 def temp_file_path(project_path, kind, ext, sequence_id=None):
     # BUILD 223: the one naming rule for FLAVE's temp / cache files next to
     # the project file. ProjectName = the project db file name without its
     # extension. Per sequence: {ProjectName}_{sequence_id}_{Kind}.{ext};
     # per project (sequence_id None): {ProjectName}_{Kind}.{ext}.
     # C:\Videos\test7.db, 3, "Preview", "db" -> C:\Videos\test7_3_Preview.db
-    path = os.path.abspath(project_path)
-    folder = os.path.dirname(path)
-    name = os.path.splitext(os.path.basename(path))[0]
+    folder = os.path.dirname(os.path.abspath(project_path))
+    name = project_name(project_path)
     if sequence_id is not None:
         name = "%s_%d" % (name, int(sequence_id))
     return os.path.join(folder, "%s_%s.%s" % (name, kind, ext))

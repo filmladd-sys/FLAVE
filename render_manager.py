@@ -92,19 +92,29 @@ def _sanitize(name):
         return s.strip(" ._") or "sequence"
 
 
-def default_output_name(sequence_name):
-    return "%s_v01.mp4" % _sanitize(sequence_name)
-
-
-def default_output_path(sequence_name, project_db):
-    # BUILD 117: project folder + '<name>_v01.mp4', shown with forward
-    # slashes (C:/Videos/Projects/Sequence01_v01.mp4); Windows and ffmpeg
-    # accept them. Bare name if there is no project path.
-    name = default_output_name(sequence_name)
+def next_output_path(project_db, sequence_id, sequence_name=""):
+    # BUILD 224: default render output, in the project file's folder:
+    # {ProjectName}_{sequence_id}_vNN.mp4 with NN = 1 + the highest vNN
+    # already in that folder for this project + sequence (case-insensitive;
+    # gaps are not reused; at least 2 digits, v100 after v99). Shown with
+    # forward slashes (C:/Videos/test7_3_v02.mp4); Windows and ffmpeg accept
+    # them. No project path: bare '<sequence name>_v01.mp4'.
     if not project_db:
-        return name
+        return "%s_v01.mp4" % _sanitize(sequence_name)
+    import re
+    from sequence_preview import project_name
     folder = os.path.dirname(os.path.abspath(project_db))
-    return os.path.join(folder, name).replace("\\", "/")
+    base = "%s_%d" % (project_name(project_db), int(sequence_id))
+    pat = re.compile(r"^%s_v(\d+)\.mp4$" % re.escape(base), re.IGNORECASE)
+    top = 0
+    try:
+        for f in os.listdir(folder):
+            m = pat.match(f)
+            if m:
+                top = max(top, int(m.group(1)))
+    except OSError:
+        pass
+    return os.path.join(folder, "%s_v%02d.mp4" % (base, top + 1)).replace("\\", "/")
 
 
 def resolve_output_path(text, project_db):
@@ -651,7 +661,10 @@ def _make_window_class():
                 project_db = timeline._project_db()
             except Exception:
                 project_db = ""
-            self.out_edit = QLineEdit(default_output_path(self.seq_name, project_db))
+            # BUILD 224: next free {ProjectName}_{sequence_id}_vNN.mp4; refilled
+            # by refresh_output_path (window shown again, render finished)
+            self.out_edit = QLineEdit(
+                next_output_path(project_db, self.sequence_id, self.seq_name))
             self.out_edit.setToolTip("A bare name or relative path is saved in the "
                                      "project folder; an absolute path is used as is.")
             form.addRow("Output", self.out_edit)
@@ -717,6 +730,18 @@ def _make_window_class():
             self.resize(520, 330)
 
         # ---- render start (GUI thread)
+
+        def refresh_output_path(self):
+            # BUILD 224: put the next free version in the Output field
+            # (replaces any typed path); not while a render runs
+            if self.job is not None:
+                return
+            try:
+                project_db = self.timeline._project_db()
+            except Exception:
+                project_db = ""
+            self.out_edit.setText(
+                next_output_path(project_db, self.sequence_id, self.seq_name))
 
         def _set_busy(self, busy, text=""):
             self.render_btn.setEnabled(not busy)
@@ -819,6 +844,8 @@ def _make_window_class():
             self._user_cancel = False
             if ok:
                 self._set_busy(False, msg)
+                # the next render suggests the next version
+                self.refresh_output_path()
             else:
                 self._set_busy(False, "Render failed.")
                 from proxy_manager import show_message
@@ -859,6 +886,9 @@ def open_render_manager(timeline):
             _window_class.append(_make_window_class())
         win = _window_class[0](timeline)
         _open_windows[sid] = win
+    else:
+        # BUILD 224: opened again: suggest the next free version
+        win.refresh_output_path()
     win.show()
     win.raise_()
     win.activateWindow()
