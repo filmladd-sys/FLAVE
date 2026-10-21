@@ -125,6 +125,8 @@ class PreviewWorker(object):
             if idle_release:
                 _release_headless()
                 continue
+            if plog.active():
+                plog.log("worker: woke for gen %d" % gen)     # BUILD 248
             try:
                 self._pass(target, gen)
             except Exception as e:
@@ -160,7 +162,11 @@ class PreviewWorker(object):
         import sequence_player
         project, sequence_id, center, total, snapshot, run = target
         # Queued dirty marks from edits, written on this thread
+        t_q = time.perf_counter()
         apply_dirty_queue()
+        if plog.active():
+            plog.log("worker: dirty queue written (%.3fs)" % (
+                time.perf_counter() - t_q))     # BUILD 248
         if total <= 0:
             return
         if _refresh_all[0] or _play_priority[0]:

@@ -6,6 +6,7 @@
 import math
 import os
 import sqlite3
+import time
 from sequence_timeline_ruler import (
     CLIPS_COL, RULER_HEIGHT, ZOOM_MIN_PPF, ZOOM_MAX_PPF, ZOOM_STEP, WHEEL_ZOOM_STEP,
     RulerHeader, clamp_zoom, ruler_label_interval, ruler_label_text,
@@ -550,16 +551,24 @@ class SequenceTimeline(QMainWindow):
         # BUILD 169: the audio mix thread starts first, then runs alongside
         # the image pass
         self._audio_auto_failed = False
+        import preview_log      # BUILD 248: F5 startup timing (GUI thread)
+        t0 = time.perf_counter()
         self._audio_mix_kick()
+        a_s = time.perf_counter() - t0
         try:
             from sequence_preview_worker import set_refresh_all
             set_refresh_all(True)
         except Exception as e:
             print(f"Refresh preview failed: {e}")
+        preview_log.log("gui: audio mix kick (%.3fs, before the request)" % a_s)
         # BUILD 172: window up (and painted) before the retarget, so it
         # shows even while the refresh pass keeps the GPU busy
+        t0 = time.perf_counter()
         self._show_refresh_dialog()
+        preview_log.log("gui: refresh window shown (%.3fs)" % (
+            time.perf_counter() - t0))
         self._retarget_preview(force=True)
+        preview_log.log("gui: refresh_preview done")
         self.status_bar.showMessage("Refreshing preview", 3000)
 
     def _show_refresh_dialog(self):
@@ -2209,6 +2218,14 @@ class SequenceTimeline(QMainWindow):
         if not force and frame == getattr(self, "_preview_center", None):
             return
         cap_redraw = False      # BUILD 153: caption change seen
+        import preview_log      # BUILD 248: timing of a forced retarget
+        t_st = [time.perf_counter()]
+
+        def _step(name):
+            if force:
+                now = time.perf_counter()
+                preview_log.log("gui retarget: %s (%.3fs)" % (name, now - t_st[0]))
+                t_st[0] = now
         try:
             from sequence_preview_worker import get_worker
             from sequence_player import timeline_snapshot
@@ -2225,6 +2242,7 @@ class SequenceTimeline(QMainWindow):
                 else:
                     snap = timeline_snapshot(self)
                 self._preview_snapshot = snap
+                _step("timeline snapshot")
                 # BUILD 102: player caption overlay data, same refresh
                 old_caps = getattr(self, "_caption_snapshot", None)
                 try:
@@ -2232,6 +2250,7 @@ class SequenceTimeline(QMainWindow):
                     self._caption_snapshot = caption_snapshot(self)
                 except Exception:
                     self._caption_snapshot = None
+                _step("caption snapshot")
                 if (self._caption_snapshot or []) != (old_caps or []):
                     # Redraw the shown frame so a caption edit appears now
                     # BUILD 153: after the dirty marks (below), once
@@ -2241,6 +2260,7 @@ class SequenceTimeline(QMainWindow):
                                   self.total_frames(), snap,
                                   getattr(self, "fps", None))
             self._preview_center = frame
+            _step("worker retarget")
             # BUILD 139: the frames this edit changes, from the snapshot
             # before vs after (same data the worker composites from): only
             # those go dirty. A failure marks everything (safe).
@@ -2260,6 +2280,7 @@ class SequenceTimeline(QMainWindow):
                 except Exception as e:
                     print(f"Mile markers failed: {e}")
                     new_ml = None
+                _step("mile marker index built")
             if force and old_snap is not None and old_snap is not snap:
                 try:
                     from mile_markers import diff_video
@@ -2275,6 +2296,8 @@ class SequenceTimeline(QMainWindow):
                     print(f"Preview diff failed: {e}")
                     from sequence_preview_diff import WHOLE
                     diff, relocs = [WHOLE], []
+                _step("marker diff: %d dirty spans, %d relocates" % (
+                    len(diff), len(relocs)))
             if new_ml is not None:
                 self._preview_markers = new_ml
             if relocs:
@@ -2285,6 +2308,7 @@ class SequenceTimeline(QMainWindow):
                     # print(f"Preview relocate failed: {e}")
                     from sequence_preview_diff import _merge
                     diff = _merge(list(diff) + [(a + d, b + d) for a, b, d in relocs])
+                _step("relocate queued")
             # BUILD 146: no per-edit shift plan any more (the marker diff
             # finds pure moves); a stale one from an older path is dropped
             pending = getattr(self, "_preview_pending_shift", None)
@@ -2316,6 +2340,7 @@ class SequenceTimeline(QMainWindow):
             if diff:
                 from sequence_preview import FramesMarkDirty
                 FramesMarkDirty(self._project_db(), self.sequence_id, diff)
+                _step("dirty marks queued")
             remark = getattr(self, "_preview_remark", None)
             if force and remark:
                 self._preview_remark = []
@@ -2335,6 +2360,7 @@ class SequenceTimeline(QMainWindow):
                 if any(int(a) <= frame <= int(b) for a, b in spans):
                     cap_redraw = False
                     self._redraw_tick(frame, snap)
+            _step("end (tick redraw, wake)")
         except Exception as e:
             print(f"Preview worker retarget failed: {e}")
         if cap_redraw:
