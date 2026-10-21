@@ -239,18 +239,22 @@ def edit_caption(self, clip):
 # ---- Generate Captions (BUILD 225): audio clip right-click
 
 def _gen_bridge(self):
-    # One QObject per timeline; done(clip_id, result, error) is queued from
-    # the worker thread to the GUI thread
+    # One QObject per timeline; done(clip_id, result, error) and
+    # stage(clip_id, name, a, b) are queued from the worker thread to the
+    # GUI thread
     br = getattr(self, "_caption_gen_bridge", None)
     if br is None:
         from PySide6.QtCore import QObject, Signal
 
         class _Bridge(QObject):
             done = Signal(int, object, str)
+            stage = Signal(int, str, float, float)
 
         br = _Bridge(self)
         br.done.connect(lambda cid, res, err: _finish_generate(self, cid, res, err),
                         Qt.QueuedConnection)
+        br.stage.connect(lambda cid, name, a, b: _on_stage(self, cid, name, a, b),
+                         Qt.QueuedConnection)
         self._caption_gen_bridge = br
         self._caption_gen_jobs = {}
     return br
@@ -321,13 +325,32 @@ def generate_captions(self, clip):
         info["allow_download"] = True
     import threading
     cancel = threading.Event()
-    self._caption_gen_jobs[cid] = (info, cancel)
+    state = {}
+    job = {"info": info, "cancel": cancel, "state": state, "stage": "",
+           "cancelled": False}
+    self._caption_gen_jobs[cid] = job
+    _open_progress(self, cid, job)
     br = self._caption_gen_bridge
     fn = getattr(self, "_caption_transcribe_fn", None)   # tests
 
-    def work():
+    def emit(name, a=0.0, b=0.0):
         try:
-            res, err = cg.generate(info, cancel, fn), ""
+            br.stage.emit(cid, name, float(a), float(b))
+        except RuntimeError:
+            pass   # timeline closed
+
+    def work():
+        # BUILD 232: model download (after Yes) as its own step, then the
+        # local-only transcription
+        try:
+            if info["allow_download"]:
+                emit("download")
+                cg.download_model_files(cg.WHISPER_MODEL, state, cancel)
+                info["allow_download"] = False
+                emit("downloaded")
+            res, err = cg.generate(info, cancel, fn,
+                                   progress=lambda a, b: emit("progress", a, b),
+                                   stage=emit), ""
         except cg.CaptionGenError as e:
             res, err = None, str(e) or "Transcription failed."
         except Exception as e:
@@ -338,9 +361,121 @@ def generate_captions(self, clip):
             pass   # timeline closed
 
     threading.Thread(target=work, name="GenerateCaptions", daemon=True).start()
-    self.status_bar.showMessage("%s captions for %s ..." % (
-        "Downloading the Whisper model and generating" if info["allow_download"]
-        else "Generating", info["basename"] or "clip"))
+    self.status_bar.showMessage("Generating captions for %s ..." % (
+        info["basename"] or "clip"))
+
+
+def _mmss(seconds):
+    s = max(0, int(seconds))
+    return "%02d:%02d" % (s // 60, s % 60)
+
+
+def _open_progress(self, cid, job):
+    # BUILD 232: one non-modal progress window for the whole run, under the
+    # timeline's menu bar (window_place key caption_progress). Text and bar
+    # per stage (_on_stage; the download bytes from a 250 ms timer); Cancel
+    # (or closing it) cancels the run (_cancel_generate)
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QProgressDialog
+    dlg = QProgressDialog("Reading audio...", "Cancel", 0, 0, self)
+    dlg.setWindowTitle("Generate Captions")
+    dlg.setWindowModality(Qt.NonModal)
+    dlg.setAutoClose(False)
+    dlg.setAutoReset(False)
+    dlg.setMinimumDuration(0)
+    dlg.setMinimumWidth(380)
+    dlg.canceled.connect(lambda: _cancel_generate(self, cid))
+    from window_place import place_under_parent
+    place_under_parent(dlg, self, "caption_progress")
+    timer = QTimer(dlg)
+    timer.setInterval(250)
+    timer.timeout.connect(lambda: _poll_download(self, cid))
+    job["dlg"], job["timer"] = dlg, timer
+    dlg.show()
+
+
+def _close_progress(job):
+    # Close the window without it counting as Cancel
+    job["timer"].stop()
+    dlg = job["dlg"]
+    try:
+        dlg.canceled.disconnect()
+    except (RuntimeError, TypeError):
+        pass
+    dlg.close()
+    dlg.deleteLater()
+
+
+def _poll_download(self, cid):
+    # Download stage: bytes from the tqdm hook (state["cur"]) or, without
+    # the hook, the size of the *.incomplete blob being written
+    job = (getattr(self, "_caption_gen_jobs", None) or {}).get(cid)
+    if job is None or job["cancelled"] or job["stage"] != "download":
+        return
+    import captions_generate as cg
+    st = job["state"]
+    total = st.get("total") or 0
+    if not total:
+        return
+    cur = st.get("cur", 0) if st.get("hook") else cg.incomplete_bytes()
+    done = min(total, st.get("done", 0) + cur)
+    mb = 1024.0 * 1024.0
+    dlg = job["dlg"]
+    dlg.setRange(0, 1000)
+    dlg.setValue(int(1000 * done / total))
+    dlg.setLabelText("Downloading Whisper model: %.0f of %.0f MB" % (done / mb, total / mb))
+
+
+def _on_stage(self, cid, name, a, b):
+    # Worker stage / progress -> progress window and status bar
+    job = (getattr(self, "_caption_gen_jobs", None) or {}).get(cid)
+    if job is None or job["cancelled"]:
+        return
+    dlg = job["dlg"]
+    clip = job["info"]["basename"] or "clip"
+    if name == "download":
+        job["stage"] = "download"
+        dlg.setRange(0, 0)
+        dlg.setLabelText("Downloading Whisper model...")
+        self.status_bar.showMessage("Downloading Whisper model...")
+        job["timer"].start()
+    elif name == "downloaded":
+        job["timer"].stop()
+        job["stage"] = "downloaded"
+        self.status_bar.showMessage("Whisper model downloaded")
+    elif name == "loading":
+        job["stage"] = "loading"
+        dlg.setRange(0, 0)
+        dlg.setLabelText("Loading Whisper model...")
+        self.status_bar.showMessage("Loading Whisper model...")
+    elif name in ("transcribing", "progress"):
+        if job["stage"] != "transcribing":
+            job["stage"] = "transcribing"
+            dlg.setRange(0, 1000)
+            self.status_bar.showMessage("Transcribing %s..." % clip)
+        total = b if b > 0 else job["info"]["length_frames"] / float(job["info"]["fps"] or 30.0)
+        dlg.setValue(int(1000 * min(1.0, a / total)) if total > 0 else 0)
+        dlg.setLabelText("Transcribing: %s of %s" % (_mmss(a), _mmss(total)))
+
+
+def _cancel_generate(self, cid):
+    # Cancel / window closed: the worker stops at its next check (between
+    # segments; a download aborts in the transfer when the tqdm hook is
+    # available, else that file finishes in the background); nothing is
+    # written. The job entry stays until the worker ends.
+    job = (getattr(self, "_caption_gen_jobs", None) or {}).get(cid)
+    if job is None or job["cancelled"]:
+        return
+    job["cancelled"] = True
+    job["cancel"].set()
+    _close_progress(job)
+    if job["stage"] == "download":
+        # huggingface_hub 1.x+ drops the partial file on a stopped download
+        # (older versions keep *.incomplete and resume); either way the
+        # model counts as not downloaded and the next run asks again
+        self.status_bar.showMessage("Whisper model download cancelled", 6000)
+    else:
+        self.status_bar.showMessage("Generate Captions cancelled", 4000)
 
 
 def _finish_generate(self, clip_id, result, error):
@@ -354,11 +489,16 @@ def _finish_generate(self, clip_id, result, error):
     job = (getattr(self, "_caption_gen_jobs", None) or {}).pop(int(clip_id), None)
     if job is None:
         return
-    info, _cancel = job
+    info = job["info"]
+    if job["cancelled"]:
+        return    # cancelled: window already closed, nothing is written
     if error:
+        _close_progress(job)
         self.status_bar.showMessage("Generate Captions failed", 3000)
         QMessageBox.warning(self, title, error)
         return
+    job["dlg"].setRange(0, 0)
+    job["dlg"].setLabelText("Adding captions...")
     try:
         now = _audio_clip_info(self, clip_id)
     except Exception:
@@ -366,6 +506,7 @@ def _finish_generate(self, clip_id, result, error):
     if (now is None or now["track_id"] != info["track_id"]
             or now["in_frame"] != info["in_frame"]
             or now["length_frames"] != info["length_frames"]):
+        _close_progress(job)
         QMessageBox.warning(self, title, "The audio clip was deleted or changed "
                             "while transcribing; no captions were added.")
         self.status_bar.showMessage("Generate Captions: clip changed", 3000)
@@ -374,7 +515,8 @@ def _finish_generate(self, clip_id, result, error):
     caps = cg.groups_to_frames(result.get("groups"), self.fps,
                                now["start_frame"], now["length_frames"])
     if not caps:
-        self.status_bar.showMessage("Generate Captions: no speech found", 4000)
+        _close_progress(job)
+        self.status_bar.showMessage("No speech found", 4000)
         return
     from sequence_timeline_link import link_group_sizes, effective_link
     from track_names import next_default_name, sequence_track_names
@@ -424,7 +566,9 @@ def _finish_generate(self, clip_id, result, error):
         finally:
             conn.close()
     except Exception as e:
+        _close_progress(job)
         QMessageBox.warning(self, title, "Could not add the captions: %s" % e)
         return
-    self._after_clip_change("Generated %d captions on %s (%s)" % (
+    _close_progress(job)
+    self._after_clip_change("Captions added: %d (%s, %s)" % (
         len(caps), name, result.get("device") or ""))

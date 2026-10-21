@@ -186,7 +186,128 @@ def model_present(name=WHISPER_MODEL):
         path = download_model(name, local_files_only=True)
     except Exception:
         return False
-    return bool(path) and os.path.isfile(os.path.join(path, "model.bin"))
+    # model.bin, config.json and tokenizer.json all on disk (a cancelled
+    # download can leave a snapshot with only some files; without
+    # tokenizer.json faster-whisper would fetch one from the hub)
+    return bool(path) and all(os.path.isfile(os.path.join(path, f)) for f in
+                              ("model.bin", "config.json", "tokenizer.json"))
+
+
+# BUILD 232: the files faster-whisper's download_model fetches
+MODEL_PATTERNS = ["config.json", "preprocessor_config.json", "model.bin",
+                  "tokenizer.json", "vocabulary.*"]
+
+
+def model_repo_id(name=WHISPER_MODEL):
+    # Hugging Face repo of a faster-whisper model name (its own table)
+    if "/" in name:
+        return name
+    from faster_whisper.utils import _MODELS
+    return _MODELS[name]
+
+
+def _hook_class(state, cancel):
+    # tqdm subclass for hf_hub_download(tqdm_class=): never prints; counts
+    # the current file's bytes into state["cur"] (n starts at the resumed
+    # size) and aborts the download (CaptionGenError) once cancel is set
+    from tqdm.std import tqdm
+
+    class _Hook(tqdm):
+        def __init__(self, *a, **k):
+            k["disable"] = True
+            super().__init__(*a, **k)
+            self.n = int(k.get("initial") or 0)
+            state["cur"] = self.n
+
+        def update(self, n=1):
+            if cancel is not None and cancel.is_set():
+                raise CaptionGenError("cancelled")
+            self.n += int(n or 0)
+            state["cur"] = self.n
+
+    return _Hook
+
+
+def incomplete_bytes(name=WHISPER_MODEL):
+    # Largest *.incomplete blob of the model's repo in the hub cache (the
+    # file being downloaded), 0 if none
+    try:
+        repo = model_repo_id(name)
+        blobs = os.path.join(model_cache_dir(),
+                             "models--" + repo.replace("/", "--"), "blobs")
+        sizes = [os.path.getsize(os.path.join(blobs, f)) for f in os.listdir(blobs)
+                 if f.endswith(".incomplete")]
+        return max(sizes) if sizes else 0
+    except Exception:
+        return 0
+
+
+def download_model_files(name=WHISPER_MODEL, state=None, cancel=None):
+    # Worker thread, after the user's Yes. Lists the repo's files
+    # (MODEL_PATTERNS, with sizes) and fetches each with hf_hub_download
+    # into the hub cache. state (dict,
+    # read by the GUI): total, done (bytes of finished files), cur (bytes of
+    # the current file), hook (True when hf_hub_download takes tqdm_class:
+    # cur is live and Cancel aborts the transfer; otherwise the GUI reads
+    # incomplete_bytes and a cancelled file finishes in the background).
+    # Raises CaptionGenError.
+    import fnmatch
+    import inspect
+    state = {} if state is None else state
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+        repo = model_repo_id(name)
+        info = HfApi().model_info(repo, files_metadata=True)
+        files = [(s.rfilename, int(s.size or 0)) for s in info.siblings
+                 if any(fnmatch.fnmatch(s.rfilename, p) for p in MODEL_PATTERNS)]
+    except CaptionGenError:
+        raise
+    except Exception as e:
+        raise CaptionGenError("Could not download the Whisper model:\n%s" % e)
+    hook = "tqdm_class" in inspect.signature(hf_hub_download).parameters
+    state.update({"total": sum(sz for _f, sz in files), "done": 0, "cur": 0,
+                  "hook": hook})
+    # Plain HTTP transfer, not hf_xet, for these calls: it stops on an
+    # exception from the progress hook (Cancel); hf_xet ignores those and
+    # keeps downloading. huggingface_hub 1.x+ deletes the partial
+    # *.incomplete file when a transfer stops (older versions resume it).
+    try:
+        from huggingface_hub import constants as hf_constants
+        old_xet = getattr(hf_constants, "HF_HUB_DISABLE_XET", None)
+        hf_constants.HF_HUB_DISABLE_XET = True
+    except Exception:
+        hf_constants, old_xet = None, None
+    try:
+        _download_files(repo, files, state, cancel, hook, hf_hub_download)
+    finally:
+        if hf_constants is not None:
+            if old_xet is None:
+                try:
+                    del hf_constants.HF_HUB_DISABLE_XET
+                except AttributeError:
+                    pass
+            else:
+                hf_constants.HF_HUB_DISABLE_XET = old_xet
+    if not model_present(name):
+        raise CaptionGenError("The Whisper model download is incomplete.")
+
+
+def _download_files(repo, files, state, cancel, hook, hf_hub_download):
+    for fname, size in files:
+        if cancel is not None and cancel.is_set():
+            raise CaptionGenError("cancelled")
+        state["cur"] = 0
+        kw = {"tqdm_class": _hook_class(state, cancel)} if hook else {}
+        try:
+            hf_hub_download(repo, fname, **kw)
+        except CaptionGenError:
+            raise
+        except Exception as e:
+            if cancel is not None and cancel.is_set():
+                raise CaptionGenError("cancelled")
+            raise CaptionGenError("Could not download the Whisper model:\n%s" % e)
+        state["done"] += size
+        state["cur"] = 0
 
 
 def _load_model(device, allow_download=False):
@@ -203,37 +324,51 @@ def _load_model(device, allow_download=False):
     return m
 
 
-def _run_whisper(model, audio, cancel):
+def _run_whisper(model, audio, cancel, progress=None):
+    # progress(seconds_done, seconds_total) after each segment
     segments, info = model.transcribe(audio, beam_size=WHISPER_BEAM_SIZE,
                                       word_timestamps=True, vad_filter=True)
+    total = len(audio) / float(SAMPLE_RATE)
     words = []
     for seg in segments:      # lazy: decoding happens while iterating
         if cancel is not None and cancel.is_set():
             raise CaptionGenError("cancelled")
         for w in (seg.words or []):
             words.append((float(w.start), float(w.end), w.word))
+        if progress is not None:
+            progress(min(total, float(seg.end)), total)
+    if cancel is not None and cancel.is_set():
+        raise CaptionGenError("cancelled")
     return words, getattr(info, "language", "") or ""
 
 
-def transcribe(audio, cancel=None, allow_download=False):
+def transcribe(audio, cancel=None, allow_download=False, progress=None, stage=None):
     # (words [(start_s, end_s, text)], language 2-letter, device used).
     # CUDA first (float16); any CUDA / cuDNN failure falls back to CPU int8.
     # Without allow_download a model missing from the cache is an error
-    # (nothing is downloaded).
+    # (nothing is downloaded). stage("loading") / stage("transcribing")
+    # before each step; progress as in _run_whisper.
     try:
         import faster_whisper  # noqa: F401
     except ImportError:
         raise MissingWhisper(INSTALL_HINT)
     if not allow_download and not model_present():
         raise CaptionGenError('The Whisper "%s" model is not downloaded.' % WHISPER_MODEL)
+    stage = stage or (lambda name: None)
     try:
-        words, lang = _run_whisper(_load_model("cuda", allow_download), audio, cancel)
+        stage("loading")
+        m = _load_model("cuda", allow_download)
+        stage("transcribing")
+        words, lang = _run_whisper(m, audio, cancel, progress)
         return words, lang, "cuda"
     except CaptionGenError:
         raise
     except Exception:
         _models.pop("cuda", None)
-    words, lang = _run_whisper(_load_model("cpu", allow_download), audio, cancel)
+    stage("loading")
+    m = _load_model("cpu", allow_download)
+    stage("transcribing")
+    words, lang = _run_whisper(m, audio, cancel, progress)
     return words, lang, "cpu"
 
 
@@ -254,18 +389,21 @@ def clip_audio(info, cancel=None):
     return audio
 
 
-def generate(info, cancel=None, transcribe_fn=None):
+def generate(info, cancel=None, transcribe_fn=None, progress=None, stage=None):
     # Worker-thread job: audio + transcription + grouping. Returns
     # {"groups": [(start_s, end_s, text)], "language": "eng", "device": ...}
     # (times from the clip's source in). info["allow_download"]: the user
-    # said Yes to the model download. transcribe_fn replaces transcribe
-    # (tests).
+    # said Yes to the model download. transcribe_fn(audio, cancel, progress)
+    # replaces transcribe (tests). progress / stage: see transcribe.
     audio = clip_audio(info, cancel)
     if transcribe_fn is not None:
-        words, lang, device = transcribe_fn(audio, cancel)
+        words, lang, device = transcribe_fn(audio, cancel, progress)
     else:
         words, lang, device = transcribe(audio, cancel,
-                                         bool(info.get("allow_download")))
+                                         bool(info.get("allow_download")),
+                                         progress, stage)
+    if cancel is not None and cancel.is_set():
+        raise CaptionGenError("cancelled")
     return {"groups": group_words(words),
             "language": LANGUAGE_639_2.get((lang or "").lower(), lang or "eng"),
             "device": device, "words": len(words)}

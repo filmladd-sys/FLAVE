@@ -32,7 +32,9 @@ says what it owns.
     `WARNING: numpy not installed ...` line at launch when it is missing.
   - `faster-whisper` -- optional, only for Generate Captions (audio clip
     right-click; `pip install faster-whisper`). The `small` model (about
-    460 MB) downloads on first use, after a Yes to a download prompt, to the
+    460 MB) downloads on first use, after a Yes to a download prompt (one
+    progress window shows download, model load and transcription, with
+    Cancel), to the
     `models` folder next to the
     FLAVE .py files (Project Manager sets HF_HOME there at startup). It runs on CUDA (float16)
     when ctranslate2 finds cuBLAS and cuDNN 9 for CUDA 12 (for example
