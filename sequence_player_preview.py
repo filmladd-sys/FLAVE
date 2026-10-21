@@ -112,12 +112,20 @@ def _prefetch(self, frames, snapshot, clips=None):
         if len(srcs) < 2 or srcs != list(range(srcs[0], srcs[0] + len(srcs))):
             continue
         dec = self._decoder(key, last.get(key))
-        if self.dec_next.get(key) != srcs[0]:
-            dec.seek_to_index(srcs[0])
+        # BUILD 240: only the part of the run inside the source; frames
+        # past its end are not prefetched (_build_dst skips those layers)
+        from sequence_player import (source_index_ok, is_out_of_range_error)
+        srcs = [s for s in srcs if source_index_ok(self, key, dec, s)]
+        if not srcs:
+            continue
         try:
+            if self.dec_next.get(key) != srcs[0]:
+                dec.seek_to_index(srcs[0])
             got = dec.get_batch_frames(len(srcs))
-        except Exception:
+        except Exception as e:
             self.dec_next.pop(key, None)
+            if is_out_of_range_error(e):
+                continue        # decoded per frame (and skipped) in _build_dst
             raise
         got = list(got or [])
         for k, f in enumerate(got):

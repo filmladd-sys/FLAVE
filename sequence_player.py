@@ -214,6 +214,40 @@ def map_source_frame(src_idx, ratio, proxy_frames=None):
     return max(0, idx)
 
 
+def source_frame_count(owner, key, dec):
+    # BUILD 240: frames the decoder's file holds (len(SimpleDecoder): the
+    # scanned count, need_scanned_stream_metadata=True), cached per
+    # decoder key; None when unknown (no pre-check then)
+    cache = getattr(owner, "_dec_frames", None)
+    if cache is None:
+        cache = owner._dec_frames = {}
+    if key not in cache:
+        try:
+            n = int(len(dec))
+        except Exception:
+            n = 0
+        cache[key] = n if n > 0 else None
+    return cache[key]
+
+
+def source_index_ok(owner, key, dec, src_frame):
+    # BUILD 240: False when src_frame is past the source (or negative): the
+    # layer is skipped, i.e. fully transparent, and lower layers show. The
+    # decoder is never asked for it, so it prints / raises nothing
+    n = source_frame_count(owner, key, dec)
+    return src_frame >= 0 and (n is None or src_frame < n)
+
+
+def is_out_of_range_error(exc):
+    # BUILD 240: fallback when the count was wrong: the decoder's own
+    # out-of-range report (IndexError, "Index N is out of range",
+    # "INVALID INDEX") is treated like a skipped layer, not a failure
+    if isinstance(exc, IndexError):
+        return True
+    text = str(exc).lower()
+    return "out of range" in text or "invalid index" in text
+
+
 def _pick_proxy(rows):
     # rows: [(mode, ...)] for one clip; the PROXY_MODE_PREFERENCE winner
     def rank(r):
@@ -760,6 +794,9 @@ class SequencePlayer(QWindow):
         self.dec_next.pop(key, None)
         self.dec_used.pop(key, None)
         self.dec_last.pop(key, None)
+        cache = getattr(self, "_dec_frames", None)
+        if cache is not None:
+            cache.pop(key, None)        # BUILD 240: frame count
         if dec is not None:
             # print(f"DECODER close {key}")
             del dec
@@ -1418,6 +1455,9 @@ class SequencePlayer(QWindow):
                             rotate=rotate, outline=outline)
                 continue
             dec = self._decoder(dkey, frame)
+            if not source_index_ok(self, dkey, dec, src_frame):
+                # BUILD 240: past the source's last frame: transparent layer
+                continue
             nxt = self.dec_next.get(dkey)
             last = self.dec_last.get(dkey)
             if (last is not None and last[0] == src_frame and last[2] is dec
@@ -1435,7 +1475,14 @@ class SequencePlayer(QWindow):
                 if 0 < skip <= DEC_SKIP_MAX:
                     count = skip + 1
                 elif nxt != src_frame:
-                    dec.seek_to_index(src_frame)
+                    try:
+                        dec.seek_to_index(src_frame)
+                    except Exception as e:
+                        self.dec_next.pop(dkey, None)
+                        self.dec_last.pop(dkey, None)
+                        if is_out_of_range_error(e):
+                            continue        # BUILD 240: transparent layer
+                        raise
                 if prefetched:
                     # In a batch pass: a new decode can hand this decoder's
                     # earlier (prefetched) frames back to its pool, so the
@@ -1443,9 +1490,11 @@ class SequencePlayer(QWindow):
                     _check(cudart.cudaStreamSynchronize(self.stream), "prefetch sync")
                 try:
                     batch = dec.get_batch_frames(count)
-                except Exception:
+                except Exception as e:
                     self.dec_next.pop(dkey, None)
                     self.dec_last.pop(dkey, None)
+                    if is_out_of_range_error(e):
+                        continue            # BUILD 240: transparent layer
                     raise
                 if not batch:
                     self.dec_next.pop(dkey, None)
