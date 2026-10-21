@@ -8,8 +8,9 @@ import sqlite3
 
 from PySide6.QtWidgets import (
     QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton, QLineEdit,
-    QFormLayout, QMessageBox
+    QFormLayout, QMessageBox, QHBoxLayout, QFileDialog
 )
+from PySide6.QtCore import QDir
 
 from proxy_manager import PROXY_PATH_KEY, get_proxy_path
 
@@ -48,7 +49,14 @@ class ProjectSettingsWindow(QMainWindow):
         layout = QVBoxLayout(central)
         form = QFormLayout()
         self.proxy_edit = QLineEdit(get_proxy_path(self.project_db))
-        form.addRow(QLabel("Proxy Path:"), self.proxy_edit)
+        # Browse... beside the field: folder picker that fills the text box
+        # (saved with Save like a typed path)
+        self.proxy_browse_btn = QPushButton("Browse...")
+        self.proxy_browse_btn.clicked.connect(self._browse_proxy_path)
+        proxy_row = QHBoxLayout()
+        proxy_row.addWidget(self.proxy_edit, 1)
+        proxy_row.addWidget(self.proxy_browse_btn)
+        form.addRow(QLabel("Proxy Path:"), proxy_row)
         layout.addLayout(form)
         layout.addStretch(1)
 
@@ -58,6 +66,18 @@ class ProjectSettingsWindow(QMainWindow):
         layout.addWidget(save_btn)
 
         self.setCentralWidget(central)
+
+    def _browse_proxy_path(self):
+        # Starts at the field's folder if it exists, else the project folder;
+        # a picked folder replaces the text (native separators), Cancel
+        # leaves it
+        start = self.proxy_edit.text().strip()
+        if not start or not os.path.isdir(start):
+            start = (os.path.dirname(os.path.abspath(self.project_db))
+                     if self.project_db else "")
+        folder = QFileDialog.getExistingDirectory(self, "Proxy Path", start)
+        if folder:
+            self.proxy_edit.setText(QDir.toNativeSeparators(folder))
 
     def _save(self):
         if not self.project_db:
