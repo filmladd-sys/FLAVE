@@ -415,9 +415,10 @@ def _copy_row(cur, table, row_id, changes):
 
 
 def _overwrite_keyframe_clip(cur, mem_id, st):
-    # Keyframe clip: cut at every piece edge with the slice path (keys by
-    # frame plus a boundary key each side, so the curve keeps its value on
-    # every kept frame), then delete the covered segments and their keys.
+    # Keyframe clip: cut at every piece edge with the slice path (BUILD
+    # 243: every piece keeps a copy of all the keys, so the curve keeps its
+    # value on every kept frame), then delete the covered segments and
+    # their keys.
     # Returns the kept pieces' mem ids in time order.
     from keyframe import slice_keyframe_clip_db, db_id_from_mem
     cuts = sorted({f for p in st["pieces"] for f in p

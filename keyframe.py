@@ -746,18 +746,17 @@ def persist_keyframe_clip_time(cur, clip, shift_keys=True):
 
 def slice_keyframe_clip_db(cur, clip_mem_id, split):
     # BUILD 132: split one keyframe clip at absolute sequence frame split
-    # (in_frame < split < out_frame). The clip keeps [in, split) and the
-    # keys before split; a new keyframe_clips row (same sequence, track,
-    # type, name and link_id) gets [split, out) and the keys at/after
-    # split. Keys store absolute frames, so nothing is re-based. A boundary
-    # key is added on each side holding the curve value there (left at
-    # split - 1, right at split) unless a key already sits on that frame,
-    # so evaluate_keyframes gives the same value on every frame as before.
+    # (in_frame < split < out_frame). The clip keeps [in, split); a new
+    # keyframe_clips row (same sequence, track, type, name and link_id)
+    # gets [split, out). BUILD 243: both pieces hold an exact copy of ALL
+    # the original keys, including keys outside the piece's own range
+    # (hidden), so each piece evaluates exactly like the original clip at
+    # every frame and a later trim or move can reveal them again. Keys
+    # store absolute sequence frames, so the copies are not re-based; no
+    # boundary keys are added. Every key table (keyframes, BUILD 222
+    # keyframe_border) and every key column is copied.
     # No commit / undo here (the caller owns the transaction and undo step).
     # Returns the new piece's mem id, or None when not sliceable.
-    # BUILD 222: a border clip's keys are keyframe_border rows; the same
-    # split applies, each boundary key holding every channel (px, r, g, b,
-    # a) at its interpolated value.
     db_id = db_id_from_mem(clip_mem_id)
     cur.execute(
         "SELECT sequence_id, track_id, type, link_id, in_frame, out_frame, name "
@@ -769,13 +768,6 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
     split = int(split)
     if not (int(in_f) < split < int(out_f)):
         return None
-    table = key_table_for_type(ktype)
-    cols = dict(KEY_TABLE_COLS)[table]
-    cur.execute(
-        "SELECT id, frame, %s FROM %s WHERE keyframe_clip_id = ? "
-        "ORDER BY frame, id" % (", ".join(cols), table), (db_id,))
-    rows = [(int(r[0]), int(r[1]), [float(v) for v in r[2:]])
-            for r in cur.fetchall()]
     cur.execute(
         "INSERT INTO keyframe_clips "
         "(sequence_id, track_id, type, link_id, in_frame, out_frame, name) "
@@ -784,23 +776,16 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
     new_db = cur.lastrowid
     cur.execute("UPDATE keyframe_clips SET out_frame = ? WHERE id = ?",
                 (split, db_id))
-    if rows:
-        def at(f):
-            return [evaluate_keyframes([(k, fr, v[i]) for k, fr, v in rows], f)
-                    for i in range(len(cols))]
-        left_val = at(split - 1)
-        right_val = at(split)
-        frames = set(k[1] for k in rows)
+    for table in key_tables(cur):
+        # every column but the row id and the owner, in key order
+        cur.execute("PRAGMA table_info(%s)" % table)
+        cols = [r[1] for r in cur.fetchall()
+                if r[1] not in ("id", "keyframe_clip_id")]
+        col_sql = ", ".join(cols)
         cur.execute(
-            "UPDATE %s SET keyframe_clip_id = ? "
-            "WHERE keyframe_clip_id = ? AND frame >= ?" % table,
-            (new_db, db_id, split))
-        ins = ("INSERT INTO %s (keyframe_clip_id, frame, %s) VALUES (?, ?, %s)"
-               % (table, ", ".join(cols), ", ".join("?" for _ in cols)))
-        if (split - 1) not in frames:
-            cur.execute(ins, [db_id, split - 1] + left_val)
-        if split not in frames:
-            cur.execute(ins, [new_db, split] + right_val)
+            "INSERT INTO %s (keyframe_clip_id, %s) SELECT ?, %s FROM %s "
+            "WHERE keyframe_clip_id = ? ORDER BY frame, id"
+            % (table, col_sql, col_sql, table), (new_db, db_id))
     return mem_id_from_db(new_db)
 
 

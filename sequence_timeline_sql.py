@@ -746,10 +746,11 @@ def slice_clip(self, clip, x_in_clips):
     # opened). Linked partners are sliced at the same timeline frame; the
     # left pieces keep the old link_id, the right pieces share a new one.
     # BUILD 132: keyframe clips (the clip itself or a linked partner) are
-    # split by keyframe.slice_keyframe_clip_db (keys by frame, a boundary
-    # key each side) instead of the footage path; captions' right pieces
-    # join the new right link too, and (BUILD 242) so do linked captions
-    # wholly right of the cut. Still one push_undo for the whole cut.
+    # split by keyframe.slice_keyframe_clip_db (BUILD 243: each piece keeps
+    # a copy of all the keys) instead of the footage path; captions' and
+    # keyframe clips' right pieces join the new right link too, and so do
+    # linked captions (BUILD 242) and keyframe clips (BUILD 243) wholly
+    # right of the cut. Still one push_undo for the whole cut.
     start, length = clip[2], clip[3]
     if length < 2:
         return
@@ -796,8 +797,11 @@ def slice_members_db(self, cur, members, split_frame, linked):
         if not (c_start < split_frame < c_start + c_len):
             # BUILD 242: a linked caption wholly right of the cut (start at
             # or after split_frame) joins the right pieces' new link;
-            # captions ending at or before it stay with the left pieces
-            if linked and is_caption_id(c[0]) and c_start >= split_frame:
+            # captions ending at or before it stay with the left pieces.
+            # BUILD 243: linked keyframe clips the same way (their keys
+            # are untouched)
+            if (linked and (is_caption_id(c[0]) or is_keyframe_clip_id(c[0]))
+                    and c_start >= split_frame):
                 right_other.append(c[0])
             continue
         track_id = self._clip_track_id(c)
