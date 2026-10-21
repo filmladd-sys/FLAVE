@@ -721,6 +721,11 @@ def delete_selected_clip(self):
         for cid in ids:
             table, row_id = clip_table_and_id(cid)
             cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+            if table == "keyframe_clips":
+                # BUILD 222: its keys go with it (keyframes or, for a
+                # border clip, keyframe_border rows; undo restores both)
+                from keyframe import delete_clip_keys
+                delete_clip_keys(cur, [row_id])
         prune_sequence_children(cur, seq_pairs)
         # Their markers go too (same undo snapshot)
         from markers import delete_markers
@@ -1252,8 +1257,9 @@ def delete_track_rows(cur, track_id):
                    "WHERE track_id = ?", (tid,))
     if kf_rows:
         marks = ",".join("?" for _ in kf_rows)
-        cur.execute("DELETE FROM keyframes WHERE keyframe_clip_id IN (%s)" % marks,
-                    [int(r[0]) for r in kf_rows])
+        # keyframes / keyframe_border rows (BUILD 222)
+        from keyframe import delete_clip_keys
+        delete_clip_keys(cur, [int(r[0]) for r in kf_rows])
         cur.execute("DELETE FROM keyframe_clips WHERE track_id = ?", (tid,))
         ranges += [(int(a), max(int(a), int(b) - 1)) for _i, a, b in kf_rows]
     cap_rows = _try("SELECT start_frame, length_frames FROM captions "

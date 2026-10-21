@@ -327,8 +327,9 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # BUILD 219: rotate keyframe clips (snapshot[13])
     from keyframe import collect_rotate_clips
     rotate_clips = collect_rotate_clips(tl.clips_by_track, track_order)
-    # BUILD 220: border outline width (snapshot[14]) and its color
-    # outline_r / _g / _b / _a keyframe clips (snapshot[15] .. [18])
+    # BUILD 220 / 222: border outline width (snapshot[14]) and its color
+    # r / g / b / a channels (snapshot[15] .. [18]), all from the linked
+    # type-border keyframe clips (keyframe.collect_outline_clips)
     from keyframe import collect_outline_clips
     outline_clips, outline_rgba_clips = collect_outline_clips(
         tl.clips_by_track, track_order)

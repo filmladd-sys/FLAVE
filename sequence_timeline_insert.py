@@ -34,7 +34,8 @@ def _not_in(column, ids):
 def insert_drop(tl, group):
     # group: the drag group (dicts with "clip"); the clips already hold
     # their drop positions in memory
-    from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
+    from keyframe import (is_keyframe_clip_id, persist_keyframe_clip_time,
+                          shift_clip_keys)
     from sequence_timeline_captions import clip_table_and_id
     from sequence_timeline_sql import slice_members_db
     moving = [m["clip"] for m in group]
@@ -84,8 +85,8 @@ def insert_drop(tl, group):
         for kid in kf_ids:
             cur.execute("UPDATE keyframe_clips SET in_frame = in_frame + ?, "
                         "out_frame = out_frame + ? WHERE id = ?", (span, span, kid))
-            cur.execute("UPDATE keyframes SET frame = frame + ? "
-                        "WHERE keyframe_clip_id = ?", (span, kid))
+            # keyframes / keyframe_border rows (BUILD 222)
+            shift_clip_keys(cur, kid, span)
         # The dragged clips at their drop positions (keyframe clips carry
         # their keys, as in a normal move)
         for c in moving:

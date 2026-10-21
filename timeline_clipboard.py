@@ -68,14 +68,19 @@ def copy_selection(tl):
             start, length = _start_len(table, row)
             keys = []
             if table == "keyframe_clips":
-                kcols = _columns(cur, "keyframes")
-                cur.execute("SELECT * FROM keyframes WHERE keyframe_clip_id = ?",
-                            (row_id,))
-                for kr in cur.fetchall():
-                    kd = dict(zip(kcols, kr))
-                    kd.pop("id", None)
-                    kd.pop("keyframe_clip_id", None)
-                    keys.append(kd)
+                # BUILD 222: from keyframes or (border clip) keyframe_border;
+                # each key dict remembers its table as "_table"
+                from keyframe import key_tables
+                for ktable in key_tables(cur):
+                    kcols = _columns(cur, ktable)
+                    cur.execute(f"SELECT * FROM {ktable} WHERE keyframe_clip_id = ?",
+                                (row_id,))
+                    for kr in cur.fetchall():
+                        kd = dict(zip(kcols, kr))
+                        kd.pop("id", None)
+                        kd.pop("keyframe_clip_id", None)
+                        kd["_table"] = ktable
+                        keys.append(kd)
             link_id = row.get("link_id")
             row.pop("id", None)
             from markers import marker_rows
@@ -276,11 +281,12 @@ def paste(tl, anchor, make_room):
                 delta = s - it["start"]
                 for kd in it["keys"]:
                     kd = dict(kd)
+                    ktable = kd.pop("_table", "keyframes")
                     kd["keyframe_clip_id"] = new_id
                     kd["frame"] = int(kd.get("frame", 0)) + delta
                     knames = list(kd)
                     cur.execute(
-                        f"INSERT INTO keyframes ({', '.join(knames)}) VALUES "
+                        f"INSERT INTO {ktable} ({', '.join(knames)}) VALUES "
                         f"({', '.join('?' for _ in knames)})",
                         [kd[k] for k in knames])
             elif table == "captions":
@@ -430,7 +436,9 @@ def _overwrite_keyframe_clip(cur, mem_id, st):
             kept.append(seg_mem)
             continue
         db_id = db_id_from_mem(seg_mem)
-        cur.execute("DELETE FROM keyframes WHERE keyframe_clip_id = ?", (db_id,))
+        # keyframes / keyframe_border rows (BUILD 222)
+        from keyframe import delete_clip_keys
+        delete_clip_keys(cur, [db_id])
         cur.execute("DELETE FROM keyframe_clips WHERE id = ?", (db_id,))
     return kept
 
@@ -456,8 +464,9 @@ def apply_overwrite(cur, state, ranges):
         if not pieces:
             # Same row delete as the Delete path (no second undo)
             if table == "keyframe_clips":
-                cur.execute("DELETE FROM keyframes WHERE keyframe_clip_id = ?",
-                            (row_id,))
+                # keyframes / keyframe_border rows (BUILD 222)
+                from keyframe import delete_clip_keys
+                delete_clip_keys(cur, [row_id])
             cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
             if table == "clips":
                 from markers import delete_markers

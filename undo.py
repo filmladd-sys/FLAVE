@@ -12,7 +12,8 @@ import time
 
 SNAP_TABLES = ("clips", "keyframe_clips", "keyframes", "tracks", "footage",
                "sequences", "captions", "Marker",
-               "sequence_children")   # BUILD 106: follows sequence clips
+               "sequence_children",   # BUILD 106: follows sequence clips
+               "keyframe_border")     # BUILD 222: border clip keys
 DEFAULT_STACK_MAX = 50
 WHOLE_RANGE = (0, 2 ** 40)
 

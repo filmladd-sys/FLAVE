@@ -3,7 +3,7 @@
 # frames where the composite (picture or sound) can change: every clip in /
 # out, every keyframe clip edge and key (scale, position X / Y, opacity,
 # volume; BUILD 147: crop_x / crop_y, BUILD 154: gamma / brightness /
-# contrast, BUILD 219: rotate, BUILD 220: outline width / color, all via
+# contrast, BUILD 219: rotate, BUILD 222: border px / color, all via
 # SnapshotIndex.effects), enable / disable, gain and proxy switches (attributes of a clip,
 # so they change at its in / out). Between two markers the structure is
 # constant (same clips, same keyframe interpolation segment); only the

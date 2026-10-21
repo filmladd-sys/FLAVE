@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QMessageBox, QDoubleSpinBox, QApplication, QInputDialog,
+    QWidget,
 )
 
 # Stored on keyframe_clips.type. BUILD 147: one type per keyframe clip;
@@ -18,13 +19,13 @@ from PySide6.QtWidgets import (
 #                        "crop_x", "crop_y")
 # BUILD 154: gamma / brightness / contrast (color, CUDA blend only)
 # BUILD 219: rotate (degrees, default 0, CUDA blend only)
-# BUILD 220: outline (border outline width in sequence px, 0 = off) and
-# outline_r / outline_g / outline_b / outline_a (its RGBA color 0..255,
-# 255 each when there is no such key); CUDA blend only
+# BUILD 222: border (border outline: width in sequence px plus an RGBA
+# color per key, CUDA blend only). Its keys are keyframe_border rows, not
+# keyframes rows (see BORDER_TYPE). It replaces the BUILD 220 outline /
+# outline_r / _g / _b / _a types, which are no longer offered.
 KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
                        "crop_x", "crop_y", "gamma", "brightness", "contrast",
-                       "rotate", "outline", "outline_r", "outline_g",
-                       "outline_b", "outline_a")
+                       "rotate", "border")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -39,11 +40,7 @@ KEYFRAME_TYPE_CHOICES = (
     ("Brightness", "brightness"),     # BUILD 154
     ("Contrast", "contrast"),         # BUILD 154
     ("Rotate", "rotate"),             # BUILD 219
-    ("Border Outline", "outline"),    # BUILD 220
-    ("Outline R", "outline_r"),       # BUILD 220
-    ("Outline G", "outline_g"),       # BUILD 220
-    ("Outline B", "outline_b"),       # BUILD 220
-    ("Outline A", "outline_a"),       # BUILD 220
+    ("Border", "border"),             # BUILD 222
 )
 
 # Value range per stored type (others unbounded). Volume and opacity are
@@ -53,16 +50,62 @@ KEYFRAME_TYPE_CHOICES = (
 # none), contrast 0..5 (1 = none); the blend clamps the same way
 KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0),
                     "gamma": (0.1, 5.0), "brightness": (-100.0, 100.0),
-                    "contrast": (0.0, 5.0),
-                    "outline": (0.0, 1000.0), "outline_r": (0.0, 255.0),
-                    "outline_g": (0.0, 255.0), "outline_b": (0.0, 255.0),
-                    "outline_a": (0.0, 255.0)}
+                    "contrast": (0.0, 5.0), "border": (0.0, 1000.0)}
 # BUILD 219: rotate is degrees and unbounded (any angle; 360 = a full
 # turn, so keys like 0 -> 720 spin twice). Its Add / Edit Key spin box
-# steps 1 degree; BUILD 220: the outline width and color types step 1
-# (whole pixels / color levels); every other type steps 0.1.
-KEY_VALUE_STEPS = {"rotate": 1.0, "outline": 1.0, "outline_r": 1.0,
-                   "outline_g": 1.0, "outline_b": 1.0, "outline_a": 1.0}
+# steps 1 degree; BUILD 222: border px steps 1 (whole pixels; its R, G, B,
+# A fields also step 1); every other type steps 0.1.
+KEY_VALUE_STEPS = {"rotate": 1.0, "border": 1.0}
+
+# BUILD 222: a "border" clip's keys live in keyframe_border (id,
+# keyframe_clip_id, frame, px, r, g, b, a; frame absolute like
+# keyframes.frame), every other type's in keyframes (id, keyframe_clip_id,
+# frame, value). Both are keyed by keyframe_clip_id, so a clip-level edit
+# (move, slice, delete, copy) runs the same statement on each key table
+# (only the clip's own table has its rows). In memory a border clip's keys
+# stay (key_id, frame, px) in entry[9], so draw / hit / drag / graph work
+# as for any type, and entry[11] maps key_id -> (r, g, b, a).
+BORDER_TYPE = "border"
+BORDER_RGBA_LABELS = ("R", "G", "B", "A")
+KEY_TABLE_COLS = (("keyframes", ("value",)),
+                  ("keyframe_border", ("px", "r", "g", "b", "a")))
+
+
+def key_table_for_type(stored_type):
+    return "keyframe_border" if stored_type == BORDER_TYPE else "keyframes"
+
+
+def key_tables(cur):
+    # Key tables present in this project (keyframe_border is created with
+    # new projects only, BUILD 222)
+    names = [t for t, _c in KEY_TABLE_COLS]
+    cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND "
+                "name IN (%s)" % ",".join("?" for _ in names), names)
+    have = set(r[0] for r in cur.fetchall())
+    return [t for t in names if t in have]
+
+
+def shift_clip_keys(cur, db_id, delta):
+    # Every key of keyframe clip db_id moves by delta frames
+    for table in key_tables(cur):
+        cur.execute("UPDATE %s SET frame = frame + ? WHERE keyframe_clip_id = ?"
+                    % table, (int(delta), int(db_id)))
+
+
+def delete_clip_keys(cur, db_ids):
+    # Every key of the keyframe clips db_ids
+    ids = [int(i) for i in db_ids]
+    if not ids:
+        return
+    for table in key_tables(cur):
+        cur.execute("DELETE FROM %s WHERE keyframe_clip_id IN (%s)"
+                    % (table, ",".join("?" for _ in ids)), ids)
+
+
+def border_rgba(clip, key_id):
+    # (r, g, b, a) of a border clip's key (255 each if unknown)
+    extra = clip[11] if len(clip) > 11 and isinstance(clip[11], dict) else {}
+    return extra.get(key_id, (255.0, 255.0, 255.0, 255.0))
 
 
 def clamp_key_value(stored_type, value):
@@ -123,6 +166,8 @@ def load_keyframe_clips(cur, sequence_id, clips):
     # Into clips_by_track like captions: list
     # [mem_id, None, start, length, title, enabled, solo, in_src, link_id,
     #  keys, type] where keys is [(key_id, absolute_frame, value), ...]
+    # BUILD 222: a border clip's entry also has [11] = {key_id: (r, g, b,
+    # a)}; its keys come from keyframe_border with value = px
     by_db = {}
     try:
         cur.execute(
@@ -140,6 +185,8 @@ def load_keyframe_clips(cur, sequence_id, clips):
         length = max(1, out_f - in_f)
         entry = [mem_id_from_db(db_id), None, in_f, length,
                  clip_title(name, ktype), 1, 0, 0, link_id, [], ktype]
+        if ktype == BORDER_TYPE:
+            entry.append({})
         clips.setdefault(track_id, []).append(entry)
         by_db[int(db_id)] = entry
     if not by_db:
@@ -157,6 +204,18 @@ def load_keyframe_clips(cur, sequence_id, clips):
         entry = by_db.get(int(db_id))
         if entry is not None:
             entry[9].append((int(key_id), int(frame), float(value)))
+    if "keyframe_border" not in key_tables(cur):
+        return
+    cur.execute(
+        "SELECT k.id, k.keyframe_clip_id, k.frame, k.px, k.r, k.g, k.b, k.a "
+        "FROM keyframe_border k JOIN keyframe_clips c "
+        "ON c.id = k.keyframe_clip_id "
+        "WHERE c.sequence_id = ? ORDER BY k.frame, k.id", (sequence_id,))
+    for key_id, db_id, frame, px, r, g, b, a in cur.fetchall():
+        entry = by_db.get(int(db_id))
+        if entry is not None and len(entry) > 11:
+            entry[9].append((int(key_id), int(frame), float(px)))
+            entry[11][int(key_id)] = (float(r), float(g), float(b), float(a))
 
 
 def format_key_value(value, stored_type):
@@ -339,34 +398,33 @@ def rotate_degrees_for_link(rotate_clips, clip_link_id, frame, clip_order):
     return float(value)
 
 
-OUTLINE_COLOR_TYPES = ("outline_r", "outline_g", "outline_b", "outline_a")
-
-
 def outline_for_link(outline_clips, color_clips, clip_link_id, frame,
                      clip_order):
-    # BUILD 220: linked type-outline keyframe above this clip (same rule as
-    # scale / position / crop / rotate): (width, r, g, b, a) with width the
-    # outline thickness in whole sequence pixels (value rounded, >= 1) and
-    # r, g, b, a 0..255 ints, each from its own linked outline_r / _g / _b /
-    # _a keyframe above the clip, or 255 when there is none. color_clips is
-    # (r_clips, g_clips, b_clips, a_clips). None when there is no outline
-    # key or the width rounds to 0 (no outline, unchanged output).
+    # BUILD 222: linked type-border keyframe clip above this clip (same rule
+    # as scale / position / crop / rotate): (width, r, g, b, a) with width
+    # the outline thickness in whole sequence pixels (px rounded, >= 1) and
+    # r, g, b, a 0..255 ints. outline_clips holds each border clip with its
+    # px keys, color_clips (r_clips, g_clips, b_clips, a_clips) the same
+    # clips with that channel's values (collect_outline_clips), so every
+    # channel picks the same clip and interpolates linearly between its
+    # keys, flat outside them. None when there is no border key or the
+    # width rounds to 0 (no outline, unchanged output).
     keys = _pick_above_keyframe(outline_clips, clip_link_id, frame, clip_order)
     if keys is None:
         return None
     value = evaluate_keyframes(keys, frame)
     if value is None:
         return None
-    width = int(round(clamp_key_value("outline", value)))
+    width = int(round(clamp_key_value(BORDER_TYPE, value)))
     if width <= 0:
         return None
     rgba = []
-    for stored, clips in zip(OUTLINE_COLOR_TYPES, color_clips):
+    for clips in color_clips:
         ckeys = _pick_above_keyframe(clips, clip_link_id, frame, clip_order)
         cval = evaluate_keyframes(ckeys, frame) if ckeys is not None else None
         if cval is None:
             cval = 255.0
-        rgba.append(int(round(clamp_key_value(stored, cval))))
+        rgba.append(int(round(max(0.0, min(255.0, float(cval))))))
     return (width, rgba[0], rgba[1], rgba[2], rgba[3])
 
 
@@ -427,11 +485,29 @@ def collect_rotate_clips(clips_by_track, track_order=None):
 
 
 def collect_outline_clips(clips_by_track, track_order=None):
-    # BUILD 220: (outline_clips, (r_clips, g_clips, b_clips, a_clips))
-    return (_collect_keyframe_clips_of_type(
-                clips_by_track, track_order, "outline"),
-            tuple(_collect_keyframe_clips_of_type(clips_by_track, track_order, t)
-                  for t in OUTLINE_COLOR_TYPES))
+    # BUILD 222: (outline_clips, (r_clips, g_clips, b_clips, a_clips)) from
+    # the linked border clips: the same (link_id, in, out, keys, order)
+    # entries, keys (key_id, frame, px) and per channel (key_id, frame, c)
+    # with c from entry[11]. The snapshot keeps them at [14] .. [18].
+    px_clips = []
+    chans = ([], [], [], [])
+    for track_id, track_clips in (clips_by_track or {}).items():
+        order = None if track_order is None else track_order.get(track_id)
+        if order is None:
+            continue
+        for c in track_clips:
+            if not is_keyframe_clip_id(c[0]) or len(c) <= 10:
+                continue
+            if c[10] != BORDER_TYPE or c[8] is None:
+                continue
+            in_f = max(0, int(c[2]))
+            out_f = in_f + max(1, int(c[3]))
+            keys = list(c[9]) if c[9] else []
+            px_clips.append((c[8], in_f, out_f, keys, int(order)))
+            for i in range(4):
+                ckeys = [(k[0], k[1], border_rgba(c, k[0])[i]) for k in keys]
+                chans[i].append((c[8], in_f, out_f, ckeys, int(order)))
+    return px_clips, chans
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
@@ -658,10 +734,8 @@ def persist_keyframe_clip_time(cur, clip, shift_keys=True):
         (in_f, in_f + length, db_id)
     )
     if delta != 0 and shift_keys:
-        cur.execute(
-            "UPDATE keyframes SET frame = frame + ? WHERE keyframe_clip_id = ?",
-            (delta, db_id)
-        )
+        # keyframes or (border) keyframe_border rows, BUILD 222
+        shift_clip_keys(cur, db_id, delta)
         if len(clip) > 9 and clip[9]:
             clip[9][:] = [
                 (item[0], int(item[1]) + delta, item[2]) if len(item) >= 3
@@ -681,6 +755,9 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
     # so evaluate_keyframes gives the same value on every frame as before.
     # No commit / undo here (the caller owns the transaction and undo step).
     # Returns the new piece's mem id, or None when not sliceable.
+    # BUILD 222: a border clip's keys are keyframe_border rows; the same
+    # split applies, each boundary key holding every channel (px, r, g, b,
+    # a) at its interpolated value.
     db_id = db_id_from_mem(clip_mem_id)
     cur.execute(
         "SELECT sequence_id, track_id, type, link_id, in_frame, out_frame, name "
@@ -692,10 +769,13 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
     split = int(split)
     if not (int(in_f) < split < int(out_f)):
         return None
+    table = key_table_for_type(ktype)
+    cols = dict(KEY_TABLE_COLS)[table]
     cur.execute(
-        "SELECT id, frame, value FROM keyframes WHERE keyframe_clip_id = ? "
-        "ORDER BY frame, id", (db_id,))
-    keys = [(int(k), int(f), float(v)) for k, f, v in cur.fetchall()]
+        "SELECT id, frame, %s FROM %s WHERE keyframe_clip_id = ? "
+        "ORDER BY frame, id" % (", ".join(cols), table), (db_id,))
+    rows = [(int(r[0]), int(r[1]), [float(v) for v in r[2:]])
+            for r in cur.fetchall()]
     cur.execute(
         "INSERT INTO keyframe_clips "
         "(sequence_id, track_id, type, link_id, in_frame, out_frame, name) "
@@ -704,22 +784,23 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
     new_db = cur.lastrowid
     cur.execute("UPDATE keyframe_clips SET out_frame = ? WHERE id = ?",
                 (split, db_id))
-    if keys:
-        left_val = evaluate_keyframes(keys, split - 1)
-        right_val = evaluate_keyframes(keys, split)
-        frames = set(k[1] for k in keys)
+    if rows:
+        def at(f):
+            return [evaluate_keyframes([(k, fr, v[i]) for k, fr, v in rows], f)
+                    for i in range(len(cols))]
+        left_val = at(split - 1)
+        right_val = at(split)
+        frames = set(k[1] for k in rows)
         cur.execute(
-            "UPDATE keyframes SET keyframe_clip_id = ? "
-            "WHERE keyframe_clip_id = ? AND frame >= ?",
+            "UPDATE %s SET keyframe_clip_id = ? "
+            "WHERE keyframe_clip_id = ? AND frame >= ?" % table,
             (new_db, db_id, split))
+        ins = ("INSERT INTO %s (keyframe_clip_id, frame, %s) VALUES (?, ?, %s)"
+               % (table, ", ".join(cols), ", ".join("?" for _ in cols)))
         if (split - 1) not in frames:
-            cur.execute(
-                "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
-                "VALUES (?, ?, ?)", (db_id, split - 1, left_val))
+            cur.execute(ins, [db_id, split - 1] + left_val)
         if split not in frames:
-            cur.execute(
-                "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
-                "VALUES (?, ?, ?)", (new_db, split, right_val))
+            cur.execute(ins, [new_db, split] + right_val)
     return mem_id_from_db(new_db)
 
 
@@ -841,8 +922,12 @@ class AddKeyDialog(QDialog):
     # BUILD 147: choose_type=True (the clip has no keys): a Type drop-down
     # preset to the clip's type; this key sets the clip's type. defaults:
     # callable stored_type -> initial value when the type is changed.
+    # BUILD 222: type border shows the value as "Border px" plus R, G, B, A
+    # fields (0..255, step 1; rgba = their initial values, default 255);
+    # border_rgba() reads them. Other types hide the R, G, B, A row.
     def __init__(self, parent, type_label, initial=None, title="Add Key",
-                 stored_type=None, choose_type=False, defaults=None):
+                 stored_type=None, choose_type=False, defaults=None,
+                 rgba=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
@@ -873,6 +958,21 @@ class AddKeyDialog(QDialog):
             self.spin.setValue(float(initial))
         row.addWidget(self.spin)
         layout.addLayout(row)
+        self.rgba_row = QWidget()
+        rrow = QHBoxLayout(self.rgba_row)
+        rrow.setContentsMargins(0, 0, 0, 0)
+        self.rgba_spins = []
+        for i, name in enumerate(BORDER_RGBA_LABELS):
+            rrow.addWidget(QLabel("%s:" % name))
+            sp = QDoubleSpinBox()
+            sp.setDecimals(0)
+            sp.setRange(0.0, 255.0)
+            sp.setSingleStep(1.0)
+            sp.setValue(float(rgba[i]) if rgba is not None else 255.0)
+            rrow.addWidget(sp)
+            self.rgba_spins.append(sp)
+        layout.addWidget(self.rgba_row)
+        self._show_border(stored_type)
         ok_btn = QPushButton("OK")
         ok_btn.clicked.connect(self.accept)
         layout.addWidget(ok_btn)
@@ -889,11 +989,24 @@ class AddKeyDialog(QDialog):
         lo, hi = KEY_VALUE_RANGES.get(stored, (-1000000000.0, 1000000000.0))
         self.spin.setRange(lo, hi)
         self.spin.setSingleStep(KEY_VALUE_STEPS.get(stored, 0.1))
+        self._show_border(stored)
         if self._defaults is not None:
             try:
                 self.spin.setValue(float(self._defaults(stored)))
             except Exception:
                 pass
+
+    def _show_border(self, stored):
+        # BUILD 222: R, G, B, A row only for type border; value label
+        # "Border px:" there
+        border = stored == BORDER_TYPE
+        self.rgba_row.setVisible(border)
+        if border:
+            self.value_label.setText("Border px:")
+
+    def border_rgba(self):
+        # BUILD 222: (r, g, b, a) from the R, G, B, A fields
+        return tuple(float(sp.value()) for sp in self.rgba_spins)
 
     def chosen_type(self):
         # BUILD 147: the type this key is for (the clip's, or the drop-down's)
@@ -910,11 +1023,14 @@ def clip_type_from_db(cur, db_id):
 
 
 def key_count_from_db(cur, db_id):
-    # BUILD 147
-    cur.execute("SELECT COUNT(*) FROM keyframes WHERE keyframe_clip_id = ?",
-                (int(db_id),))
-    row = cur.fetchone()
-    return int(row[0]) if row else 0
+    # BUILD 147; BUILD 222: keyframes plus keyframe_border rows
+    n = 0
+    for table in key_tables(cur):
+        cur.execute("SELECT COUNT(*) FROM %s WHERE keyframe_clip_id = ?"
+                    % table, (int(db_id),))
+        row = cur.fetchone()
+        n += int(row[0]) if row else 0
+    return n
 
 
 def set_clip_type(cur, db_id, stored_type):
@@ -952,11 +1068,12 @@ def default_key_value(timeline, stored_type):
     # BUILD 154: gamma 1.0, contrast 1.0 (no change); brightness 0 below
     if stored_type in ("gamma", "contrast"):
         return 1.0
-    # BUILD 220: outline color channels 255 (opaque white)
-    if stored_type in OUTLINE_COLOR_TYPES:
-        return 255.0
+    # BUILD 222: border px 4 (its R, G, B, A fields default 255, opaque
+    # white, in AddKeyDialog)
+    if stored_type == BORDER_TYPE:
+        return 4.0
     # BUILD 147: crop_x / crop_y = 0 (no crop); BUILD 219: rotate = 0
-    # (upright); BUILD 220: outline width = 0 (off); others 0 as before
+    # (upright); others 0 as before
     return 0.0
 
 
@@ -1048,11 +1165,18 @@ def add_key(timeline, clip, click_frame):
                 "Add Key refused: the clip already has %s keys" % type_label,
                 3000)
             return
-        cur.execute(
-            "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
-            "VALUES (?, ?, ?)",
-            (db_id, frame, value)
-        )
+        if new_type == BORDER_TYPE:
+            # BUILD 222: a border key is a keyframe_border row
+            cur.execute(
+                "INSERT INTO keyframe_border (keyframe_clip_id, frame, px, "
+                "r, g, b, a) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (db_id, frame, value) + dlg.border_rgba())
+        else:
+            cur.execute(
+                "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
+                "VALUES (?, ?, ?)",
+                (db_id, frame, value)
+            )
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1062,9 +1186,10 @@ def add_key(timeline, clip, click_frame):
     timeline._after_clip_change("Added key at frame %d" % frame)
 
 
-def persist_keyframe_frame(cur, key_id, frame):
+def persist_keyframe_frame(cur, key_id, frame, table="keyframes"):
+    # table: the clip's key table (key_table_for_type, BUILD 222)
     cur.execute(
-        "UPDATE keyframes SET frame = ? WHERE id = ?",
+        "UPDATE %s SET frame = ? WHERE id = ?" % table,
         (int(frame), int(key_id))
     )
 
@@ -1092,9 +1217,10 @@ def edit_key(timeline, clip, key_id, frame, value):
                 conn.close()
             except Exception:
                 pass
+    rgba = border_rgba(clip, key_id) if stored_type == BORDER_TYPE else None
     dlg = AddKeyDialog(timeline, type_label,
                        initial=clamp_key_value(stored_type, value),
-                       title="Edit Key", stored_type=stored_type)
+                       title="Edit Key", stored_type=stored_type, rgba=rgba)
     if dlg.exec() != QDialog.Accepted:
         return
     new_val = clamp_key_value(stored_type, dlg.value())
@@ -1106,7 +1232,14 @@ def edit_key(timeline, clip, key_id, frame, value):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        persist_keyframe_value(cur, key_id, new_val)
+        if stored_type == BORDER_TYPE:
+            # BUILD 222: px and R, G, B, A of the keyframe_border row
+            cur.execute(
+                "UPDATE keyframe_border SET px = ?, r = ?, g = ?, b = ?, "
+                "a = ? WHERE id = ?",
+                (new_val,) + dlg.border_rgba() + (int(key_id),))
+        else:
+            persist_keyframe_value(cur, key_id, new_val)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1219,7 +1352,8 @@ def key_drag_release(timeline):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        persist_keyframe_frame(cur, drag["key_id"], frame)
+        persist_keyframe_frame(cur, drag["key_id"], frame, key_table_for_type(
+            clip[10] if len(clip) > 10 else ""))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1239,7 +1373,9 @@ def delete_key(timeline, key_id, clip=None):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        cur.execute("DELETE FROM keyframes WHERE id = ?", (int(key_id),))
+        table = key_table_for_type(
+            clip[10] if clip is not None and len(clip) > 10 else "")
+        cur.execute("DELETE FROM %s WHERE id = ?" % table, (int(key_id),))
         conn.commit()
         conn.close()
     except Exception as e:

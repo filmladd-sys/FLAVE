@@ -225,6 +225,22 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
+        # BUILD 222: keys of type-border keyframe clips (one row per key:
+        # absolute sequence frame like keyframes.frame, border px and its
+        # RGBA color 0..255); other types keep their keys in keyframes
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS keyframe_border (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyframe_clip_id INTEGER NOT NULL,
+                frame INTEGER NOT NULL,
+                px REAL NOT NULL,
+                r REAL NOT NULL,
+                g REAL NOT NULL,
+                b REAL NOT NULL,
+                a REAL NOT NULL
+            )
+        """)
+
         # Proxies of footage (path to the proxy file, size percentage).
         # BUILD 119: proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc';
         # deinterlace 1 = deinterlaced or inverse-telecined. proxy_fps /
