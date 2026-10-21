@@ -20,6 +20,9 @@ except ImportError:
     GlobalSettingsWindow = None
     apply_dark_mode = None
 
+# BUILD 228: first-open / monitor-change placement of the windows opened here
+from window_place import place_from_project_manager
+
 # Project creation (File > New Project)
 try:
     import new_project
@@ -392,6 +395,8 @@ class ProjectManager(QMainWindow):
             QMessageBox.warning(self, "Settings", "global_settings.py not found")
             return
         self.settings_window = GlobalSettingsWindow(self)
+        # BUILD 228: under the menu bar on first open / monitor change
+        place_from_project_manager(self.settings_window, self, "global_settings")
         self.settings_window.show()
 
     def _open_project_settings(self):
@@ -401,6 +406,8 @@ class ProjectManager(QMainWindow):
         if not self.current_project:
             return
         self.project_settings_window = ProjectSettingsWindow(self)
+        place_from_project_manager(self.project_settings_window, self,
+                                   "project_settings")
         self.project_settings_window.show()
 
     def _open_sequence_manager(self):
@@ -410,6 +417,8 @@ class ProjectManager(QMainWindow):
         if not self.current_project:
             return
         self.sequence_window = SequenceManager(self)
+        place_from_project_manager(self.sequence_window, self, "SequenceManager",
+                                   ("SequenceManager_w",))
         self.sequence_window.show()
 
     def _open_footage_manager(self):
@@ -419,6 +428,8 @@ class ProjectManager(QMainWindow):
         if not self.current_project:
             return
         self.footage_window = FootageManager(self)
+        place_from_project_manager(self.footage_window, self, "footage_manager",
+                                   ("footage_manager_geometry",))
         self.footage_window.show()
 
     def _restore_geometry(self):

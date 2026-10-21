@@ -78,6 +78,7 @@ Project Manager exits the app.
 | `window_snapshot.py` | Camera button over each window's title bar; saves a PNG of that window |
 | `flave_capture.py` | FLAVE Capture: standalone screen recorder (Windows, run on its own); one FFmpeg ddagrab MP4 per monitor at native size, h264_nvenc; optional system audio WAV (WASAPI loopback via `soundcard`, same script in `--audio` mode); settings in `flave_capture.json` |
 | `dark_titlebar.py` | Dark title bars on Windows in dark mode |
+| `window_place.py` | Windows opened from Project Manager: placed under its menu bar on first open, after a monitor change, or when off-screen |
 
 **Sequence Timeline** (`sequence_timeline.py` is the window, mouse
 handling and wiring; the `sequence_timeline_*.py` files are splits of it
