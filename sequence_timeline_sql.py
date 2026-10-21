@@ -706,30 +706,13 @@ def delete_selected_clip(self):
     # every clip sharing a link_id with a selected clip
     if not self._selected_clip_ids or self._edge_drag is not None:
         return
-    ids = set(self._selected_clip_ids)
-    if not self._selection_solo:
-        for c in self._selected_clips():
-            for m in self._linked_clips(c):
-                ids.add(m[0])
+    ids = delete_clip_ids(self)
     from undo import push_undo
     push_undo(self._project_db(), "Delete clip")
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
-        # BUILD 106: (parent, child) of deleted sequence clips, read first
-        seq_pairs = sequence_pairs_for(cur, ids)
-        for cid in ids:
-            table, row_id = clip_table_and_id(cid)
-            cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
-            if table == "keyframe_clips":
-                # BUILD 222: its keys go with it (keyframes or, for a
-                # border clip, keyframe_border rows; undo restores both)
-                from keyframe import delete_clip_keys
-                delete_clip_keys(cur, [row_id])
-        prune_sequence_children(cur, seq_pairs)
-        # Their markers go too (same undo snapshot)
-        from markers import delete_markers
-        delete_markers(cur, ids)
+        delete_clip_ids_db(cur, ids)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -739,6 +722,107 @@ def delete_selected_clip(self):
     self._selection_order = []
     self._selection_solo = False
     self._after_clip_change(f"Deleted {len(ids)} clip(s)")
+
+
+def delete_clip_ids(self):
+    # Clip ids the Delete key / Delete / Ripple Delete remove: every
+    # selected clip; unless selection solo, also every clip sharing a
+    # link_id with a selected clip
+    ids = set(self._selected_clip_ids)
+    if not self._selection_solo:
+        for c in self._selected_clips():
+            for m in self._linked_clips(c):
+                ids.add(m[0])
+    return ids
+
+
+def delete_clip_ids_db(cur, ids):
+    # The database part of Delete (BUILD 245: shared with Ripple Delete).
+    # No commit / undo here: the caller owns the transaction and undo step.
+    # BUILD 106: (parent, child) of deleted sequence clips, read first
+    seq_pairs = sequence_pairs_for(cur, ids)
+    for cid in ids:
+        table, row_id = clip_table_and_id(cid)
+        cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        if table == "keyframe_clips":
+            # BUILD 222: its keys go with it (keyframes or, for a
+            # border clip, keyframe_border rows; undo restores both)
+            from keyframe import delete_clip_keys
+            delete_clip_keys(cur, [row_id])
+    prune_sequence_children(cur, seq_pairs)
+    # Their markers go too (same undo snapshot)
+    from markers import delete_markers
+    delete_markers(cur, ids)
+
+
+def ripple_delete_clips(self):
+    # BUILD 245: clip menu Ripple Delete. Removes the same clips as Delete
+    # (delete_clip_ids / delete_clip_ids_db), then closes each removed
+    # clip's span on its own track with the empty-space Ripple Delete
+    # rules (ripple_moving): the clips on that track starting at or after
+    # the span's end, plus their link partners on any track, move left by
+    # the span's length, clamped so nothing goes before 0 or overlaps a
+    # clip that is not moving. Spans are closed right to left (by start
+    # frame) so earlier shifts never move a later span's clips twice.
+    # Keyframe clips move with their keys, markers are source-relative
+    # and follow their clips. One undo step ("Ripple delete").
+    if not self._selected_clip_ids or self._edge_drag is not None:
+        return
+    ids = delete_clip_ids(self)
+    clip_track = {}
+    orig = {}
+    for tid, clips in self.clips_by_track.items():
+        for c in clips:
+            clip_track[c[0]] = tid
+            orig[c[0]] = c[2]
+    spans = sorted(
+        [(c[2], c[3], clip_track[c[0]]) for clips in self.clips_by_track.values()
+         for c in clips if c[0] in ids],
+        key=lambda s: s[0], reverse=True)
+    moved = {}
+    limited = 0
+    for start, length, tid in spans:
+        end = start + length
+        right = [c for c in self.clips_by_track.get(tid, [])
+                 if c[0] not in ids and c[2] >= end]
+        if not right:
+            continue
+        moving, delta = ripple_moving(self, right, -int(length), ids)
+        if delta > -int(length):
+            limited += 1
+        if delta >= 0:
+            continue
+        for c in moving.values():
+            c[2] = c[2] + delta
+            moved[c[0]] = c
+    from undo import push_undo
+    push_undo(self._project_db(), "Ripple delete")
+    try:
+        conn = sqlite3.connect(self._project_db())
+        cur = conn.cursor()
+        delete_clip_ids_db(cur, ids)
+        for c in moved.values():
+            if c[2] == orig.get(c[0]):
+                continue
+            if is_keyframe_clip_id(c[0]):
+                persist_keyframe_clip_time(cur, c)
+                continue
+            table, row_id = clip_table_and_id(c[0])
+            cur.execute(f"UPDATE {table} SET start_frame = ? WHERE id = ?",
+                        (c[2], row_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Ripple Delete", f"Could not ripple delete: {e}")
+        self.refresh()
+        return
+    self._selected_clip_ids = set()
+    self._selection_order = []
+    self._selection_solo = False
+    msg = f"Ripple Delete: deleted {len(ids)} clip(s), moved {len(moved)}"
+    if limited:
+        msg += " (some gaps only partly closed: a clip was in the way)"
+    self._after_clip_change(msg)
 
 
 def slice_clip(self, clip, x_in_clips):
@@ -904,26 +988,7 @@ def ripple_delete(self, track_id, click_frame):
         self.status_bar.showMessage("Ripple Delete: no clips to the right", 3000)
         return
     delta = wall - right[0][2]
-    # Moving set: right-side clips plus their link partners
-    moving = {}
-    for c in right:
-        moving[c[0]] = c
-        for p in self._linked_clips(c):
-            moving[p[0]] = p
-    # Clamp: nothing before 0, no overlap with clips not being moved
-    clip_track = {}
-    for tid, clips in self.clips_by_track.items():
-        for c in clips:
-            clip_track[c[0]] = tid
-    for c in moving.values():
-        delta = max(delta, -c[2])
-        for n in self.clips_by_track.get(clip_track.get(c[0]), []):
-            if n[0] in moving:
-                continue
-            n_end = n[2] + n[3]
-            if n[2] < c[2] and n_end > c[2] + delta:
-                delta = max(delta, n_end - c[2])
-    delta = int(delta)
+    moving, delta = ripple_moving(self, right, delta)
     if delta >= 0:
         self.status_bar.showMessage("Ripple Delete: no gap to close", 3000)
         return
@@ -947,6 +1012,33 @@ def ripple_delete(self, track_id, click_frame):
         return
     self._after_clip_change(
         f"Ripple Delete: moved {len(moving)} clip(s) by {delta} frames")
+
+
+def ripple_moving(self, right, delta, gone=()):
+    # Ripple rules shared by both Ripple Deletes. Moving set: the right
+    # side clips plus their link partners (same link_id, any track), minus
+    # gone (clips being deleted). delta (negative) is clamped: nothing
+    # before 0, no overlap with a clip that is not moving (gone clips do
+    # not block). Returns (moving {id: clip}, int delta).
+    moving = {}
+    for c in right:
+        moving[c[0]] = c
+        for p in self._linked_clips(c):
+            if p[0] not in gone:
+                moving[p[0]] = p
+    clip_track = {}
+    for tid, clips in self.clips_by_track.items():
+        for c in clips:
+            clip_track[c[0]] = tid
+    for c in moving.values():
+        delta = max(delta, -c[2])
+        for n in self.clips_by_track.get(clip_track.get(c[0]), []):
+            if n[0] in moving or n[0] in gone:
+                continue
+            n_end = n[2] + n[3]
+            if n[2] < c[2] and n_end > c[2] + delta:
+                delta = max(delta, n_end - c[2])
+    return moving, int(delta)
 
 
 def _toggle_clip_flag(self, clip_id, column):

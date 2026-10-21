@@ -1165,6 +1165,7 @@ def _clip_context_menu(self, clip, pos):
         # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
         # menu.addSeparator()
         delete_action = menu.addAction("Delete")
+        ripple_action = menu.addAction("Ripple Delete")     # BUILD 245
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action is None:
             return
@@ -1189,6 +1190,8 @@ def _clip_context_menu(self, clip, pos):
             self.unlink_clips(clip)
         elif action == delete_action:
             self.delete_selected_clip()
+        elif action == ripple_action:
+            self.ripple_delete_clips()
         return
     if is_caption_id(clip[0]):
         # Caption clip menu: Edit, Slice, Link or Unlink, Delete
@@ -1202,6 +1205,7 @@ def _clip_context_menu(self, clip, pos):
         # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
         # menu.addSeparator()
         delete_action = menu.addAction("Delete")
+        ripple_action = menu.addAction("Ripple Delete")     # BUILD 245
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         # if self._run_clipboard_action(action, clip_acts, clip):
         if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
@@ -1216,6 +1220,8 @@ def _clip_context_menu(self, clip, pos):
             self.unlink_clips(clip)
         elif action == delete_action:
             self.delete_selected_clip()
+        elif action == ripple_action:
+            self.ripple_delete_clips()
         return
     enabled = bool(clip[5])
     menu = QMenu(self)
@@ -1252,6 +1258,8 @@ def _clip_context_menu(self, clip, pos):
     # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
     # menu.addSeparator()
     delete_action = menu.addAction("Delete")
+    # BUILD 245: Delete, then close the gaps (sequence_timeline_sql.ripple_delete_clips)
+    ripple_action = menu.addAction("Ripple Delete")
     action = menu.exec(self.table.viewport().mapToGlobal(pos))
     # if self._run_clipboard_action(action, clip_acts, clip):
     if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
@@ -1264,6 +1272,9 @@ def _clip_context_menu(self, clip, pos):
         # Same as the Delete key: selected clips, plus link partners
         # unless selection solo
         self.delete_selected_clip()
+        return
+    if action == ripple_action:
+        self.ripple_delete_clips()
         return
     if gain_action is not None and action == gain_action:
         from clip_gain import edit_clip_gain

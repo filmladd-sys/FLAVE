@@ -40,6 +40,7 @@ from sequence_timeline_sql import (
     _toggle_track_flag, drop_footage, _range_overlaps, delete_selected_clip,
     drop_sequence, sequence_id_from_mime, delete_track,
     slice_clip, ripple_delete, _toggle_clip_flag,
+    ripple_delete_clips,
 )
 # BUILD 161: track parts of the window (same names, re-exported here)
 from sequence_timeline_tracks import (
@@ -188,6 +189,7 @@ class SequenceTimeline(QMainWindow):
     delete_selected_clip = delete_selected_clip
     slice_clip = slice_clip
     ripple_delete = ripple_delete
+    ripple_delete_clips = ripple_delete_clips   # BUILD 245: clip menu
     _toggle_clip_flag = _toggle_clip_flag
     # BUILD 161: track style / collapse / menus / row height live in
     # sequence_timeline_tracks.py
