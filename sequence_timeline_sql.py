@@ -748,7 +748,8 @@ def slice_clip(self, clip, x_in_clips):
     # BUILD 132: keyframe clips (the clip itself or a linked partner) are
     # split by keyframe.slice_keyframe_clip_db (keys by frame, a boundary
     # key each side) instead of the footage path; captions' right pieces
-    # join the new right link too. Still one push_undo for the whole cut.
+    # join the new right link too, and (BUILD 242) so do linked captions
+    # wholly right of the cut. Still one push_undo for the whole cut.
     start, length = clip[2], clip[3]
     if length < 2:
         return
@@ -793,6 +794,11 @@ def slice_members_db(self, cur, members, split_frame, linked):
     for c in members:
         c_start, c_len, c_in = c[2], c[3], c[7]
         if not (c_start < split_frame < c_start + c_len):
+            # BUILD 242: a linked caption wholly right of the cut (start at
+            # or after split_frame) joins the right pieces' new link;
+            # captions ending at or before it stay with the left pieces
+            if linked and is_caption_id(c[0]) and c_start >= split_frame:
+                right_other.append(c[0])
             continue
         track_id = self._clip_track_id(c)
         if track_id is None:
