@@ -234,3 +234,183 @@ def edit_caption(self, clip):
         QMessageBox.warning(self, "Edit Caption", f"Could not save caption: {e}")
         return
     self._after_clip_change("Caption updated")
+
+
+# ---- Generate Captions (BUILD 225): audio clip right-click
+
+def _gen_bridge(self):
+    # One QObject per timeline; done(clip_id, result, error) is queued from
+    # the worker thread to the GUI thread
+    br = getattr(self, "_caption_gen_bridge", None)
+    if br is None:
+        from PySide6.QtCore import QObject, Signal
+
+        class _Bridge(QObject):
+            done = Signal(int, object, str)
+
+        br = _Bridge(self)
+        br.done.connect(lambda cid, res, err: _finish_generate(self, cid, res, err),
+                        Qt.QueuedConnection)
+        self._caption_gen_bridge = br
+        self._caption_gen_jobs = {}
+    return br
+
+
+def _audio_clip_info(self, clip_id):
+    # The audio clip's row (+ footage source), or None if gone / not audio
+    conn = sqlite3.connect(self._project_db())
+    try:
+        row = conn.execute(
+            "SELECT c.track_id, c.start_frame, c.length_frames, "
+            "COALESCE(c.in_frame, 0), f.original_path, f.filename, "
+            "LOWER(COALESCE(t.track_type, '')), t.sequence_id "
+            "FROM clips c JOIN tracks t ON t.id = c.track_id "
+            "LEFT JOIN footage f ON f.id = c.footage_id WHERE c.id = ?",
+            (int(clip_id),)).fetchone()
+    finally:
+        conn.close()
+    if row is None or row[6] != "audio" or int(row[7]) != int(self.sequence_id):
+        return None
+    import os
+    track_id, start, length, in_f, orig, fname = row[:6]
+    return {"project_db": self._project_db(), "sequence_id": int(self.sequence_id),
+            "clip_id": int(clip_id), "track_id": int(track_id),
+            "start_frame": max(0, int(start or 0)),
+            "length_frames": max(1, int(length or 1)),
+            "in_frame": max(0, int(in_f or 0)),
+            "basename": os.path.basename(orig or fname or ""),
+            "source_path": orig or fname or "", "fps": float(self.fps or 30.0)}
+
+
+def generate_captions(self, clip):
+    # Generate Captions: transcribe the audio clip's source range on a
+    # worker thread (captions_generate.generate); _finish_generate writes
+    # the new caption track + captions on the GUI thread as one undo step
+    import captions_generate as cg
+    title = "Generate Captions"
+    if not cg.whisper_available():
+        QMessageBox.information(
+            self, title, "Generate Captions needs faster-whisper.\n\n"
+            "Install it with:\n    %s\n\nthen try again." % cg.INSTALL_HINT)
+        return
+    _gen_bridge(self)
+    cid = int(clip[0])
+    if cid in self._caption_gen_jobs:
+        self.status_bar.showMessage("Captions are already being generated "
+                                    "for this clip", 3000)
+        return
+    try:
+        info = _audio_clip_info(self, cid)
+    except Exception as e:
+        QMessageBox.warning(self, title, "Could not read the clip: %s" % e)
+        return
+    if info is None:
+        return
+    import threading
+    cancel = threading.Event()
+    self._caption_gen_jobs[cid] = (info, cancel)
+    br = self._caption_gen_bridge
+    fn = getattr(self, "_caption_transcribe_fn", None)   # tests
+
+    def work():
+        try:
+            res, err = cg.generate(info, cancel, fn), ""
+        except cg.CaptionGenError as e:
+            res, err = None, str(e) or "Transcription failed."
+        except Exception as e:
+            res, err = None, "Transcription failed: %s" % e
+        try:
+            br.done.emit(cid, res, err)
+        except RuntimeError:
+            pass   # timeline closed
+
+    threading.Thread(target=work, name="GenerateCaptions", daemon=True).start()
+    self.status_bar.showMessage("Generating captions for %s ..." % (
+        info["basename"] or "clip"))
+
+
+def _finish_generate(self, clip_id, result, error):
+    # GUI thread. Re-reads the audio clip: if it was deleted, or its source
+    # range (in / length) or track changed, nothing is written. Otherwise:
+    # one undo step "Generate captions"; a caption track directly above the
+    # clip's audio track (tracks renumbered 0..n-1); one caption per group
+    # at clip start + t * fps; captions join the clip's link group (the
+    # audio clip's id when it has none, as Link does).
+    title = "Generate Captions"
+    job = (getattr(self, "_caption_gen_jobs", None) or {}).pop(int(clip_id), None)
+    if job is None:
+        return
+    info, _cancel = job
+    if error:
+        self.status_bar.showMessage("Generate Captions failed", 3000)
+        QMessageBox.warning(self, title, error)
+        return
+    try:
+        now = _audio_clip_info(self, clip_id)
+    except Exception:
+        now = None
+    if (now is None or now["track_id"] != info["track_id"]
+            or now["in_frame"] != info["in_frame"]
+            or now["length_frames"] != info["length_frames"]):
+        QMessageBox.warning(self, title, "The audio clip was deleted or changed "
+                            "while transcribing; no captions were added.")
+        self.status_bar.showMessage("Generate Captions: clip changed", 3000)
+        return
+    import captions_generate as cg
+    caps = cg.groups_to_frames(result.get("groups"), self.fps,
+                               now["start_frame"], now["length_frames"])
+    if not caps:
+        self.status_bar.showMessage("Generate Captions: no speech found", 4000)
+        return
+    from sequence_timeline_link import link_group_sizes, effective_link
+    from track_names import next_default_name, sequence_track_names
+    from caption_edit import DEFAULT_FONT_FAMILY, DEFAULT_SCALE
+    project_db = self._project_db()
+    mem = self._clip_by_id(clip_id) or [clip_id] + [None] * 8
+    link = effective_link(mem, link_group_sizes(self.clips_by_track))
+    if link is None:
+        link = int(clip_id)
+    name = next_default_name("caption", sequence_track_names(
+        project_db, self.sequence_id))
+    from undo import push_undo
+    push_undo(project_db, "Generate captions")
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            cur = conn.cursor()
+            ids = [r[0] for r in cur.execute(
+                "SELECT id FROM tracks WHERE sequence_id = ? "
+                "ORDER BY sort_order, id", (self.sequence_id,)).fetchall()]
+            cur.execute(
+                "INSERT INTO tracks (sequence_id, name, track_type, sort_order, "
+                "language) VALUES (?, ?, 'caption', 0, ?)",
+                (self.sequence_id, name, result.get("language") or "eng"))
+            new_track = cur.lastrowid
+            try:
+                cur.execute("UPDATE tracks SET caption_type = ? WHERE id = ?",
+                            (DEFAULT_CAPTION_TYPE, new_track))
+            except sqlite3.OperationalError:
+                pass   # old DB without caption_type
+            i = ids.index(info["track_id"]) if info["track_id"] in ids else 0
+            ids.insert(i, new_track)
+            for order, tid in enumerate(ids):
+                cur.execute("UPDATE tracks SET sort_order = ? WHERE id = ?",
+                            (order, tid))
+            cur.execute("UPDATE clips SET link_id = ? WHERE id = ?",
+                        (link, int(clip_id)))
+            for start, length, text in caps:
+                cur.execute(
+                    "INSERT INTO captions (sequence_id, track_id, start_frame, "
+                    "length_frames, text, font_family, font_size, pos_x, pos_y, "
+                    "scale, link_id) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, "
+                    "?, ?)",
+                    (self.sequence_id, new_track, start, length, text,
+                     DEFAULT_FONT_FAMILY, DEFAULT_SCALE, link))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, title, "Could not add the captions: %s" % e)
+        return
+    self._after_clip_change("Generated %d captions on %s (%s)" % (
+        len(caps), name, result.get("device") or ""))

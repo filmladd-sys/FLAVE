@@ -30,6 +30,14 @@ says what it owns.
     back to pure Python: the preview audio mix loads whole sources, runs
     no threads and does no partial remix. `project_manager.py` prints a
     `WARNING: numpy not installed ...` line at launch when it is missing.
+  - `faster-whisper` -- optional, only for Generate Captions (audio clip
+    right-click; `pip install faster-whisper`). The `small` model (about
+    460 MB) downloads on first use to the Hugging Face cache
+    (`%USERPROFILE%\.cache\huggingface\hub`). It runs on CUDA (float16)
+    when ctranslate2 finds cuBLAS and cuDNN 9 for CUDA 12 (for example
+    `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`), otherwise on the
+    CPU (int8, slower). Without the package the menu item shows the
+    install command.
   - Everything else is the standard library (`sqlite3`, `ctypes`,
     `subprocess`, `wave`, ...).
 - **CUDA runtime and nvJPEG DLLs:** found by `_load_cudart()` and
@@ -88,6 +96,7 @@ whose functions take the timeline as `self` and are attached to the class)
 | `sequence_timeline_slice.py` | Slice mode (C key) |
 | `sequence_timeline_insert.py` | Shift+drag insert: slice at the drop and push every track right |
 | `sequence_timeline_link.py` | Link / Unlink decisions (pure functions) |
+| `captions_generate.py` | Generate Captions on an audio clip: faster-whisper transcription (optional `pip install faster-whisper`) and word grouping into caption clips |
 | `timeline_clipboard.py` | In-memory copy / cut / paste per sequence |
 | `clip_drag.py`, `clip_snap.py`, `edit_points.py` | Pure math: drag deltas, snapping, transport targets |
 | `clip_gain.py`, `clip_proxy.py` | Gain and proxy-percent choices for clips / footage |

@@ -1139,10 +1139,13 @@ def _clip_context_menu(self, clip, pos):
     # Gain... on audio-track clips only (the only rows the preview audio
     # mixes); right-clicked clip only, like Enable / Solo
     gain_action = None
+    gen_caps_action = None
     # BUILD 105: sequence clips have no footage: no Gain / Proxy
     is_seq_clip = clip[0] in (getattr(self, "_seq_refs", None) or {})
     if self._track_type(self._clip_track_id(clip)) == "audio" and not is_seq_clip:
         gain_action = menu.addAction("Gain...")
+        # BUILD 225: transcribe into a new caption track above this track
+        gen_caps_action = menu.addAction("Generate Captions")
         menu.addSeparator()
     slice_action = menu.addAction("Slice")
     marker_menu = menu.addMenu("Marker")
@@ -1181,6 +1184,10 @@ def _clip_context_menu(self, clip, pos):
     if gain_action is not None and action == gain_action:
         from clip_gain import edit_clip_gain
         edit_clip_gain(self, clip)
+        return
+    if gen_caps_action is not None and action == gen_caps_action:
+        from sequence_timeline_captions import generate_captions
+        generate_captions(self, clip)
         return
     if action is None:
         return
