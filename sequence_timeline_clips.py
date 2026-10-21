@@ -1071,6 +1071,10 @@ def _clip_context_menu(self, clip, pos):
         key_click_action = key_menu.addAction("At Mouse Click")
         key_tick_action = key_menu.addAction("At Timeline Tick")
         rename_action = menu.addAction("Rename")
+        # BUILD 221: a new keyframe clip of any type on this track, starting
+        # at this clip's out frame (the Add Keyframe Clip dialog; it fills
+        # the free gap after this clip, see keyframe.add_keyframe_clip)
+        add_after_action = menu.addAction("Add Keyframe Clip After")
         # BUILD 133: Link / Unlink from the whole selection
         link_action, unlink_action = self._add_link_actions(menu, clip)
         menu.addSeparator()
@@ -1089,6 +1093,9 @@ def _clip_context_menu(self, clip, pos):
         elif action == key_tick_action:
             # Playhead frame; add_key clamps it to the clip [in, out)
             _add_key(self, clip, int(self.current_frame))
+        elif action == add_after_action:
+            self.add_keyframe_clip(self._clip_track_id(clip),
+                                   int(clip[2]) + max(1, int(clip[3])))
         elif action == rename_action:
             from keyframe import rename_keyframe_clip
             rename_keyframe_clip(self, clip)

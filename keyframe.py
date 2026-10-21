@@ -774,7 +774,12 @@ class AddKeyframeClipDialog(QDialog):
 
 
 def add_keyframe_clip(timeline, track_id, click_frame):
-    # Dialog then insert. out_frame = in_frame + 30 * fps.
+    # Dialog then insert, any type on any keyframe track (the dialog lists
+    # every type; nothing on the track limits it). out_frame = in_frame +
+    # 30 * fps, shortened to end at the next keyframe clip on the track when
+    # that one starts sooner, so the new clip fills the free gap. Refused
+    # only when click_frame lies inside a clip (clips on a track never
+    # overlap).
     dlg = AddKeyframeClipDialog(timeline)
     if dlg.exec() != QDialog.Accepted:
         return
@@ -799,6 +804,13 @@ def add_keyframe_clip(timeline, track_id, click_frame):
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         ensure_keyframe_tables(conn)
+        cur.execute(
+            "SELECT MIN(in_frame) FROM keyframe_clips WHERE track_id = ? "
+            "AND in_frame > ?", (int(track_id), in_frame))
+        nxt = cur.fetchone()
+        if nxt is not None and nxt[0] is not None:
+            length = max(1, min(length, int(nxt[0]) - in_frame))
+            out_frame = in_frame + length
         if keyframe_range_overlaps(cur, track_id, in_frame, length):
             conn.close()
             timeline.status_bar.showMessage(
