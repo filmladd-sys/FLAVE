@@ -511,16 +511,91 @@ def _no_source_floor(self, clip):
     return self._track_type(self._clip_track_id(clip)) == "image"
 
 
-def _edge_drag_move(self, pos):
+# BUILD 238: edge auto-scroll while a clip / selection / link group is
+# moved (not trims), with the scrub's rule and margin
+# (sequence_timeline_ruler.scrub_edge, SCRUB_EDGE_PX, SCRUB_TICK_MS timer):
+# in a margin the view pans by the mouse travel into it plus a timer tick
+# while held there, stopping at frame 0 / the end. The tick re-runs the
+# move at the last mouse position, so the clips follow the frame under the
+# cursor as the view scrolls. Stops when the mouse leaves the margin or on
+# release (the panned view is saved then).
+def _move_pan(self, drag, pos, tick=False):
+    # Pans the view if pos is in a margin; True while it is in one
+    from sequence_timeline_ruler import scrub_edge, SCRUB_EDGE_PX
+    left = self.table.columnViewportPosition(CLIPS_COL)
+    width = max(1, min(self.table.columnWidth(CLIPS_COL),
+                       self.table.viewport().width() - left))
+    xc = pos.x() - left
+    last = xc if tick else drag.get("pan_x")
+    view, _frame, rem = scrub_edge(
+        xc, last, width, self.view_start_frame, self.pixels_per_frame,
+        self.total_frames(), self.visible_frames(), drag.get("pan_rem", 0.0), tick)
+    drag["pan_x"] = xc
+    drag["pan_rem"] = rem
+    if view != self.view_start_frame:
+        self.view_start_frame = view
+        drag["panned"] = True
+        self.ruler.viewport().update()
+        overlay = getattr(self, "playhead_overlay", None)
+        if overlay is not None:
+            overlay.update()
+    m = max(0, min(SCRUB_EDGE_PX, (width - 1) // 3))
+    return m > 0 and (xc < m or xc > width - m)
+
+
+def _move_pan_timer(self):
+    t = getattr(self, "_move_pan_timer_obj", None)
+    if t is None:
+        from PySide6.QtCore import QTimer
+        from sequence_timeline_ruler import SCRUB_TICK_MS
+        t = QTimer(self)
+        t.setInterval(SCRUB_TICK_MS)
+        t.timeout.connect(lambda: _move_pan_tick(self))
+        self._move_pan_timer_obj = t
+    return t
+
+
+def _move_pan_tick(self):
+    drag = getattr(self, "_edge_drag", None)
+    if drag is None or drag.get("edge") != "move" or drag.get("pan_pos") is None:
+        _move_pan_timer(self).stop()
+        return
+    self._edge_drag_move(drag["pan_pos"], tick=True)
+
+
+def _move_pan_stop(self, drag):
+    # Release: no more panning; keep the panned view
+    t = getattr(self, "_move_pan_timer_obj", None)
+    if t is not None:
+        t.stop()
+    if drag is not None and drag.get("panned"):
+        try:
+            self._update_status()
+            self._save_view_state()
+        except Exception:
+            pass
+
+
+def _edge_drag_move(self, pos, tick=False):
     # The dragged clip asks for a frame delta; every clip in its link
     # group takes the same delta, clamped so no member leaves its own
-    # neighbors' gap (each on its own track)
+    # neighbors' gap (each on its own track). tick: auto-scroll timer
     drag = self._edge_drag
     clip = drag["clip"]
     group = drag.get("group") or self._drag_group(clip)
     drag["group"] = group
-    frame = self._frame_at_clips_x(self._x_in_clips(pos))
     edge = drag["edge"]
+    if edge == "move":
+        # BUILD 238: pan at the edges first, then use the frame under the
+        # cursor in the (possibly scrolled) view
+        drag["pan_pos"] = pos
+        timer = _move_pan_timer(self)
+        if _move_pan(self, drag, pos, tick):
+            if not timer.isActive():
+                timer.start()
+        elif timer.isActive():
+            timer.stop()
+    frame = self._frame_at_clips_x(self._x_in_clips(pos))
     if edge == "move":
         target = self._move_target_track(pos, drag)
         if target is not None:
@@ -1364,6 +1439,7 @@ def _clip_edge_cursor(self, obj, pos):
 
 def _clip_drag_release(self):
     # BUILD 162: eventFilter's left release of a clip drag (move or edge)
+    _move_pan_stop(self, self._edge_drag)     # BUILD 238
     if self._edge_drag["edge"] == "move":
         self._move_drag_release()
     else:
