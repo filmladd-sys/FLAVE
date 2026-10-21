@@ -36,18 +36,57 @@ def preview_db_path(project_path, sequence_id):
     return temp_file_path(project_path, "Preview", "db", sequence_id)
 
 
+# Preview file layout (BUILD 251):
+#   preview (frame INTEGER PRIMARY KEY, jpeg BLOB): one JPEG per frame
+#   DirtyImage (frame INTEGER PRIMARY KEY): frames whose JPEG is stale
+# A frame is clean when its preview row has a JPEG and it is not in
+# DirtyImage. The dirty list is its own small table so marking frames dirty
+# never rewrites the rows that hold the JPEGs. (A future DirtyAudio table
+# would follow the same pattern.) Files from before BUILD 251 keep an unused
+# preview.dirty column; _connect copies its marks into DirtyImage once.
+CLEAN_SQL = ("NOT EXISTS (SELECT 1 FROM DirtyImage d "
+             "WHERE d.frame = preview.frame)")
+
+
 def _connect(project_path, sequence_id):
-    # Open WAL; create the table if the file or table is missing
+    # Open WAL; create the tables if the file or a table is missing
     conn = sqlite3.connect(preview_db_path(project_path, sequence_id))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS preview (
             frame INTEGER PRIMARY KEY,
-            dirty INTEGER NOT NULL DEFAULT 1,
             jpeg BLOB
         )
     """)
+    has_dirty_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'DirtyImage'").fetchone() is not None
+    if not has_dirty_table:
+        conn.execute("CREATE TABLE IF NOT EXISTS DirtyImage "
+                     "(frame INTEGER PRIMARY KEY)")
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(preview)")]
+        if "dirty" in cols:
+            # Older file: its dirty marks move to DirtyImage once
+            conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) "
+                         "SELECT frame FROM preview WHERE dirty != 0")
+        conn.commit()
     return conn
+
+
+def _mark_dirty_sql(conn, first, last):
+    # Every frame with a preview row in first..last joins DirtyImage (a
+    # frame with no row is not clean anyway). Returns the rows added.
+    cur = conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) "
+                       "SELECT frame FROM preview WHERE frame BETWEEN ? AND ?",
+                       (int(first), int(last)))
+    return cur.rowcount
+
+
+def _save_clean_sql(conn, frame, jpeg):
+    # One clean frame: its JPEG row, and out of DirtyImage
+    conn.execute("INSERT OR REPLACE INTO preview (frame, jpeg) VALUES (?, ?)",
+                 (int(frame), jpeg))
+    conn.execute("DELETE FROM DirtyImage WHERE frame = ?", (int(frame),))
 
 
 # In-memory clean frames per preview file, so the ruler paint never opens
@@ -161,19 +200,16 @@ def _apply_relocate(project_path, sequence_id, relocs, seq):
         for a, b, d in relocs:
             rows = conn.execute(
                 "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
-                "AND dirty = 0 AND jpeg IS NOT NULL", (a, b)).fetchall()
+                "AND jpeg IS NOT NULL AND " + CLEAN_SQL, (a, b)).fetchall()
             got.append((d, rows))
         for a, b, d in relocs:
-            conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
-                         "AND dirty = 0", (a + d, b + d))
+            _mark_dirty_sql(conn, a + d, b + d)
         for d, rows in got:
             for frame, jpeg in rows:
                 nf = int(frame) + d
                 if nf < 0 or jpeg is None:
                     continue
-                conn.execute(
-                    "INSERT OR REPLACE INTO preview (frame, dirty, jpeg) VALUES (?, 0, ?)",
-                    (nf, jpeg))
+                _save_clean_sql(conn, nf, jpeg)
                 moved.append(nf)
         conn.commit()
     finally:
@@ -193,19 +229,15 @@ def _apply_shift(project_path, sequence_id, first, last, delta, seq):
     try:
         rows = conn.execute(
             "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
-            "AND dirty = 0 AND jpeg IS NOT NULL", (first, last)).fetchall()
-        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
-                     "AND dirty = 0", (first, last))
-        conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
-                     "AND dirty = 0", (first + delta, last + delta))
+            "AND jpeg IS NOT NULL AND " + CLEAN_SQL, (first, last)).fetchall()
+        _mark_dirty_sql(conn, first, last)
+        _mark_dirty_sql(conn, first + delta, last + delta)
         moved = []
         for frame, jpeg in rows:
             nf = int(frame) + delta
             if nf < 0 or jpeg is None:
                 continue
-            conn.execute(
-                "INSERT OR REPLACE INTO preview (frame, dirty, jpeg) VALUES (?, 0, ?)",
-                (nf, jpeg))
+            _save_clean_sql(conn, nf, jpeg)
             moved.append(nf)
         conn.commit()
     finally:
@@ -224,8 +256,8 @@ def _apply_shift(project_path, sequence_id, first, last, delta, seq):
 def apply_dirty_queue():
     # Write queued dirty marks (preview worker thread). A missing preview
     # file is not created: it has no clean rows anyway.
-    # Marks touch only clean rows (dirty = 0): an already dirty row is left
-    # alone, so a whole-sequence mark costs only the clean frames.
+    # A mark adds frames to DirtyImage (small rows): the JPEG rows are not
+    # touched, so a whole-sequence mark stays cheap.
     with _CLEAN_LOCK:
         items = list(_DIRTY_QUEUE)
         del _DIRTY_QUEUE[:]
@@ -275,15 +307,14 @@ def apply_dirty_queue():
         conn = _connect(project_path, sequence_id)
         t_c = time.perf_counter()
         try:
-            cur = conn.execute("UPDATE preview SET dirty = 1 WHERE frame BETWEEN ? AND ? "
-                               "AND dirty = 0", (first, last))
+            n_rows = _mark_dirty_sql(conn, first, last)
             t_u = time.perf_counter()
             conn.commit()
             t_m = time.perf_counter()
             if timed and t_m - t_it > SLOW_ITEM_S:
-                preview_log.log("dirty queue: mark %d..%d, %d rows: open %.3fs, "
+                preview_log.log("dirty queue: mark %d..%d, %d newly dirty: open %.3fs, "
                                 "update %.3fs, commit %.3fs" % (
-                                    first, last, cur.rowcount, t_c - t_it,
+                                    first, last, n_rows, t_c - t_it,
                                     t_u - t_c, t_m - t_u))
         finally:
             conn.close()
@@ -321,22 +352,24 @@ def FrameRetrieve(project_path, sequence_id, frame_num):
     # JPEG bytes if the row exists and is clean, else None
     conn = _connect(project_path, sequence_id)
     try:
-        row = conn.execute("SELECT dirty, jpeg FROM preview WHERE frame = ?",
-                           (int(frame_num),)).fetchone()
+        row = conn.execute("SELECT jpeg FROM preview WHERE frame = ? AND "
+                           + CLEAN_SQL, (int(frame_num),)).fetchone()
     finally:
         conn.close()
-    if row is None or row[0] != 0 or row[1] is None:
+    if row is None or row[0] is None:
         return None
-    return bytes(row[1])
+    return bytes(row[0])
 
 
 def FrameSave(project_path, sequence_id, frame_num, jpeg_blob, dirty):
     # Insert or replace one frame; dirty 0 = clean, 1 = dirty
     conn = _connect(project_path, sequence_id)
     try:
-        conn.execute("INSERT OR REPLACE INTO preview (frame, dirty, jpeg) VALUES (?, ?, ?)",
-                     (int(frame_num), 1 if dirty else 0,
-                      sqlite3.Binary(jpeg_blob) if jpeg_blob is not None else None))
+        _save_clean_sql(conn, frame_num,
+                        sqlite3.Binary(jpeg_blob) if jpeg_blob is not None else None)
+        if dirty:
+            conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) VALUES (?)",
+                         (int(frame_num),))
         conn.commit()
     finally:
         conn.close()
@@ -349,16 +382,22 @@ def FrameSave(project_path, sequence_id, frame_num, jpeg_blob, dirty):
 
 
 def FrameCleanRange(project_path, sequence_id, first, last):
-    # Sorted list of clean (dirty = 0) frames in first..last, one query.
-    # Read only: a missing preview file means no clean frames (not created).
+    # Sorted list of clean frames in first..last, one query. A missing
+    # preview file means no clean frames (not created). An existing file is
+    # opened with _connect, so an older file gets its DirtyImage table here
+    # (clean_set reads this first, before any other reader).
     path = preview_db_path(project_path, sequence_id)
     if not os.path.isfile(path):
         return []
-    conn = sqlite3.connect(path)
+    try:
+        conn = _connect(project_path, sequence_id)
+    except sqlite3.Error:
+        return []
     try:
         rows = conn.execute(
-            "SELECT frame FROM preview WHERE frame BETWEEN ? AND ? AND dirty = 0 "
-            "AND jpeg IS NOT NULL ORDER BY frame", (int(first), int(last))).fetchall()
+            "SELECT frame FROM preview WHERE frame BETWEEN ? AND ? "
+            "AND jpeg IS NOT NULL AND " + CLEAN_SQL + " ORDER BY frame",
+            (int(first), int(last))).fetchall()
     except sqlite3.Error:
         return []
     finally:
@@ -383,9 +422,7 @@ class PreviewBatch(object):
         # dirty_seq); default is the current number
         if self.conn is None:
             self.conn = _connect(self.project_path, self.sequence_id)
-        self.conn.execute(
-            "INSERT OR REPLACE INTO preview (frame, dirty, jpeg) VALUES (?, 0, ?)",
-            (int(frame_num), sqlite3.Binary(jpeg_blob)))
+        _save_clean_sql(self.conn, frame_num, sqlite3.Binary(jpeg_blob))
         self.pending.append(int(frame_num))
         with _CLEAN_LOCK:
             self.seqs.append(_DIRTY_SEQ[0] if seq is None else int(seq))
@@ -402,7 +439,8 @@ class PreviewBatch(object):
                      if _dirty_since(key, q, f)]
         # Built before an edit marked them dirty: keep them dirty
         for f in stale:
-            self.conn.execute("UPDATE preview SET dirty = 1 WHERE frame = ?", (f,))
+            self.conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) VALUES (?)",
+                              (f,))
         self.conn.commit()
         dt = time.perf_counter() - t0
         s = clean_set(self.project_path, self.sequence_id)

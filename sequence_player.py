@@ -118,6 +118,7 @@ class PreviewReader(object):
         return max(1, int(round(seconds * fps)))
 
     def _run(self):
+        from sequence_preview import CLEAN_SQL
         while not self.stop.is_set():
             with self.lock:
                 head = self.playhead
@@ -134,7 +135,7 @@ class PreviewReader(object):
             try:
                 rows = self.conn.execute(
                     "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
-                    "AND dirty = 0 AND jpeg IS NOT NULL",
+                    "AND jpeg IS NOT NULL AND " + CLEAN_SQL,
                     (missing[0], missing[-1])).fetchall()
             except sqlite3.Error:
                 self.wake.wait(0.05)
@@ -1121,7 +1122,7 @@ class SequencePlayer(QWindow):
 
     def play_fill(self, start, n):
         # Grab N and decode N onto the card. Held until the clock asks.
-        from sequence_preview import preview_db_path
+        from sequence_preview import preview_db_path, CLEAN_SQL
         path = preview_db_path(self.timeline._project_db(), self.sequence_id)
         if not os.path.isfile(path):
             return 0
@@ -1131,7 +1132,7 @@ class SequencePlayer(QWindow):
         # t0 = time.perf_counter()
         rows = self._play_conn.execute(
             "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
-            "AND dirty = 0 AND jpeg IS NOT NULL ORDER BY frame",
+            "AND jpeg IS NOT NULL AND " + CLEAN_SQL + " ORDER BY frame",
             (int(start), int(start) + int(n) - 1)).fetchall()
         # t_sql = (time.perf_counter() - t0) * 1000.0
         items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
