@@ -78,6 +78,178 @@ def caption_label(painter, label, text_rect):
         max(0, text_rect.width() - 6))
 
 
+# ---- BUILD 236: open caption clip = metadata title bar + text in the pane
+
+CAPTION_TEXT_COLOR = QColor(230, 230, 230)   # same as clip names on the bar
+UNLINKED_TEXT = "Unlinked"
+
+
+def _track_rows(tl):
+    # track id -> table row (display order, top = 0)
+    rows = {}
+    for r in range(tl.table.rowCount()):
+        it = tl.table.item(r, 0)
+        if it is not None and it.data(Qt.UserRole) is not None:
+            rows[it.data(Qt.UserRole)] = r
+    return rows
+
+
+def caption_for_clip_name(tl, clip, track_id):
+    # Name of the video / audio / image (or sequence) clip in the caption's
+    # link group on the track nearest the caption track (tie: the upper
+    # one); UNLINKED_TEXT when the group has no such clip
+    from keyframe import is_keyframe_clip_id
+    link_id = clip[8] if len(clip) > 8 else None
+    if link_id is None:
+        return UNLINKED_TEXT
+    rows = _track_rows(tl)
+    here = rows.get(track_id, 0)
+    best = None
+    for tid, clips in tl.clips_by_track.items():
+        for c in clips:
+            if (len(c) > 8 and c[8] == link_id and c[0] is not None and c[0] > 0
+                    and not is_keyframe_clip_id(c[0])):
+                r = rows.get(tid, 0)
+                key = (abs(r - here), r, c[2])
+                if best is None or key < best[0]:
+                    best = (key, c[4] or "")
+    return best[1] if best is not None else UNLINKED_TEXT
+
+
+def caption_title(tl, clip, track_id):
+    # "Caption | <For Clip> | <In> - <Out>": timeline in / out (out = first
+    # frame after the clip) as HH:MM:SS:FF at the sequence fps (the
+    # Sequence Manager duration format)
+    from sequence_manager import format_duration
+    fps = getattr(tl, "fps", 30)
+    start, length = int(clip[2]), int(clip[3])
+    return "Caption | %s | %s - %s" % (caption_for_clip_name(tl, clip, track_id),
+                                       format_duration(start, fps),
+                                       format_duration(start + length, fps))
+
+
+CAPTION_TEXT_PAD = 3
+
+
+def caption_text_rect(pane_rect, visible_rect=None):
+    # Text area of the content pane: padded, its left kept at the visible
+    # left edge of the Clips area (like the sticky names)
+    r = pane_rect.adjusted(CAPTION_TEXT_PAD, 1, -CAPTION_TEXT_PAD, -1)
+    if visible_rect is not None and r.left() < visible_rect.left() + CAPTION_TEXT_PAD:
+        r.setLeft(visible_rect.left() + CAPTION_TEXT_PAD)
+    return r
+
+
+def paint_caption_text(painter, pane_rect, text, visible_rect=None):
+    # Caption text word-wrapped (its own line breaks kept), top-left,
+    # clipped to the content pane
+    r = caption_text_rect(pane_rect, visible_rect)
+    if r.width() <= 2 or r.height() <= 2 or not text:
+        return
+    painter.save()
+    painter.setClipRect(pane_rect, Qt.IntersectClip)
+    painter.setPen(CAPTION_TEXT_COLOR)
+    painter.drawText(r, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, text)
+    painter.restore()
+
+
+def caption_pane_at(self, pos):
+    # (clip, content pane QRect in viewport coords) for the open caption
+    # clip whose content pane (below its title bar) is under pos, else None
+    from sequence_timeline_ruler import CLIPS_COL
+    from sequence_timeline_sql import ROLE_COLLAPSED
+    from keyframe import split_title_rect
+    from PySide6.QtCore import QRect
+    row = self.table.rowAt(pos.y())
+    item = self.table.item(row, 0) if row >= 0 else None
+    if item is None or (item.data(Qt.UserRole + 4) or "").lower() != "caption":
+        return None
+    if item.data(ROLE_COLLAPSED):
+        return None
+    cell = self.table.visualRect(self.table.model().index(row, CLIPS_COL))
+    if not cell.contains(pos):
+        return None
+    ppf = self.pixels_per_frame
+    for clip in reversed(self.clips_by_track.get(item.data(Qt.UserRole), [])):
+        x = int(cell.left() + (clip[2] - self.view_start_frame) * ppf)
+        w = max(1, int(clip[3] * ppf))
+        title, pane = split_title_rect(QRect(x, cell.top(), w, cell.height()))
+        if title is not None and pane.contains(pos):
+            return clip, pane
+        if QRect(x, cell.top(), w, cell.height()).contains(pos):
+            return None     # title bar (or no bar): not the pane
+    return None
+
+
+def edit_caption_inline(self, clip, pane):
+    # Double-click in the pane: QPlainTextEdit over the pane (captions can
+    # be multi-line, like the Edit dialog). Enter or focus-out commits,
+    # Shift+Enter adds a line break, Esc cancels. A changed text is saved
+    # with one undo step, then the timeline reloads (preview marks follow)
+    from PySide6.QtWidgets import QPlainTextEdit
+    from PySide6.QtCore import QObject, QEvent
+    old = getattr(self, "_caption_inline", None)
+    if old is not None:
+        old["finish"](True)
+    vp = self.table.viewport()
+    ed = QPlainTextEdit(vp)
+    ed.setPlainText(clip[4] or "")
+    ed.selectAll()
+    r = pane.intersected(vp.rect())
+    ed.setGeometry(r.left(), r.top(), max(r.width(), 120), max(r.height(), 40))
+    state = {"done": False, "editor": ed, "clip_id": clip[0]}
+
+    def finish(commit):
+        if state["done"]:
+            return
+        state["done"] = True
+        self._caption_inline = None
+        text = ed.toPlainText()
+        ed.removeEventFilter(filt)
+        ed.hide()
+        ed.deleteLater()
+        if commit and text != (clip[4] or ""):
+            _save_caption_text(self, -clip[0], text)
+        self.table.setFocus()
+
+    class _Filter(QObject):
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.KeyPress:
+                if ev.key() == Qt.Key_Escape:
+                    finish(False)
+                    return True
+                if ev.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
+                        ev.modifiers() & Qt.ShiftModifier):
+                    finish(True)
+                    return True
+            elif ev.type() == QEvent.FocusOut:
+                finish(True)
+            return False
+
+    filt = _Filter(ed)
+    ed.installEventFilter(filt)
+    state["finish"] = finish
+    self._caption_inline = state
+    ed.show()
+    ed.setFocus()
+    return ed
+
+
+def _save_caption_text(self, cap_id, text):
+    # captions.text only (same table / reload as the Edit dialog), one undo step
+    from undo import push_undo
+    push_undo(self._project_db(), "Edit caption text")
+    try:
+        conn = sqlite3.connect(self._project_db())
+        conn.execute("UPDATE captions SET text = ? WHERE id = ?", (text, int(cap_id)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Edit Caption", f"Could not save caption: {e}")
+        return
+    self._after_clip_change("Caption updated")
+
+
 CAPTION_TYPES = ["CEA-608", "CEA-708", "mov_text", "WebVTT"]
 DEFAULT_CAPTION_TYPE = "WebVTT"
 

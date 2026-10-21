@@ -1162,6 +1162,13 @@ class SequenceTimeline(QMainWindow):
                     edit_key(self, key_hit["clip"], key_hit["key_id"],
                              key_hit["frame"], key_hit["value"])
                     return True
+                # BUILD 236: open caption clip content pane: in-place text
+                # editor (title bar double-click: unchanged, nothing)
+                from sequence_timeline_captions import caption_pane_at, edit_caption_inline
+                pane_hit = caption_pane_at(self, dbl_pos)
+                if pane_hit is not None:
+                    edit_caption_inline(self, pane_hit[0], pane_hit[1])
+                    return True
                 return False
             if etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 # Click selection: normal = clip + link partners, Alt = only

@@ -122,8 +122,12 @@ class ClipDelegate(QStyledItemDelegate):
             text_rect = QRect(clip_rect)
             seq_ref = (getattr(tl, "_seq_refs", None) or {}).get(clip_id)
             if track_type == "caption":
-                # Caption: plain bar with the text, no icon, no waveform
-                pass
+                # Caption: plain bar, no icon, no waveform. BUILD 236: with a
+                # title bar the text is drawn in the pane (word-wrapped);
+                # without one (short row) the old one-line name below
+                if title_rect is not None:
+                    from sequence_timeline_captions import paint_caption_text
+                    paint_caption_text(painter, clip_rect, filename or "", rect)
             elif seq_ref is not None:
                 # BUILD 105: sequence clip, left / right sequence icons and
                 # the child name (no footage icon, waveform or peaks)
@@ -211,7 +215,12 @@ class ClipDelegate(QStyledItemDelegate):
                 label += gain_label(gain_db)
             if title_rect is not None:
                 # BUILD 128: the name lives in the title bar (sticky left,
-                # elided); no in-content name
+                # elided); no in-content name. BUILD 236: caption title =
+                # "Caption | For Clip | In - Out" (+ [S]), text in the pane
+                if track_type == "caption":
+                    from sequence_timeline_captions import caption_title
+                    label = caption_title(tl, clip, track_id) + (
+                        " [S]" if clip_solo else "")
                 paint_title_bar(painter, title_rect, label, rect)
             elif clip_rect.width() > 0:
                 # Row too short for a bar: BUILD 127 in-content name
