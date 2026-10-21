@@ -1,6 +1,7 @@
 # undo.py
 # Snapshot undo/redo for Ladd Video Editor. ASCII only.
-# <project stem>.undo.db next to the project (Test9.db -> Test9.undo.db).
+# {ProjectName}_Undo.db next to the project (Test9.db -> Test9_Undo.db,
+# BUILD 223, sequence_preview.temp_file_path).
 # Each snapshot copies whole tables (ATTACH + INSERT ... SELECT), ids kept.
 # Snapshot copy tables are named snap_<table>_<hash of column list>, so a
 # later schema change gets a new copy table instead of an ALTER.
@@ -22,8 +23,8 @@ _refreshers = []     # callables(project_path, label) run after a restore
 
 
 def undo_db_path(project_path):
-    stem, _ext = os.path.splitext(os.path.abspath(project_path))
-    return stem + ".undo.db"
+    from sequence_preview import temp_file_path
+    return temp_file_path(project_path, "Undo", "db")
 
 
 def ensure_undo_db(project_path):

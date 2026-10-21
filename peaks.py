@@ -2,9 +2,9 @@
 # Stored audio waveform peaks for footage. ASCII only.
 # data is packed signed 16-bit little-endian (min, max) pairs, one pair per
 # bucket, mono sum, PEAKS_PER_SECOND buckets per second.
-# Also stores mono 48 kHz 16-bit PCM in a sibling .audiotmp.db (AudioTmp
+# Also stores mono 48 kHz 16-bit PCM in a sibling _AudioTmp.db (AudioTmp
 # table) in the same FFmpeg pass, for later mix. No .wav sidecars.
-# On project load, if the .audiotmp.db is missing, it is created and filled
+# On project load, if the _AudioTmp.db is missing, it is created and filled
 # from existing footage (same mono 48 kHz s16le pass).
 
 import array
@@ -37,14 +37,14 @@ def ensure_peaks_table(conn):
 
 
 def audiotmp_db_path(project_db):
-    # LaddTest.db -> LaddTest.audiotmp.db in the same folder
-    folder = os.path.dirname(os.path.abspath(project_db))
-    stem = os.path.splitext(os.path.basename(project_db))[0]
-    return os.path.join(folder, stem + ".audiotmp.db")
+    # BUILD 223: LaddTest.db -> LaddTest_AudioTmp.db in the same folder
+    # (per project; sequence_preview.temp_file_path)
+    from sequence_preview import temp_file_path
+    return temp_file_path(project_db, "AudioTmp", "db")
 
 
 def ensure_audiotmp_db(project_db):
-    # Create the sibling .audiotmp.db and AudioTmp table if missing.
+    # Create the sibling _AudioTmp.db and AudioTmp table if missing.
     # Returns the path, or None if project_db is empty.
     if not project_db:
         return None
@@ -207,7 +207,7 @@ def compute_peaks(path):
 
 def store_peaks_for_footage(project_db, footage_id, path):
     # Compute and INSERT OR REPLACE peaks. Never raises; returns True if stored.
-    # Mono PCM is stored in the sibling .audiotmp.db as a side effect.
+    # Mono PCM is stored in the sibling _AudioTmp.db as a side effect.
     try:
         if not wants_peaks(path):
             return False
@@ -268,7 +268,7 @@ def backfill_audiotmp(project_db):
 
 
 def ensure_audiotmp_for_project(project_db):
-    # Project load/open: if .audiotmp.db is missing, create it and backfill
+    # Project load/open: if _AudioTmp.db is missing, create it and backfill
     # from existing footage. If it already exists, only ensure the table.
     # Synchronous. Never raises. Returns the audiotmp path or None.
     try:

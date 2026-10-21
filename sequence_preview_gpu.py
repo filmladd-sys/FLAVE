@@ -1,6 +1,6 @@
 # sequence_preview_gpu.py
 # BUILD 141: headless GPU composite for the preview worker, so
-# {sequence_id}_preview.db fills in the background with no Sequence Player
+# {ProjectName}_{sequence_id}_Preview.db fills in the background with no Sequence Player
 # open. No window and no GL: the process-wide CUDA primary context
 # (cuda_context, the same one an open player attaches to), one stream and
 # the blend kernel (created once, kept), the worker composite buffers,

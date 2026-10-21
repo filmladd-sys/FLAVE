@@ -1,6 +1,7 @@
 # sequence_preview.py
 # Preview cache database for Ladd Video Editor: one JPEG per sequence frame.
-# File lives next to the project file as {sequence_id}_preview.db.
+# File lives next to the project file as {ProjectName}_{sequence_id}_Preview.db
+# (BUILD 223, temp_file_path).
 # No decoder, no worker, no UI. ASCII only.
 
 import os
@@ -8,10 +9,23 @@ import sqlite3
 import threading
 
 
+def temp_file_path(project_path, kind, ext, sequence_id=None):
+    # BUILD 223: the one naming rule for FLAVE's temp / cache files next to
+    # the project file. ProjectName = the project db file name without its
+    # extension. Per sequence: {ProjectName}_{sequence_id}_{Kind}.{ext};
+    # per project (sequence_id None): {ProjectName}_{Kind}.{ext}.
+    # C:\Videos\test7.db, 3, "Preview", "db" -> C:\Videos\test7_3_Preview.db
+    path = os.path.abspath(project_path)
+    folder = os.path.dirname(path)
+    name = os.path.splitext(os.path.basename(path))[0]
+    if sequence_id is not None:
+        name = "%s_%d" % (name, int(sequence_id))
+    return os.path.join(folder, "%s_%s.%s" % (name, kind, ext))
+
+
 def preview_db_path(project_path, sequence_id):
-    # C:\Videos\test7.db + sequence 3 -> C:\Videos\3_preview.db
-    folder = os.path.dirname(os.path.abspath(project_path))
-    return os.path.join(folder, "%d_preview.db" % int(sequence_id))
+    # C:\Videos\test7.db + sequence 3 -> C:\Videos\test7_3_Preview.db
+    return temp_file_path(project_path, "Preview", "db", sequence_id)
 
 
 def _connect(project_path, sequence_id):

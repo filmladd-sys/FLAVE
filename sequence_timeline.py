@@ -2322,7 +2322,7 @@ class SequenceTimeline(QMainWindow):
                 text = status_text(_worker, self._project_db(), self.sequence_id)
         except Exception:
             text = ""
-        # BUILD 137: a source re-import (the .audiotmp.db changed; one
+        # BUILD 137: a source re-import (the _AudioTmp.db changed; one
         # os.stat per poll) turns the audio bar red, then a settle check
         try:
             from sequence_preview_audio import check_audio_source
@@ -2445,7 +2445,7 @@ class SequenceTimeline(QMainWindow):
         if self.sequence_id is not None:
             _add_open_id(self.sequence_id)
         self._apply_controls_alignment()
-        # Preview bar from the existing {id}_preview.db: paint once on open
+        # Preview bar from the existing {ProjectName}_{id}_Preview.db: paint once on open
         if hasattr(self, "ruler"):
             self.ruler.viewport().update()
 

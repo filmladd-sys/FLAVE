@@ -66,7 +66,7 @@ Project Manager exits the app.
 | `footage_importer.py` | Adds a media file to the `footage` table (ffprobe, interlace check) |
 | `sequence_manager.py` | Sequence Manager window |
 | `sequence_add.py` | Add Sequence dialog |
-| `undo.py` | Snapshot undo / redo in `<project>.undo.db` |
+| `undo.py` | Snapshot undo / redo in `{ProjectName}_Undo.db` |
 | `window_snapshot.py` | Camera button over each window's title bar; saves a PNG of that window |
 | `flave_capture.py` | FLAVE Capture: standalone screen recorder (Windows, run on its own); one FFmpeg ddagrab MP4 per monitor at native size, h264_nvenc; optional system audio WAV (WASAPI loopback via `soundcard`, same script in `--audio` mode); settings in `flave_capture.json` |
 | `dark_titlebar.py` | Dark title bars on Windows in dark mode |
@@ -110,12 +110,12 @@ whose functions take the timeline as `self` and are attached to the class)
 
 | File | Job |
 |---|---|
-| `sequence_preview.py` | `{sequence_id}_preview.db`: one JPEG per frame, dirty flags, the dirty-mark queue |
+| `sequence_preview.py` | `{ProjectName}_{sequence_id}_Preview.db`: one JPEG per frame, dirty flags, the dirty-mark queue |
 | `sequence_preview_worker.py` | The background thread that fills the preview DB (playhead frame, Play fill, F5 refresh) |
 | `sequence_preview_gpu.py` | Headless GPU composer (no GL) for the worker and the render |
 | `sequence_preview_diff.py` | Which frames an edit changed, from snapshots before / after |
-| `sequence_preview_audio.py` | Audio mix into `{sequence_id}_previewaudio.wav` (no FFmpeg) |
-| `peaks.py` | Waveform peaks and mono 48 kHz PCM in `<project>.audiotmp.db` |
+| `sequence_preview_audio.py` | Audio mix into `{ProjectName}_{sequence_id}_PreviewAudio.wav` (no FFmpeg) |
+| `peaks.py` | Waveform peaks and mono 48 kHz PCM in `{ProjectName}_AudioTmp.db` |
 | `refresh_preview_dialog.py` | The "Refreshing Preview" progress window |
 
 **Proxies and render**
@@ -130,9 +130,9 @@ whose functions take the timeline as `self` and are attached to the class)
 - **Project DB:** the `.db` file the user creates (schema in
   `new_project._init_db`). Footage paths are stored as absolute paths.
   Older DBs may lack newer columns; several modules check and degrade.
-- **Next to the project file:** `{sequence_id}_preview.db` (preview JPEGs,
-  WAL mode), `{sequence_id}_previewaudio.wav` (audio mix),
-  `<project>.audiotmp.db` (source PCM), `<project>.undo.db` (undo).
+- **Next to the project file:** `{ProjectName}_{sequence_id}_Preview.db` (preview JPEGs,
+  WAL mode), `{ProjectName}_{sequence_id}_PreviewAudio.wav` (audio mix),
+  `{ProjectName}_AudioTmp.db` (source PCM), `{ProjectName}_Undo.db` (undo).
 - **Proxies:** in the project's `ProxyPath` setting folder (the project
   folder if unset).
 - **Global settings:** a SQLite `settings` key-value table in
@@ -157,7 +157,7 @@ and the render produce the same picture.
 
 **How a frame gets on screen (the present path).** The Sequence Player
 does not composite. It shows the preview JPEG for the frame:
-- Scrub / still: read the JPEG from `{sequence_id}_preview.db`, decode,
+- Scrub / still: read the JPEG from `{ProjectName}_{sequence_id}_Preview.db`, decode,
   upload to the GL texture, draw a letterboxed quad. A miss asks the
   worker for that frame and keeps the last picture until it lands.
 - Play: `PreviewReader` (its own thread) reads batches of JPEGs ahead of
@@ -268,7 +268,7 @@ Useful console prefixes:
 - When adding a global setting with a default, add it to
   `GLOBAL_DEFAULTS` in `global_settings.py` with the same value the
   getters fall back to.
-- **Source audio storage.** `<project>.audiotmp.db` holds one blob per
+- **Source audio storage.** `{ProjectName}_AudioTmp.db` holds one blob per
   source (mono 48 kHz s16le, the whole decoded source). The preview audio
   mix reads only each clip's span with sqlite incremental blob I/O
   (`blobopen`, one handle per source per mix). Measured on 3 x 50 min
@@ -280,4 +280,4 @@ Useful console prefixes:
   Python, or cold-disk seeks into very long sources), store the audio as
   fixed-size chunk rows instead (e.g. 2^20 samples per row, keyed by
   source and chunk index), written at import, plus a one-time conversion
-  of existing `.audiotmp.db` files from the existing blobs (no FFmpeg).
+  of existing `_AudioTmp.db` files from the existing blobs (no FFmpeg).

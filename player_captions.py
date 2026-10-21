@@ -2,7 +2,7 @@
 # BUILD 102: soft-caption overlay for the Sequence Player. Captions are
 # drawn with QPainter on top of the presented GL picture, right before the
 # buffer swap. They are never part of the CUDA composite, the preview JPEGs
-# or {sequence_id}_preview.db. ASCII only.
+# or {ProjectName}_{sequence_id}_Preview.db. ASCII only.
 #
 # caption_snapshot() runs once per timeline snapshot (GUI thread, one DB
 # query); paint_captions() runs per shown frame and reads only the snapshot.

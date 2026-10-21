@@ -1,5 +1,5 @@
 # sequence_preview_worker.py
-# One background thread that fills {sequence_id}_preview.db for the active
+# One background thread that fills {ProjectName}_{sequence_id}_Preview.db for the active
 # timeline. Works outward from the playhead (next, previous, ...), skips clean
 # frames, yields to the GUI through the Sequence Player generate lock, and
 # sleeps on a condition when there is nothing to do. ASCII only.

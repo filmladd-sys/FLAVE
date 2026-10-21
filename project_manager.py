@@ -64,7 +64,7 @@ from global_settings import _get_global_setting, _set_global_setting
 
 
 def _ensure_audiotmp_for(project_db):
-    # Create sibling .audiotmp.db if missing and backfill from footage
+    # Create sibling _AudioTmp.db if missing and backfill from footage
     if not project_db:
         return
     try:
@@ -91,7 +91,7 @@ def _ensure_keyframe_tables_for(project_db):
 
 
 def _ensure_undo_db_for(project_db):
-    # <project stem>.undo.db next to the project, created if missing
+    # {ProjectName}_Undo.db next to the project, created if missing
     try:
         from undo import ensure_undo_db
         ensure_undo_db(project_db)

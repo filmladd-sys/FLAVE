@@ -70,7 +70,7 @@ class NewProjectWindow(QMainWindow):
 
     def _init_db(self, db_path):
         # The one definition of every project-db table (BUILD 78). Side
-        # databases (.audiotmp.db, .undo.db, _preview.db, global settings)
+        # databases (_AudioTmp.db, _Undo.db, _Preview.db, global settings)
         # are created by their own modules.
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()

@@ -115,7 +115,7 @@ class RulerHeader(QHeaderView):
                 painter.drawText(text_x, text_y, text)
                 sec += interval
         # Preview cache bar under the ruler: red = missing or dirty,
-        # green = clean row in {sequence_id}_preview.db. One range query.
+        # green = clean row in {ProjectName}_{sequence_id}_Preview.db. One range query.
         # BUILD 137: the video bar sits right above the audio bar
         bar_y = rect.bottom() - AUDIO_BAR_HEIGHT - PREVIEW_BAR_HEIGHT + 1
         # Clamped to the sequence: nothing drawn past the last frame
@@ -124,7 +124,7 @@ class RulerHeader(QHeaderView):
             painter.fillRect(rect.left(), bar_y, bar_right - rect.left(),
                              PREVIEW_BAR_HEIGHT, QColor(170, 40, 40))
             # BUILD 137: audio mix bar, one state for the whole sequence:
-            # green = {id}_previewaudio.wav current, red = dirty / missing /
+            # green = {ProjectName}_{id}_PreviewAudio.wav current, red = dirty / missing /
             # mixing / failed. Same extent as the video bar. Cached state
             # only (sequence_preview_audio.audio_bar_ok): no query here.
             # BUILD 139: ranges -- [] green, None all red, else green with
@@ -155,7 +155,7 @@ class RulerHeader(QHeaderView):
         clean = []
         if tl.sequence_id is not None and last >= first:
             try:
-                # In-memory set (loaded once from {id}_preview.db): no db open
+                # In-memory set (loaded once from {ProjectName}_{id}_Preview.db): no db open
                 from sequence_preview import clean_set
                 cs = clean_set(tl._project_db(), tl.sequence_id)
                 clean = sorted(f for f in list(cs) if first <= f <= last)

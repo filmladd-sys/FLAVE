@@ -1197,7 +1197,7 @@ class SequencePlayer(QWindow):
         #       f"total={(t4-t0)*1000:.1f}")
 
     def request_frame(self, force=True):
-        # Display comes only from {sequence_id}_preview.db. A miss signals
+        # Display comes only from {ProjectName}_{sequence_id}_Preview.db. A miss signals
         # the preview worker and holds the last picture until that JPEG lands.
         if self.closed or not self.isExposed():
             return

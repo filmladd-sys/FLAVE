@@ -1,5 +1,5 @@
 # sequence_player_audio.py
-# Plays {sequence_id}_previewaudio.wav with QAudioSink.
+# Plays {ProjectName}_{sequence_id}_PreviewAudio.wav with QAudioSink.
 # PCM is read with Python wave, held in memory, and pulled via QBuffer.
 # During play the timeline uses position_ms() as the master clock.
 # ASCII only.

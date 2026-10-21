@@ -489,8 +489,13 @@ class RenderJob(object):
         out_path = p["out_path"]
         if not out_path:
             return False, "No output path."
-        tmp = tempfile.mkdtemp(prefix="ladd_render_")
-        err_path = os.path.join(tmp, "ffmpeg_stderr.txt")
+        # BUILD 223: system temp folder {ProjectName}_{sequence_id}_Render_<random>
+        # holding {ProjectName}_{sequence_id}_RenderAudio.wav, _RenderCaptions.srt
+        # and _RenderStderr.txt; removed after the render
+        _base = "%s_%d" % (os.path.splitext(os.path.basename(
+            p.get("project_db") or "FLAVE"))[0], int(p.get("sequence_id") or 0))
+        tmp = tempfile.mkdtemp(prefix=_base + "_Render_")
+        err_path = os.path.join(tmp, _base + "_RenderStderr.txt")
         try:
             # audio (fresh mix of the whole range)
             t0 = time.perf_counter()
@@ -501,7 +506,7 @@ class RenderJob(object):
                 pcm, has_audio = mix_mono_pcm(p["project_db"], p["sequence_id"],
                                               p["fps"], total)
             if has_audio:
-                wav = write_wav(os.path.join(tmp, "audio.wav"), pcm, p["stereo"])
+                wav = write_wav(os.path.join(tmp, _base + "_RenderAudio.wav"), pcm, p["stereo"])
             t_audio = time.perf_counter() - t0
             # captions
             srt = None
@@ -509,7 +514,7 @@ class RenderJob(object):
             if p.get("captions_on"):
                 text, n = srt_text(p.get("captions", []), p["fps"])
                 if n:
-                    srt = os.path.join(tmp, "captions.srt")
+                    srt = os.path.join(tmp, _base + "_RenderCaptions.srt")
                     with open(srt, "w", encoding="utf-8", newline="\n") as f:
                         f.write(text)
                     lang = language_tag(p.get("languages", []))

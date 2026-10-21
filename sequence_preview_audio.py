@@ -1,7 +1,7 @@
 # sequence_preview_audio.py
-# Mix sequence audio into {sequence_id}_previewaudio.wav next to the project
+# Mix sequence audio into {ProjectName}_{sequence_id}_PreviewAudio.wav next to the project
 # file (same folder as the preview db). Source PCM is AudioTmp in the
-# sibling .audiotmp.db. No FFmpeg. ASCII only.
+# sibling _AudioTmp.db. No FFmpeg. ASCII only.
 
 import hashlib
 import json
@@ -107,7 +107,7 @@ def _scrub_ok_sig(project_db, sequence_id, fps, total_frames):
     # rebuild here, Play rebuilds) until the next edit / rebuild.
     try:
         st = _state(project_db, sequence_id)
-        # BUILD 136: a source re-import rewrites the sibling .audiotmp.db
+        # BUILD 136: a source re-import rewrites the sibling _AudioTmp.db
         # (no timeline edit): its size / mtime change re-dirties the mix
         # (stands in for a peaks.py hook)
         check_audio_source(project_db, sequence_id)
@@ -127,7 +127,7 @@ def _scrub_ok_sig(project_db, sequence_id, fps, total_frames):
 
 
 def check_audio_source(project_db, sequence_id):
-    # BUILD 136/137: the sibling .audiotmp.db changed size / mtime since the
+    # BUILD 136/137: the sibling _AudioTmp.db changed size / mtime since the
     # last look (source re-import) -> dirty. One os.stat. True if changed.
     try:
         st = _state(project_db, sequence_id)
@@ -287,13 +287,17 @@ def _audiotmp_stamp(project_db):
 
 
 def preview_audio_wav_path(project_db, sequence_id):
-    folder = os.path.dirname(os.path.abspath(project_db))
-    return os.path.join(folder, "%d_previewaudio.wav" % int(sequence_id))
+    # BUILD 223: {ProjectName}_{sequence_id}_PreviewAudio.wav next to the
+    # project (sequence_preview.temp_file_path); its atomic-write temp is
+    # this name + ".<token>.tmp"
+    from sequence_preview import temp_file_path
+    return temp_file_path(project_db, "PreviewAudio", "wav", sequence_id)
 
 
 def preview_audio_sig_path(project_db, sequence_id):
-    folder = os.path.dirname(os.path.abspath(project_db))
-    return os.path.join(folder, "%d_previewaudio.sig" % int(sequence_id))
+    # BUILD 223: {ProjectName}_{sequence_id}_PreviewAudio.sig
+    from sequence_preview import temp_file_path
+    return temp_file_path(project_db, "PreviewAudio", "sig", sequence_id)
 
 
 def _frame_to_sample(frame, fps):
@@ -523,7 +527,7 @@ def _signature_of(inputs, fps, total_frames):
 
 
 def _audiotmp_idents(project_db, names):
-    # [(basename, "id:len")] from the sibling .audiotmp.db, one query; the
+    # [(basename, "id:len")] from the sibling _AudioTmp.db, one query; the
     # blob length comes from the record header (no blob read)
     if not names:
         return []
@@ -1033,7 +1037,7 @@ def cancel_mix(project_db, sequence_id):
 
 
 # ---------------------------------------------------------------- BUILD 139
-# Range-based mix. Next to the WAV, {sequence_id}_previewaudio.layout (JSON)
+# Range-based mix. Next to the WAV, {ProjectName}_{sequence_id}_PreviewAudio.layout (JSON)
 # records the mix inputs the WAV was built from (rows, volume clips, track
 # order, source idents, fps, frames, sample count) and the signature it
 # matches. The next mix diffs that layout with the timeline and rewrites
@@ -1069,8 +1073,10 @@ _LAYOUT_CACHE = {}          # path -> ((size, mtime_ns), layout)
 
 
 def preview_audio_layout_path(project_db, sequence_id):
-    folder = os.path.dirname(os.path.abspath(project_db))
-    return os.path.join(folder, "%d_previewaudio.layout" % int(sequence_id))
+    # BUILD 223: {ProjectName}_{sequence_id}_PreviewAudio.layout (its write
+    # temp is this name + ".tmp")
+    from sequence_preview import temp_file_path
+    return temp_file_path(project_db, "PreviewAudio", "layout", sequence_id)
 
 
 def _layout_of(inputs, fps, total_frames, sig):
