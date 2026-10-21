@@ -756,54 +756,52 @@ def delete_clip_ids_db(cur, ids):
 
 
 def ripple_delete_clips(self):
-    # BUILD 245: clip menu Ripple Delete. Removes the same clips as Delete
-    # (delete_clip_ids / delete_clip_ids_db), then closes each removed
-    # clip's span on its own track with the empty-space Ripple Delete
-    # rules (ripple_moving): the clips on that track starting at or after
-    # the span's end, plus their link partners on any track, move left by
-    # the span's length, clamped so nothing goes before 0 or overlaps a
-    # clip that is not moving. Spans are closed right to left (by start
-    # frame) so earlier shifts never move a later span's clips twice.
-    # Keyframe clips move with their keys, markers are source-relative
-    # and follow their clips. One undo step ("Ripple delete").
+    # BUILD 245 / 246: clip menu Ripple Delete. Removes the same clips as
+    # Delete (delete_clip_ids / delete_clip_ids_db), then closes the empty
+    # time the deleted set leaves across ALL tracks of the sequence:
+    # S / E = earliest start / latest end of the deleted clips (footage,
+    # caption and keyframe clips). G1 = E; G0 = the earliest frame >= S
+    # where [G0, G1) is empty on every track, i.e. just after the latest
+    # end of any remaining clip (any track or type) that overlaps [S, E).
+    # Empty space before S is not closed. Every remaining clip starting at
+    # or after G1, plus its link partners, moves left by G1 - G0, clamped by
+    # the shared ripple rules (ripple_moving: nothing before 0, no overlap
+    # with a clip that is not moving). Keyframe clips move with their keys,
+    # markers are source-relative and follow their clips. One undo step
+    # ("Ripple delete"); with nothing to close it is a plain delete.
     if not self._selected_clip_ids or self._edge_drag is not None:
         return
     ids = delete_clip_ids(self)
-    clip_track = {}
-    orig = {}
-    for tid, clips in self.clips_by_track.items():
-        for c in clips:
-            clip_track[c[0]] = tid
-            orig[c[0]] = c[2]
-    spans = sorted(
-        [(c[2], c[3], clip_track[c[0]]) for clips in self.clips_by_track.values()
-         for c in clips if c[0] in ids],
-        key=lambda s: s[0], reverse=True)
-    moved = {}
-    limited = 0
-    for start, length, tid in spans:
-        end = start + length
-        right = [c for c in self.clips_by_track.get(tid, [])
-                 if c[0] not in ids and c[2] >= end]
-        if not right:
-            continue
-        moving, delta = ripple_moving(self, right, -int(length), ids)
-        if delta > -int(length):
-            limited += 1
-        if delta >= 0:
-            continue
-        for c in moving.values():
-            c[2] = c[2] + delta
-            moved[c[0]] = c
+    all_clips = [c for clips in self.clips_by_track.values() for c in clips]
+    gone = [c for c in all_clips if c[0] in ids]
+    if not gone:
+        return
+    span_s = min(int(c[2]) for c in gone)
+    span_e = max(int(c[2]) + int(c[3]) for c in gone)
+    kept = [c for c in all_clips if c[0] not in ids]
+    g0 = span_s
+    for c in kept:
+        c_end = int(c[2]) + int(c[3])
+        if int(c[2]) < span_e and c_end > span_s and c_end > g0:
+            g0 = c_end
+    g1 = span_e
+    want = g0 - g1          # negative = frames to close
+    moving = {}
+    delta = 0
+    if want < 0:
+        right = [c for c in kept if int(c[2]) >= g1]
+        if right:
+            moving, delta = ripple_moving(self, right, want, ids)
+            if delta >= 0:
+                moving, delta = {}, 0
     from undo import push_undo
     push_undo(self._project_db(), "Ripple delete")
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
         delete_clip_ids_db(cur, ids)
-        for c in moved.values():
-            if c[2] == orig.get(c[0]):
-                continue
+        for c in moving.values():
+            c[2] = c[2] + delta
             if is_keyframe_clip_id(c[0]):
                 persist_keyframe_clip_time(cur, c)
                 continue
@@ -819,9 +817,16 @@ def ripple_delete_clips(self):
     self._selected_clip_ids = set()
     self._selection_order = []
     self._selection_solo = False
-    msg = f"Ripple Delete: deleted {len(ids)} clip(s), moved {len(moved)}"
-    if limited:
-        msg += " (some gaps only partly closed: a clip was in the way)"
+    if want >= 0:
+        msg = (f"Ripple Delete: deleted {len(ids)} clip(s); nothing to close "
+               "(a remaining clip covers the end of the span)")
+    elif not moving:
+        msg = f"Ripple Delete: deleted {len(ids)} clip(s); no clips to move"
+    else:
+        msg = (f"Ripple Delete: deleted {len(ids)} clip(s), moved "
+               f"{len(moving)} by {delta} frames")
+        if delta != want:
+            msg += f" (limited from {want}: a clip was in the way)"
     self._after_clip_change(msg)
 
 
