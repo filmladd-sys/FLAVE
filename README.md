@@ -32,8 +32,8 @@ says what it owns.
     `WARNING: numpy not installed ...` line at launch when it is missing.
   - `faster-whisper` -- optional, only for Generate Captions (audio clip
     right-click; `pip install faster-whisper`). The `small` model (about
-    460 MB) downloads on first use to the Hugging Face cache
-    (`%USERPROFILE%\.cache\huggingface\hub`). It runs on CUDA (float16)
+    460 MB) downloads on first use to the `models` folder next to the
+    FLAVE .py files (Project Manager sets HF_HOME there at startup). It runs on CUDA (float16)
     when ctranslate2 finds cuBLAS and cuDNN 9 for CUDA 12 (for example
     `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`), otherwise on the
     CPU (int8, slower). Without the package the menu item shows the

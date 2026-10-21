@@ -6,6 +6,14 @@
 import sys
 import os
 import sqlite3
+
+# Hugging Face downloads (the faster-whisper model used by Generate Captions)
+# cache in a "models" folder next to these .py files, wherever FLAVE runs
+# from (no drive letter is hard-coded). Set before anything imports
+# huggingface_hub. The Windows symlink warning is turned off.
+os.environ["HF_HOME"] = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "models")
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QMenuBar, QMenu,
     QFileDialog, QMessageBox, QStatusBar, QInputDialog, QLineEdit
