@@ -26,7 +26,7 @@ DEC_MAX = 8
 DEC_SKIP_MAX = 4      # BUILD 119: decode through gaps up to this, else seek
 
 from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QImage, QWindow, QOpenGLContext
+from PySide6.QtGui import QImage, QWindow, QOpenGLContext, QCursor
 
 import preview_log      # BUILD 247: preview generation timing lines
 from sequence_timeline_sql import (
@@ -51,6 +51,32 @@ from sequence_player_preview import (
     FrameGenerate, FrameGenerateBatch, preview_jpeg_quality,
     decode_play_jpegs, _free_scaled, _free_play_scratch,
 )
+
+# Playback Size (right-click menu on the player): the picture is drawn at
+# this percent of the fitted (letterboxed) picture rect, centered; 100
+# fills the player as before. A display choice only (the stored preview
+# frames and the Preview Size project setting are not touched). One global
+# setting shared by every Sequence Player, kept across sessions.
+PLAYBACK_SIZE_KEY = "playerPlaybackSize"
+PLAYBACK_SIZE_CHOICES = (100, 75, 50, 25)
+
+
+def playback_size_percent():
+    # Stored Playback Size percent, 100 if missing or not a choice
+    try:
+        pct = int(str(_get_global_setting(PLAYBACK_SIZE_KEY, "100")).strip())
+    except Exception:
+        return 100
+    return pct if pct in PLAYBACK_SIZE_CHOICES else 100
+
+
+def playback_rect(vw, vh, pct):
+    # The fitted picture half-extents (vw, vh, in GL units, 1.0 = the whole
+    # window side) scaled to pct percent; centered, so the half-extents
+    # alone define the rect
+    f = max(1, min(100, int(pct))) / 100.0
+    return vw * f, vh * f
+
 
 # The player is waiting on a preview frame. The worker skips its idle yield
 # while this is set, so a miss is filled instead of deferred.
@@ -462,6 +488,7 @@ class SequencePlayer(QWindow):
         self._play_free = []             # indexes into _play_bufs not in the ring
         self._play_lock = threading.Lock()
         self._preview_audio = None          # PreviewAudioPlayer for mix WAV
+        self._playback_pct = playback_size_percent()   # BUILD 256
 
     # ---- geometry, same scheme as the other windows
 
@@ -514,6 +541,47 @@ class SequencePlayer(QWindow):
         if event.type() == QEvent.Close:
             self._on_close()
         return super().event(event)
+
+    def mousePressEvent(self, event):
+        # BUILD 256: right click anywhere in the player opens the Playback
+        # Size menu (the QWindow itself gets the mouse; it is not inside a
+        # widget container)
+        if event.button() == Qt.RightButton:
+            event.accept()
+            self._playback_menu(event.globalPosition().toPoint())
+            return
+        super().mousePressEvent(event)
+
+    def _playback_menu(self, global_pos):
+        # Checkable Playback Size items; a pick is stored and the last
+        # picture is drawn again at once in the new rect
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction, QActionGroup
+        menu = QMenu()
+        sub = menu.addMenu("Playback Size")
+        group = QActionGroup(sub)
+        group.setExclusive(True)
+        for pct in PLAYBACK_SIZE_CHOICES:
+            text = "100% (fill the player)" if pct == 100 else "%d%%" % pct
+            act = QAction(text, sub)
+            act.setCheckable(True)
+            act.setChecked(pct == self._playback_pct)
+            act.setData(pct)
+            group.addAction(act)
+            sub.addAction(act)
+        chosen = menu.exec(global_pos if global_pos is not None else QCursor.pos())
+        if chosen is None or self.closed:
+            return
+        pct = int(chosen.data())
+        if pct == self._playback_pct:
+            return
+        self._playback_pct = pct
+        _set_global_setting(PLAYBACK_SIZE_KEY, str(pct))
+        if self.ready and self.isExposed():
+            try:
+                self._present(_dark_mode(), self.shown_frame is not None)
+            except Exception as e:
+                print(f"Sequence Player redraw failed: {e}")
 
     def keyPressEvent(self, event):
         # Ctrl+Z / Ctrl+Y: QWindow is not a QWidget, so the application
@@ -1586,6 +1654,9 @@ class SequencePlayer(QWindow):
             else:
                 vw = 1.0
                 vh = win_aspect / seq_aspect
+            # BUILD 256: Playback Size (right-click menu), centered; the
+            # captions below use the same vw / vh
+            vw, vh = playback_rect(vw, vh, self._playback_pct)
             gl.glEnable(GL_TEXTURE_2D)
             gl.glBindTexture(GL_TEXTURE_2D, self.tex.value)
             gl.glBegin(GL_QUADS)
