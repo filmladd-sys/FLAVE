@@ -60,6 +60,94 @@ def _log(msg):
         pass
 
 
+# BUILD 276: Windows only. The nvidia-cublas-cu12 / nvidia-cudnn-cu12 pip
+# wheels put their DLLs under <site-packages>/nvidia/<package>/bin (or lib),
+# which the Windows DLL search does not include, so CTranslate2's lazy load
+# of cublas64_12.dll fails and transcription falls back to the CPU.
+# setup_cuda_dll_dirs finds every folder under the "nvidia" package that
+# holds DLLs, adds it with os.add_dll_directory and prepends it to PATH
+# (a plain-name LoadLibrary may only search PATH). It runs once, when this
+# module is imported, before faster_whisper / ctranslate2 are imported
+# (both are imported only inside functions of this module). Never raises;
+# a no-op on other systems.
+_DLL_DIR_HANDLES = []
+_DLL_DIRS_DONE = False
+
+
+def _nvidia_roots():
+    # Folders of the "nvidia" namespace package: its import spec first,
+    # then <site-packages>/nvidia of every site-packages folder
+    roots = []
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia")
+        if spec is not None and spec.submodule_search_locations:
+            roots.extend(spec.submodule_search_locations)
+    except Exception:
+        pass
+    sites = []
+    try:
+        import site
+        sites.extend(site.getsitepackages())
+        sites.append(site.getusersitepackages())
+    except Exception:
+        pass
+    sites.append(os.path.join(sys.prefix, "Lib", "site-packages"))
+    for sp in sites:
+        if isinstance(sp, str):
+            roots.append(os.path.join(sp, "nvidia"))
+    out = []
+    for r in roots:
+        try:
+            r = os.path.normcase(os.path.abspath(r))
+        except Exception:
+            continue
+        if r not in out and os.path.isdir(r):
+            out.append(r)
+    return out
+
+
+def setup_cuda_dll_dirs():
+    global _DLL_DIRS_DONE
+    if os.name != "nt" or _DLL_DIRS_DONE:
+        return
+    _DLL_DIRS_DONE = True
+    try:
+        import fnmatch
+        dirs, names = [], set()
+        for root in _nvidia_roots():
+            base_depth = root.rstrip(os.sep).count(os.sep)
+            for d, subdirs, files in os.walk(root):
+                # nvidia/<package>/bin is 2 levels down; allow one more
+                if d.rstrip(os.sep).count(os.sep) - base_depth >= 3:
+                    subdirs[:] = []
+                dlls = [f for f in files if f.lower().endswith(".dll")]
+                if dlls and d not in dirs:
+                    dirs.append(d)
+                    names.update(f.lower() for f in dlls)
+        if not dirs:
+            _log("no nvidia pip DLL folders found (nvidia-cublas-cu12 / "
+                 "nvidia-cudnn-cu12 not installed in this Python); CUDA "
+                 "needs cuBLAS / cuDNN on PATH")
+            return
+        path = os.environ.get("PATH", "")
+        parts = [os.path.normcase(p) for p in path.split(os.pathsep) if p]
+        for d in dirs:
+            try:
+                _DLL_DIR_HANDLES.append(os.add_dll_directory(d))
+            except Exception as e:
+                _log("add_dll_directory failed for %s: %s" % (d, e))
+            if os.path.normcase(d) not in parts:
+                path = d + os.pathsep + path
+            _log("CUDA DLL folder added: " + d)
+        os.environ["PATH"] = path
+        for want in ("cublas64_12.dll", "cublasLt64_12.dll", "cudnn*64_9.dll"):
+            hit = sorted(n for n in names if fnmatch.fnmatch(n, want.lower()))
+            _log("%s: %s" % (want, ", ".join(hit) if hit else "NOT FOUND"))
+    except Exception as e:
+        _log("CUDA DLL folder setup failed: %s: %s" % (type(e).__name__, e))
+
+
 def _log_exception(what, exc):
     # Full exception type, message and traceback, one console line each
     _log("%s: %s: %s" % (what, type(exc).__name__, exc))
@@ -103,6 +191,9 @@ def log_environment():
         ct, count = "not importable (%s)" % e, "unavailable"
     _log("faster-whisper %s, ctranslate2 %s, CUDA devices: %s, CPU cores: %s"
          % (fw, ct, count, os.cpu_count()))
+
+
+setup_cuda_dll_dirs()
 
 
 class CaptionGenError(Exception):
