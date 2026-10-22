@@ -94,25 +94,41 @@ def _track_rows(tl):
     return rows
 
 
+def _caption_partners(tl):
+    # (track rows, link_id -> [(row, start_frame, name)]) of the linkable
+    # clips (positive ids, not keyframe clips). Built once per clips_by_track
+    # list (a refresh makes a new one) and kept in tl._caption_partner_cache;
+    # refresh and track-row clip moves set that cache to None.
+    from keyframe import is_keyframe_clip_id
+    cached = getattr(tl, "_caption_partner_cache", None)
+    if cached is not None and cached[0] is tl.clips_by_track:
+        return cached[1], cached[2]
+    rows = _track_rows(tl)
+    partners = {}
+    for tid, clips in tl.clips_by_track.items():
+        r = rows.get(tid, 0)
+        for c in clips:
+            if (len(c) > 8 and c[8] is not None and c[0] is not None and c[0] > 0
+                    and not is_keyframe_clip_id(c[0])):
+                partners.setdefault(c[8], []).append((r, c[2], c[4] or ""))
+    tl._caption_partner_cache = (tl.clips_by_track, rows, partners)
+    return rows, partners
+
+
 def caption_for_clip_name(tl, clip, track_id):
     # Name of the video / audio / image (or sequence) clip in the caption's
     # link group on the track nearest the caption track (tie: the upper
     # one); UNLINKED_TEXT when the group has no such clip
-    from keyframe import is_keyframe_clip_id
     link_id = clip[8] if len(clip) > 8 else None
     if link_id is None:
         return UNLINKED_TEXT
-    rows = _track_rows(tl)
+    rows, partners = _caption_partners(tl)
     here = rows.get(track_id, 0)
     best = None
-    for tid, clips in tl.clips_by_track.items():
-        for c in clips:
-            if (len(c) > 8 and c[8] == link_id and c[0] is not None and c[0] > 0
-                    and not is_keyframe_clip_id(c[0])):
-                r = rows.get(tid, 0)
-                key = (abs(r - here), r, c[2])
-                if best is None or key < best[0]:
-                    best = (key, c[4] or "")
+    for r, start, name in partners.get(link_id, ()):
+        key = (abs(r - here), r, start)
+        if best is None or key < best[0]:
+            best = (key, name)
     return best[1] if best is not None else UNLINKED_TEXT
 
 

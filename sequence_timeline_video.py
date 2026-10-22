@@ -101,6 +101,7 @@ def _generate_out_icon(self, footage_id, track_id, out_frame):
               # f"height={height} (grab failed or frame past end of video)")
         return None
     self._icon_cache[(footage_id, out_frame, height)] = pix
+    self._icon_miss.pop((footage_id, out_frame, height), None)
     self.table.viewport().update()
     return pix
 

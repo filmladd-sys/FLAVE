@@ -174,7 +174,13 @@ def _load_original(conn, footage_id, frame_number=0):
     return None
 
 
+# Counts icon rows saved by this process. The Sequence Timeline drops its
+# remembered icon misses when this changes, so a newly saved icon shows.
+ICON_SAVE_SERIAL = 0
+
+
 def _save_icon(conn, footage_id, pixmap, is_original, store_w, store_h, frame_number=0):
+    global ICON_SAVE_SERIAL
     if pixmap is None or pixmap.isNull():
         return
     data = _pixmap_to_jpeg_bytes(pixmap)
@@ -184,6 +190,7 @@ def _save_icon(conn, footage_id, pixmap, is_original, store_w, store_h, frame_nu
         VALUES (?, ?, ?, ?, ?, ?)
     """, (footage_id, store_w, store_h, 1 if is_original else 0, int(frame_number), data))
     conn.commit()
+    ICON_SAVE_SERIAL += 1
 
 
 def ensure_footage_icon(project_db, footage_id, path=None, ftype=None, max_w=None, max_h=None,

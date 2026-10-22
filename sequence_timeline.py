@@ -261,6 +261,8 @@ class SequenceTimeline(QMainWindow):
         self._selection_order = []
         self._selection_solo = False
         self._icon_cache = {}
+        self._icon_miss = {}      # icon_pixmap misses, see icon_pixmap
+        self._icon_miss_serial = None
         self._peaks_cache = {}
         self._out_paint_miss = {}
         self._seq_refs = {}
@@ -386,6 +388,8 @@ class SequenceTimeline(QMainWindow):
         # Clips drawn by a delegate; footage dropped from Footage Manager
         self.clips_by_track = {}
         self._icon_cache = {}
+        self._icon_miss = {}
+        self._icon_miss_serial = None
         self._peaks_cache = {}   # footage_id -> (pps, duration, array) or None
         # Clip selection: ids for painting, ordered list so "first" is the
         # first clip selected. Selection solo (Alt+click) is in memory only;
@@ -1041,11 +1045,25 @@ class SequenceTimeline(QMainWindow):
         # aspect (6240x4160 at 119 gives 179x119). With generate,
         # ensure_footage_icon looks up that height, else scales the stored full
         # frame, else grabs it. Mid-drag (generate False) only a stored icon of
-        # this size is used. Misses are not cached, so a later call tries again.
+        # this size is used.
+        # Misses are remembered in _icon_miss (key -> True if generation was
+        # tried, False if only storage was read), so repaints do not query
+        # the project DB or retry a failed grab for every clip. A storage-only
+        # miss does not block a later generate call. The misses are dropped
+        # whenever an icon is saved in this process (footage_manager_display
+        # ICON_SAVE_SERIAL), on timeline refresh, and with _icon_cache.
         frame_number = max(0, int(frame_number or 0))
         key = (footage_id, frame_number, height)
         if key in self._icon_cache:
             return self._icon_cache[key]
+        import footage_manager_display
+        serial = footage_manager_display.ICON_SAVE_SERIAL
+        if serial != self._icon_miss_serial:
+            self._icon_miss.clear()
+            self._icon_miss_serial = serial
+        tried = self._icon_miss.get(key)
+        if tried is not None and (tried or not generate):
+            return None
         # Printed on cache misses only, so repaints of cached icons stay quiet
         # print(f"ICON: timeline icon_pixmap clip_id={clip_id} footage_id={footage_id} "
               # f"in_frame={frame_number} height={height} generate={generate}")
@@ -1061,12 +1079,21 @@ class SequenceTimeline(QMainWindow):
                 )
             else:
                 pix = self._read_icon_blob(footage_id, frame_number, height)
-            if pix is None or pix.isNull():
-                return None
         except Exception:
+            pix = None
+        if pix is None or pix.isNull():
+            # A grab saves icons even when this exact key is not found;
+            # take the new serial so the miss below is not dropped at once
+            self._icon_miss_serial = footage_manager_display.ICON_SAVE_SERIAL
+            self._icon_miss[key] = bool(generate)
             return None
         self._icon_cache[key] = pix
+        self._icon_miss.pop(key, None)
         return pix
+
+    def _clear_icon_misses(self):
+        # Forget remembered icon misses so the next paint looks again
+        self._icon_miss.clear()
 
     def go_home(self):
         # Fully left: frame 0 after the left spacer
@@ -1536,7 +1563,7 @@ class SequenceTimeline(QMainWindow):
         if frame != self.current_frame:
             self.current_frame = frame
             self.ruler.viewport().update()
-            self.playhead_overlay.update()
+            self.playhead_overlay.update_playhead()
         if not silent:
             if self._playing:
                 import time
@@ -1554,7 +1581,11 @@ class SequenceTimeline(QMainWindow):
             self._update_status()
 
     def refresh(self):
-        # Table and clips reload (sequence_timeline_sql.py), then the player
+        # Table and clips reload (sequence_timeline_sql.py), then the player.
+        # Icon misses and the caption partner names are looked up again
+        # after a reload.
+        self._clear_icon_misses()
+        self._caption_partner_cache = None
         refresh(self)
         from markers import load_markers
         self._markers = load_markers(self._project_db())

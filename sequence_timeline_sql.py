@@ -451,6 +451,7 @@ def _save_track_display(self, track_id, height_px, bg_color):
         QMessageBox.warning(self, "Track Display Properties", f"Could not save track: {e}")
         return
     self._icon_cache.clear()
+    self._clear_icon_misses()
     self.refresh()
     self.status_bar.showMessage("Saved track display properties", 3000)
 

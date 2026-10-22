@@ -4,7 +4,7 @@
 
 import math
 from PySide6.QtWidgets import QHeaderView, QWidget
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor, QPen, QPainter
 
 
@@ -416,24 +416,61 @@ def ruler_label_text(seconds):
     return f"{hours}:{minutes:02d}:{secs:02d}"
 
 
+# Half width (px) of the strip invalidated around a moved 1 px line
+PLAYHEAD_STRIP_PAD = 2
+
+
 class PlayheadOverlay(QWidget):
     # Transparent child of the track table viewport: draws the playhead
     # center line through every visible track, on top of the clips.
+    # The overlay is not opaque, so any area of it that is updated is also
+    # repainted in the table underneath; a playhead move therefore updates
+    # only narrow strips (update_playhead), not the whole overlay.
     def __init__(self, timeline, viewport):
         super().__init__(viewport)
         self.timeline = timeline
+        # Playhead x values painted since the last update_playhead
+        self._painted_xs = set()
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setGeometry(viewport.rect())
         self.raise_()
 
-    def paintEvent(self, event):
+    def _frame_x(self, frame):
+        # Viewport x of a sequence frame in the Clips column, None if off view
         tl = self.timeline
         table = tl.table
         left = table.columnViewportPosition(CLIPS_COL)
         right = left + table.columnWidth(CLIPS_COL) - 1
-        sx = int(left + (tl.current_frame - tl.view_start_frame) * tl.pixels_per_frame)
-        if left <= sx <= right and 0 <= sx < self.width():
+        x = int(left + (frame - tl.view_start_frame) * tl.pixels_per_frame)
+        if left <= x <= right and 0 <= x < self.width():
+            return x
+        return None
+
+    def update_playhead(self):
+        # After a current_frame change: update the strip where the playhead
+        # was last painted, the strip at its new x, and the snap / insert
+        # lines. Changes to the other overlay items (drop preview, slice
+        # lines, rubber band) and scrolls or zooms update their own areas.
+        tl = self.timeline
+        xs = list(self._painted_xs) + [self._frame_x(tl.current_frame)]
+        self._painted_xs = set()
+        for line in (getattr(tl, "_snap_frame", None), getattr(tl, "_insert_frame", None)):
+            if line is not None:
+                xs.append(self._frame_x(line))
+        pad = PLAYHEAD_STRIP_PAD
+        for x in xs:
+            if x is not None:
+                self.update(x - pad, 0, 2 * pad + 1, self.height())
+
+    def paintEvent(self, event):
+        tl = self.timeline
+        sx = self._frame_x(tl.current_frame)
+        if event.rect().contains(self.rect()):
+            self._painted_xs = set()
+        if sx is not None and event.rect().intersects(QRect(sx, 0, 1, self.height())):
+            self._painted_xs.add(sx)
+        if sx is not None:
             painter = QPainter(self)
             painter.fillRect(sx, 0, 1, self.height(), QColor(255, 80, 80))
             painter.end()
@@ -462,8 +499,8 @@ class PlayheadOverlay(QWidget):
         for line in (getattr(tl, "_snap_frame", None), getattr(tl, "_insert_frame", None)):
             if line is None:
                 continue
-            wx = int(left + (line - tl.view_start_frame) * tl.pixels_per_frame)
-            if left <= wx <= right and 0 <= wx < self.width():
+            wx = self._frame_x(line)
+            if wx is not None:
                 painter = QPainter(self)
                 painter.fillRect(wx, 0, 1, self.height(), QColor(255, 255, 255))
                 painter.end()

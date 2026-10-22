@@ -56,8 +56,14 @@ class ClipDelegate(QStyledItemDelegate):
             return
         tl = self.timeline
         rect = option.rect
+        # Only clips inside the area being repainted are drawn (a playhead
+        # move repaints narrow strips); layout such as sticky names still
+        # uses the whole cell
+        vis = paint_area(painter, rect)
+        if vis.isEmpty():
+            return
         painter.save()
-        painter.setClipRect(rect)
+        painter.setClipRect(vis)
         name_item = tl.table.item(index.row(), 0)
         collapsed = bool(name_item.data(ROLE_COLLAPSED)) if name_item is not None else False
         track_id = name_item.data(Qt.UserRole) if name_item is not None else None
@@ -77,7 +83,7 @@ class ClipDelegate(QStyledItemDelegate):
             # Clip rect is the time span only, whatever the icon sizes
             x = int(rect.left() + (start_frame - tl.view_start_frame) * ppf)
             w = max(1, int(length_frames * ppf))
-            if x + w < rect.left() or x > rect.right():
+            if x + w < vis.left() or x > vis.right():
                 continue
             clip_rect = QRect(x, rect.top(), w, rect.height())
             # Disabled clips draw dimmer
@@ -241,6 +247,26 @@ class ClipDelegate(QStyledItemDelegate):
             painter.drawRect(full_rect.adjusted(0, 0, -1, -1))
             painter.setOpacity(1.0)
         painter.restore()
+
+
+def paint_area(painter, cell):
+    # Part of cell that this paint redraws: the painter clip if one is set,
+    # else the widget update region (the paint engine system clip, mapped
+    # from device to logical coordinates, 1 px margin for rounding). The
+    # whole cell when neither is known (painting to an image).
+    area = None
+    if painter.hasClipping():
+        area = painter.clipBoundingRect().toAlignedRect()
+    else:
+        engine = painter.paintEngine()
+        region = engine.systemClip() if engine is not None else None
+        if region is not None and not region.isEmpty():
+            inverse, ok = painter.deviceTransform().inverted()
+            if ok:
+                area = inverse.mapRect(region.boundingRect()).adjusted(-1, -1, 1, 1)
+    if area is None:
+        return QRect(cell)
+    return cell.intersected(area)
 
 
 _SEQ_ICON_CACHE = {}
@@ -840,6 +866,7 @@ def _relocate_clip(self, clip, track_id):
                 del clips[i]
                 break
     self.clips_by_track.setdefault(track_id, []).append(clip)
+    self._caption_partner_cache = None
 
 
 # Track moves keep time and move the whole drag group (a linked stack, or
