@@ -364,6 +364,10 @@ def refresh(self):
         # BUILD 165: clip gain (dB) for the title bar and waveform scale
         from clip_gain import load_clip_gains
         self._clip_gains = load_clip_gains(cur, self.sequence_id)
+        # Frame rate conform by footage id, for the clip icons
+        # (sequence_timeline_video.icon_source_frame)
+        from sequence_player import load_fps_conform
+        self._fps_conform = load_fps_conform(conn, getattr(self, "fps", None))
         # BUILD 102: player caption overlay rebuilds from the new rows
         self._caption_snapshot = None
         conn.close()

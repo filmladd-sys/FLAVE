@@ -11,12 +11,23 @@ def out_frame_for(in_frame, length_frames):
     return max(0, int(in_frame or 0) + max(1, int(length_frames or 1)) - 1)
 
 
+def icon_source_frame(tl, footage_id, frame):
+    # Footage frame shown for sequence index frame of a video clip: the
+    # same frame rate conform as the player (sequence_player
+    # clip_source_frame, the timeline's _fps_conform); 1:1 when the
+    # footage rate is unknown or matches the sequence
+    from sequence_player import clip_source_frame
+    conform = (getattr(tl, "_fps_conform", None) or {}).get(footage_id)
+    return clip_source_frame(frame, conform)
+
+
 def video_out_pixmap(tl, footage_id, height, in_frame, length_frames, clip_id):
     # Video out icon for paint: storage only, never generated here
     # Same key as _generate_out_icon: (footage_id, out frame,
     # height). Cache first, then the stored resized row of
     # that exact frame and height (any width).
-    out_frame = out_frame_for(in_frame, length_frames)
+    out_frame = icon_source_frame(tl, footage_id,
+                                  out_frame_for(in_frame, length_frames))
     out_pix = tl.icon_pixmap(footage_id, height, out_frame,
                              generate=False, clip_id=clip_id)
     if out_pix is None or out_pix.isNull():
@@ -58,8 +69,9 @@ def _generate_out_icon(self, footage_id, track_id, out_frame):
     # Make, store and cache the out-point icon at track height (same
     # ensure_footage_icon path as the in icon). Called on drop and on
     # right-edge release, never from paint. Paint then finds it in
-    # _icon_cache under (footage_id, out_frame, row height).
-    out_frame = max(0, int(out_frame))
+    # _icon_cache under (footage_id, out_frame, row height). out_frame is
+    # a sequence index; the footage frame is icon_source_frame of it.
+    out_frame = icon_source_frame(self, footage_id, max(0, int(out_frame)))
     if footage_id is None:
         # print("ICON out failed: no footage_id")
         return None

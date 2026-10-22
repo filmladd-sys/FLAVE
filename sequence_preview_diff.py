@@ -91,6 +91,9 @@ class SnapshotIndex(object):
         clips_by_track = snap[1]
         self.track_order = snap[4] if len(snap) >= 5 else {}
         self.proxies = snap[6] if len(snap) >= 7 else {}
+        # Frame rate conform by footage id (snap[19]): a changed footage or
+        # sequence rate changes the source frames, so it is in desc
+        self.fps_conform = snap[19] if len(snap) > 19 else {}
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7)]
         # BUILD 147: + crop_x (snap[8]) and crop_y (snap[9]): their clip
@@ -162,15 +165,18 @@ class SnapshotIndex(object):
             if c is None:
                 continue
             link_id = c[8] if len(c) > 8 else None
+            conform = None
             if kind == "video":
                 src = int(c[7]) - (int(c[2]) - d)
+                conform = self.fps_conform.get(c[1])
             else:
                 src = 0
             fx = []
             for e in self.effects:
                 p = e.pick(link_id, f, order)
                 fx.append(None if p is None else _bracket(p[2], f, d))
-            layers.append((kind, c[1], src, self.proxies.get(c[0]), tuple(fx)))
+            layers.append((kind, c[1], src, self.proxies.get(c[0]), conform,
+                           tuple(fx)))
         return tuple(layers)
 
 

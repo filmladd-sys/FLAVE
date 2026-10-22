@@ -37,7 +37,7 @@ def preview_db_path(project_path, sequence_id):
 #   preview (frame INTEGER PRIMARY KEY, jpeg BLOB): one JPEG per frame
 #   DirtyImage (frame INTEGER PRIMARY KEY): frames whose JPEG is stale
 #   PreviewInfo (key TEXT PRIMARY KEY, value TEXT): "ImageSize" (BUILD 255,
-#     see sync_image_size)
+#     see sync_image_size), "FpsConform" (see sync_fps_conform)
 # A frame is clean when its preview row has a JPEG and it is not in
 # DirtyImage. The dirty list is its own small table so marking frames dirty
 # never rewrites the rows that hold the JPEGs. (A future DirtyAudio table
@@ -337,6 +337,72 @@ def sync_image_size(project_path, sequence_id, size, legacy_size):
             del _DIRTY_LOG[:-256]
     _IMAGE_SIZE[key] = size
     return changed
+
+
+# PreviewInfo "FpsConform": the frame rate conform the stored frames were
+# built with, "footage_id=ratio" items joined by ";" (sequence_player
+# fps_conform_ratio; footage read 1:1 is not listed). A file without it was
+# built with every footage read 1:1.
+_FPS_CONFORM = {}       # (project abspath, sequence_id) -> value on disk
+
+
+def _conform_text(conform):
+    return dict((int(fid), "%.12g" % float(r))
+                for fid, r in (conform or {}).items() if r)
+
+
+def sync_fps_conform(project_path, sequence_id, conform, clip_ranges):
+    # Preview worker thread, at the start of each pass. conform: {footage_id:
+    # ratio} the frames are built with now; clip_ranges: {footage_id:
+    # [(first, last), ...]} of its video clips on the timeline. Frames of
+    # footage whose ratio differs from the one stored join DirtyImage and
+    # leave the clean set (footage fps learned or changed outside an edit,
+    # sequence fps changed, files built before the conform), then the
+    # current value is stored. True when frames were marked dirty.
+    key = (os.path.abspath(project_path), int(sequence_id))
+    now = _conform_text(conform)
+    value = ";".join("%d=%s" % (fid, now[fid]) for fid in sorted(now))
+    if _FPS_CONFORM.get(key) == value:
+        return False
+    conn = _connect(project_path, sequence_id)
+    ranges = []
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS PreviewInfo "
+                     "(key TEXT PRIMARY KEY, value TEXT)")
+        row = conn.execute("SELECT value FROM PreviewInfo "
+                           "WHERE key = 'FpsConform'").fetchone()
+        old = {}
+        for item in str(row[0] if row and row[0] else "").split(";"):
+            fid, _sep, r = item.partition("=")
+            try:
+                old[int(fid)] = r
+            except ValueError:
+                continue
+        for fid in set(old) | set(now):
+            if old.get(fid) != now.get(fid):
+                ranges.extend((int(a), int(b))
+                              for a, b in clip_ranges.get(fid, ()) if b >= a)
+        for first, last in ranges:
+            _mark_dirty_sql(conn, first, last)
+        if row is None or (row[0] or "") != value:
+            conn.execute("INSERT OR REPLACE INTO PreviewInfo (key, value) "
+                         "VALUES ('FpsConform', ?)", (value,))
+        conn.commit()
+    finally:
+        conn.close()
+    if ranges:
+        s = clean_set(project_path, sequence_id)
+        with _CLEAN_LOCK:
+            for first, last in ranges:
+                for f in [f for f in s if first <= f <= last]:
+                    s.discard(f)
+                # logged like an edit's mark, so nothing built before it
+                # can come back clean
+                _DIRTY_SEQ[0] += 1
+                _DIRTY_LOG.append((_DIRTY_SEQ[0], key, first, last))
+            del _DIRTY_LOG[:-256]
+    _FPS_CONFORM[key] = value
+    return bool(ranges)
 
 
 # In-memory clean frames per preview file, so the ruler paint never opens

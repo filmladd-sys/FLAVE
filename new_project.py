@@ -284,9 +284,11 @@ class NewProjectWindow(QMainWindow):
         # deinterlace 1 = deinterlaced or inverse-telecined. proxy_fps /
         # proxy_frames: the proxy file's rate and frame count; source_fps:
         # the original's rate when the proxy was made. Clip edit points
-        # (in_frame, out) are always SOURCE frames; a proxy whose rate
+        # (in_frame, out) are sequence frames, read 1:1 as footage frames
+        # unless footage.fps differs from the sequence fps (then conformed
+        # by time, sequence_player.clip_source_frame); a proxy whose rate
         # differs (deint2x, ivtc) is read at proxy index =
-        # floor(source index / source_fps * proxy_fps + eps).
+        # floor(footage index / source_fps * proxy_fps + eps).
         cur.execute("""
             CREATE TABLE IF NOT EXISTS Proxies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -13,7 +13,8 @@
 
 import sqlite3
 from sequence_timeline_ruler import CLIPS_COL
-from sequence_timeline_video import out_frame_for, video_out_pixmap
+from sequence_timeline_video import (out_frame_for, video_out_pixmap,
+                                     icon_source_frame)
 from sequence_timeline_audio import _draw_waveform
 from sequence_timeline_captions import (
     is_caption_id, clip_table_and_id, paint_caption_bar,
@@ -153,8 +154,10 @@ class ClipDelegate(QStyledItemDelegate):
                                     in_frame, length_frames,
                                     (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0))
             else:
-                # Video clips show the source frame at their left edge; stills use 0
-                icon_frame = in_frame if track_type == "video" else 0
+                # Video clips show the source frame at their left edge
+                # (frame rate conformed); stills use 0
+                icon_frame = (icon_source_frame(tl, footage_id, in_frame)
+                              if track_type == "video" else 0)
                 # No grabs mid-drag; generate on release
                 pix = tl.icon_pixmap(footage_id, ch, icon_frame,
                                      generate=tl._edge_drag is None, clip_id=clip_id)

@@ -164,6 +164,7 @@ class PreviewWorker(object):
         if total <= 0:
             return
         self._sync_preview_size(project, sequence_id)
+        self._sync_fps_conform(project, sequence_id, snapshot)
         if _refresh_all[0] or _play_priority[0]:
             # BUILD 247: a full pass (F5 refresh or Play fill) is timed
             plog.begin("F5 refresh" if _refresh_all[0] else "Play fill",
@@ -202,6 +203,32 @@ class PreviewWorker(object):
                 self.saved += 1
         except Exception as e:
             print(f"Preview size check failed: {e}")
+
+    def _sync_fps_conform(self, project, sequence_id, snapshot):
+        # Stored frames of footage whose frame rate conform changed outside
+        # an edit (fps learned by the Footage Manager, sequence fps changed,
+        # frames built before the conform) are marked dirty
+        # (sequence_preview.sync_fps_conform) and the ruler repaints.
+        try:
+            from sequence_preview import sync_fps_conform
+            conform = snapshot[19] if len(snapshot) > 19 else {}
+            kinds = dict((r[0], r[3]) for r in snapshot[0])
+            ranges = {}
+            for track_id, clips in snapshot[1].items():
+                if kinds.get(track_id) != "video":
+                    continue
+                for c in clips:
+                    if c[1] is None:
+                        continue
+                    a = int(c[2])
+                    ranges.setdefault(int(c[1]), []).append(
+                        (a, a + max(1, int(c[3])) - 1))
+            if sync_fps_conform(project, sequence_id, conform, ranges):
+                print("WORKER frame rate conform changed; frames of the "
+                      "affected clips marked dirty")
+                self.saved += 1
+        except Exception as e:
+            print(f"Frame rate conform check failed: {e}")
 
     def _commit(self, batch, wait=True):
         # Commit the open transaction; counts rows for the ruler repaint and

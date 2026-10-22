@@ -55,8 +55,8 @@ class VideoIndex(SnapshotIndex):
         base = SnapshotIndex.desc(self, f, d)
         if not self.paths:
             return base
-        return tuple((k, (fid, self.paths.get(fid)), s, p, fx)
-                     for k, fid, s, p, fx in base)
+        return tuple((k, (fid, self.paths.get(fid)), s, p, cf, fx)
+                     for k, fid, s, p, cf, fx in base)
 
     def rel(self, f):
         # Content relative to frame f (source frame and key frames counted

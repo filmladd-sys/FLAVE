@@ -235,15 +235,81 @@ def proxy_frame_ratio(source_fps, proxy_fps):
 
 
 def map_source_frame(src_idx, ratio, proxy_frames=None):
-    # Clip edit points (in_frame, out) are SOURCE frames. A rate-changing
-    # proxy is read at floor(src / src_fps * proxy_fps + eps), clamped to
-    # its last frame.
+    # Read index floor(src_idx * ratio + eps), clamped to proxy_frames - 1
+    # when given. ratio None = src_idx as is. A rate-changing proxy alone
+    # uses ratio = proxy_fps / source_fps (see clip_source_frame).
     if not ratio:
         return int(src_idx)
     idx = int(math.floor(float(src_idx) * ratio + FRAME_MAP_EPS))
     if proxy_frames:
         idx = min(idx, int(proxy_frames) - 1)
     return max(0, idx)
+
+
+# Frame rate conform. Clip edit points (in_frame, out) and the timeline are
+# in SEQUENCE frames, i.e. time at the sequence rate (audio is placed the
+# same way). Footage whose footage.fps differs from the sequence fps is
+# read at footage index floor(seq_index * footage_fps / seq_fps + eps), so
+# 30 fps footage on a 29.97 sequence plays at its real speed (one footage
+# frame in about 1000 is skipped). The tolerance is relative and tight
+# enough that 30 vs 29.97 (0.1%) conforms while 29.97 vs 30000/1001 does
+# not. Unknown fps (NULL, 0, old database) reads 1:1.
+FPS_CONFORM_TOL = 1e-4
+
+
+def fps_conform_ratio(footage_fps, seq_fps):
+    # footage_fps / seq_fps when the rates differ, else None (1:1)
+    try:
+        f_f, s_f = float(footage_fps or 0), float(seq_fps or 0)
+    except (TypeError, ValueError):
+        return None
+    if f_f <= 0 or s_f <= 0 or abs(f_f / s_f - 1.0) < FPS_CONFORM_TOL:
+        return None
+    return f_f / s_f
+
+
+def load_fps_conform(conn, seq_fps):
+    # {footage_id: fps_conform_ratio} for footage whose rate differs from
+    # seq_fps. A database without footage.fps gives {} (everything 1:1).
+    out = {}
+    try:
+        rows = conn.execute(
+            "SELECT id, fps FROM footage WHERE fps IS NOT NULL").fetchall()
+    except sqlite3.Error:
+        return out
+    for fid, fps in rows:
+        r = fps_conform_ratio(fps, seq_fps)
+        if r is not None:
+            out[int(fid)] = r
+    return out
+
+
+def resolve_fps_conform(project_db, seq_fps):
+    # load_fps_conform from the project file; {} when it cannot be read
+    if not project_db or not os.path.isfile(project_db):
+        return {}
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            return load_fps_conform(conn, seq_fps)
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
+def clip_source_frame(seq_src, conform=None, proxy_ratio=None,
+                      proxy_frames=None):
+    # Decode index of a video clip at sequence index seq_src (clip in_frame
+    # + frame - start). conform: fps_conform_ratio of its footage (None =
+    # 1:1). proxy_ratio: proxy_frame_ratio of a rate-changing proxy, which
+    # is relative to the footage rate, so both together map sequence time
+    # to footage time to the proxy index in one step:
+    # floor(seq_src * footage_fps / seq_fps * proxy_fps / source_fps + eps).
+    ratio = proxy_ratio
+    if conform:
+        ratio = conform * (proxy_ratio or 1.0)
+    return map_source_frame(max(0, int(seq_src)), ratio, proxy_frames)
 
 
 # BUILD 241: out-of-range source frames (BUILD 240) are learned from the
@@ -421,10 +487,13 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
         tl.clips_by_track, track_order)
     # return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
     #         proxies, opacity_clips, crop_x_clips, crop_y_clips)
+    # Frame rate conform (snapshot[19]): {footage_id: footage_fps / seq_fps}
+    # for footage whose rate differs from the sequence (clip_source_frame)
+    fps_conform = resolve_fps_conform(project_db, getattr(tl, "fps", None))
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
             gamma_clips, brightness_clips, contrast_clips, rotate_clips,
-            outline_clips) + tuple(outline_rgba_clips)
+            outline_clips) + tuple(outline_rgba_clips) + (fps_conform,)
 
 
 # ---------------------------------------------------------------- window
@@ -817,6 +886,8 @@ class SequencePlayer(QWindow):
         outline_rgba_clips = tuple(snapshot[i] if len(snapshot) > i else []
                                    for i in (15, 16, 17, 18))
         from keyframe import outline_for_link
+        # Frame rate conform by footage id (snapshot[19], clip_source_frame)
+        fps_conform = snapshot[19] if len(snapshot) > 19 else {}
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -843,9 +914,12 @@ class SequencePlayer(QWindow):
                     if len(pr) > 3:
                         ratio, pframes = pr[2], pr[3]
                 if path:
-                    src = (clip[7] + frame - start) if kind == "video" else 0
-                    if kind == "video" and ratio:
-                        src = map_source_frame(max(0, int(src)), ratio, pframes)
+                    src = 0
+                    if kind == "video":
+                        # Sequence index -> footage (conform) -> proxy index
+                        src = clip_source_frame(
+                            clip[7] + frame - start, fps_conform.get(clip[1]),
+                            ratio, pframes)
                     link_id = clip[8] if len(clip) > 8 else None
                     scale = scale_percent_for_link(
                         scale_clips, link_id, frame, clip_order,
