@@ -67,8 +67,10 @@ class RulerHeader(QHeaderView):
         frame_pen.setWidth(1)
         second_pen = QPen(QColor(255, 255, 255))
         second_pen.setWidth(1)
-        # Only paint frames in view: view_start_frame .. view_start_frame + visible
-        first = start
+        # Only paint frames in view: view_start_frame .. view_start_frame + visible.
+        # The view may start before frame 0 (TIMELINE_LEFT_PAD_PX spacer):
+        # nothing is drawn for negative frames.
+        first = max(0, start)
         last = min(total - 1, start + tl.visible_frames())
         interval = ruler_label_interval(ppf * fps) if fps > 0 and ppf > 0 else 0
         # Frame ticks only when they are at least 1 px apart
@@ -118,10 +120,12 @@ class RulerHeader(QHeaderView):
         # green = clean row in {ProjectName}_{sequence_id}_Preview.db. One range query.
         # BUILD 137: the video bar sits right above the audio bar
         bar_y = rect.bottom() - AUDIO_BAR_HEIGHT - PREVIEW_BAR_HEIGHT + 1
-        # Clamped to the sequence: nothing drawn past the last frame
+        # Clamped to the sequence: nothing drawn before frame 0 (left
+        # spacer) or past the last frame
+        bar_left = max(rect.left(), int(left + (0 - start) * ppf))
         bar_right = min(rect.right() + 1, int(left + (total - start) * ppf))
-        if bar_right > rect.left():
-            painter.fillRect(rect.left(), bar_y, bar_right - rect.left(),
+        if bar_right > bar_left:
+            painter.fillRect(bar_left, bar_y, bar_right - bar_left,
                              PREVIEW_BAR_HEIGHT, QColor(170, 40, 40))
             # BUILD 137: audio mix bar, one state for the whole sequence:
             # green = {ProjectName}_{id}_PreviewAudio.wav current, red = dirty / missing /
@@ -137,17 +141,17 @@ class RulerHeader(QHeaderView):
                 except Exception:
                     audio_dirty = None
             a_y = bar_y + PREVIEW_BAR_HEIGHT
-            a_w = bar_right - rect.left()
+            a_w = bar_right - bar_left
             if audio_dirty is None:
-                painter.fillRect(rect.left(), a_y, a_w, AUDIO_BAR_HEIGHT,
+                painter.fillRect(bar_left, a_y, a_w, AUDIO_BAR_HEIGHT,
                                  QColor(170, 40, 40))
             else:
-                painter.fillRect(rect.left(), a_y, a_w, AUDIO_BAR_HEIGHT,
+                painter.fillRect(bar_left, a_y, a_w, AUDIO_BAR_HEIGHT,
                                  QColor(40, 170, 60))
                 for f0, f1 in audio_dirty:
                     if f1 < first or f0 > last:
                         continue
-                    x0 = max(rect.left(), int(left + (f0 - start) * ppf))
+                    x0 = max(bar_left, int(left + (f0 - start) * ppf))
                     x1 = min(bar_right, int(left + (f1 + 1 - start) * ppf))
                     if x0 < bar_right:
                         painter.fillRect(x0, a_y, max(1, x1 - x0),
@@ -301,13 +305,15 @@ def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
     # (x < margin or x > width - margin) while the view can still move:
     # pan by the mouse travel into the margin toward that edge (a press
     # pans the clicked frame to the margin), plus on a timer tick
-    # SCRUB_TICK_GAIN * depth; the playhead stays at the margin. At frame 0
-    # (left) or the end (right) the view stops and the playhead follows the
-    # mouse up to the edge.
+    # SCRUB_TICK_GAIN * depth; the playhead stays at the margin. At the left
+    # limit (frame 0 after the TIMELINE_LEFT_PAD_PX spacer) or the end
+    # (right) the view stops and the playhead follows the mouse up to the
+    # edge, never below frame 0.
     ppf = float(ppf) if ppf and ppf > 0 else 1.0
     total = max(1, int(total))
     width = max(1, int(width))
     view = int(view)
+    min_start = view_min_start(ppf)
     max_start = view_max_start(total, visible, ppf)
     m = max(0, min(int(margin), (width - 1) // 3))
     left_m, right_m = m, width - m
@@ -315,7 +321,7 @@ def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
     def at(px, v):
         return max(0, min(total - 1, v + int(round(px / ppf))))
 
-    if m > 0 and x < left_m and view > 0:
+    if m > 0 and x < left_m and view > min_start:
         ref = left_m if last_x is None else min(last_x, left_m)
         pan = max(0.0, ref - x)
         if tick:
@@ -323,8 +329,8 @@ def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
         f = (pan + rem) / ppf
         df = int(f)
         rem = (f - df) * ppf
-        view = max(0, view - df)
-        if view == 0:
+        view = max(min_start, view - df)
+        if view == min_start:
             return view, at(x, view), 0.0
         return view, at(left_m, view), rem
     if m > 0 and x > right_m and view < max_start:
@@ -347,14 +353,27 @@ def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
 # The view can scroll past the end by this many pixels, rounded up to whole
 # frames (view_start_frame is a frame), so it is the same at any zoom.
 TIMELINE_RIGHT_PAD_PX = 120
+# Empty spacer kept to the left of frame 0, so frame 0 and a playhead on it
+# sit clear of the track header column. View padding only: view_start_frame
+# may go negative by this many pixels, rounded up to whole frames; clips,
+# the playhead and every edit stay at frame 0 or later, and the ruler draws
+# nothing for negative frames.
+TIMELINE_LEFT_PAD_PX = 24
+
+
+def view_min_start(ppf):
+    # Smallest view_start_frame: frame 0 drawn TIMELINE_LEFT_PAD_PX in
+    ppf = float(ppf) if ppf and ppf > 0 else 1.0
+    return -int(math.ceil(TIMELINE_LEFT_PAD_PX / ppf))
 
 
 def view_max_start(total, visible, ppf):
     # Largest view_start_frame: the last frame plus TIMELINE_RIGHT_PAD_PX
-    # of empty track space fit in the visible frames
+    # of empty track space fit in the visible frames. Never below
+    # view_min_start, so a sequence that fits keeps the left spacer.
     ppf = float(ppf) if ppf and ppf > 0 else 1.0
     pad = int(math.ceil(TIMELINE_RIGHT_PAD_PX / ppf))
-    return max(0, int(total) + pad - max(1, int(visible)))
+    return max(view_min_start(ppf), int(total) + pad - max(1, int(visible)))
 
 
 RULER_LABEL_INTERVALS = (1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200)

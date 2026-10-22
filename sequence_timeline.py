@@ -9,7 +9,7 @@ import sqlite3
 from sequence_timeline_ruler import (
     CLIPS_COL, RULER_HEIGHT, ZOOM_MIN_PPF, ZOOM_MAX_PPF, ZOOM_STEP, WHEEL_ZOOM_STEP,
     RulerHeader, clamp_zoom, ruler_label_interval, ruler_label_text,
-    PlayheadOverlay, view_max_start,
+    PlayheadOverlay, view_max_start, view_min_start,
 )
 from sequence_timeline_image import IMAGE_EXTENSIONS, _add_image_track
 from sequence_timeline_keyframe import _add_keyframe_track
@@ -865,15 +865,15 @@ class SequenceTimeline(QMainWindow):
             add_track_acts[action]()
             return
         if add_keyframe_action is not None and action == add_keyframe_action:
-            click_frame = self.view_start_frame + x_in_clips / self.pixels_per_frame
+            click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
             self.add_keyframe_clip(track_id, click_frame)
             return
         if add_caption_action is not None and action == add_caption_action:
-            click_frame = self.view_start_frame + x_in_clips / self.pixels_per_frame
+            click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
             self.add_caption(track_id, click_frame)
             return
         if ripple_action is not None and action == ripple_action:
-            click_frame = self.view_start_frame + x_in_clips / self.pixels_per_frame
+            click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
             self.ripple_delete(track_id, click_frame)
             return
         # BUILD 161: Move / Enable / Solo / Track Display Properties in
@@ -1042,7 +1042,8 @@ class SequenceTimeline(QMainWindow):
         return pix
 
     def go_home(self):
-        self.view_start_frame = 0
+        # Fully left: frame 0 after the left spacer
+        self.view_start_frame = view_min_start(self.pixels_per_frame)
         self.current_frame = 0
         self._clamp_view()
         self.ruler.viewport().update()
@@ -1069,12 +1070,18 @@ class SequenceTimeline(QMainWindow):
 
     def _clamp_view(self):
         # may scroll TIMELINE_RIGHT_PAD_PX past the last frame (view_max_start)
+        # and TIMELINE_LEFT_PAD_PX before frame 0 (view_min_start)
         max_start = view_max_start(self.total_frames(), self.visible_frames(),
                                    self.pixels_per_frame)
-        self.view_start_frame = max(0, min(max_start, int(self.view_start_frame)))
+        self.view_start_frame = max(view_min_start(self.pixels_per_frame),
+                                    min(max_start, int(self.view_start_frame)))
 
     def _update_clips_width(self):
-        # Clips width is set by the Stretch mode; just keep the view valid and repaint
+        # Clips width is set by the Stretch mode; just keep the view valid and repaint.
+        # A view inside the left spacer (zoom or resize) stays fully left at the
+        # new zoom.
+        if self.view_start_frame < 0:
+            self.view_start_frame = view_min_start(self.pixels_per_frame)
         self._clamp_view()
         self.ruler.viewport().update()
         self.table.viewport().update()
@@ -1096,8 +1103,8 @@ class SequenceTimeline(QMainWindow):
             anchor = self.view_start_frame + max(0.0, x_in_clips) / self.pixels_per_frame
             self._zoom_by(WHEEL_ZOOM_STEP if dy > 0 else 1.0 / WHEEL_ZOOM_STEP)
             if x_in_clips >= 0:
-                self.view_start_frame = max(0, int(round(
-                    anchor - x_in_clips / self.pixels_per_frame)))
+                self.view_start_frame = int(round(
+                    anchor - x_in_clips / self.pixels_per_frame))
                 self._clamp_view()
                 self.ruler.viewport().update()
                 self.table.viewport().update()
@@ -1636,7 +1643,7 @@ class SequenceTimeline(QMainWindow):
         # Scroll so the frame is visible, then the ruler's scrub path
         visible = self.visible_frames()
         if not (self.view_start_frame <= frame < self.view_start_frame + visible):
-            self.view_start_frame = max(0, frame - visible // 2)
+            self.view_start_frame = frame - visible // 2
             self._clamp_view()
             self.table.viewport().update()
         self.set_current_frame(frame)
@@ -2102,7 +2109,7 @@ class SequenceTimeline(QMainWindow):
         visible = self.visible_frames()
         if not (self.view_start_frame <= self._play_cursor <
                 self.view_start_frame + visible):
-            self.view_start_frame = max(0, self._play_cursor - visible // 4)
+            self.view_start_frame = self._play_cursor - visible // 4
             self._clamp_view()
             self.table.viewport().update()
         self._play_shown_count += 1
@@ -2178,7 +2185,7 @@ class SequenceTimeline(QMainWindow):
         s = seconds - m * 60
         self.status_bar.showMessage(
             f"Frame {self.current_frame}  Time {m:02d}:{s:05.2f}  "
-            f"View from {self.view_start_frame}  "
+            f"View from {max(0, self.view_start_frame)}  "
             f"FPS {self.fps:g}  Zoom {self.pixels_per_frame:.3g}px/frame"
             f"{self._play_rate_text()}"
         )
@@ -2206,7 +2213,7 @@ class SequenceTimeline(QMainWindow):
         s = seconds - m * 60
         self.status_bar.showMessage(
             f"Frame {self.current_frame}  Time {m:02d}:{s:05.2f}  "
-            f"View from {self.view_start_frame}  "
+            f"View from {max(0, self.view_start_frame)}  "
             f"FPS {self.fps:g}  Zoom {self.pixels_per_frame:.3g}px/frame"
             f"{self._play_rate_text()}"
         )
@@ -2496,7 +2503,9 @@ class SequenceTimeline(QMainWindow):
             zoom = self.pixels_per_frame
         self.pixels_per_frame = clamp_zoom(zoom)
         self.current_frame = max(0, min(total - 1, read_int("frame", 0)))
-        self.view_start_frame = max(0, min(total - 1, read_int("view", 0)))
+        # 0 or less is fully left: frame 0 after the left spacer
+        view = min(total - 1, read_int("view", 0))
+        self.view_start_frame = view if view > 0 else view_min_start(self.pixels_per_frame)
 
     def _restore_geometry(self):
         try:
