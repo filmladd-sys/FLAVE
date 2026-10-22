@@ -1206,6 +1206,14 @@ def _clip_context_menu(self, clip, pos):
         if clip[0] in self._selected_clip_ids:
             horizon_clips += [c for c in self._selected_clips()
                               if c[0] != clip[0] and is_keyframe_clip_id(c[0])]
+        # Diagnostic: what the horizon check sees for each clip in scope
+        self.status_bar.showMessage("Key scope: " + "; ".join(
+            "id %s in %s..%s keys %s beyond %d" % (
+                c[0], int(c[2]), int(c[2]) + max(1, int(c[3])),
+                [int(k[1] if len(k) >= 3 else k[0])
+                 for k in (c[9] if len(c) > 9 and c[9] else [])],
+                len(keys_beyond_horizon(c)))
+            for c in horizon_clips), 30000)
         horizon_action = key_menu.addAction("Delete Keys Beyond Event Horizon")
         horizon_action.setEnabled(any(keys_beyond_horizon(c) for c in horizon_clips))
         # BUILD 263: listed when a clip in the same scope has exactly one
