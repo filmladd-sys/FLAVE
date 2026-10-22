@@ -1197,7 +1197,7 @@ def _clip_context_menu(self, clip, pos):
         clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
         key_menu = menu.addMenu("Key")
         key_click_action = key_menu.addAction("Add At Mouse Click")
-        key_tick_action = key_menu.addAction("Add At Timeline Click")
+        key_tick_action = key_menu.addAction("Add At Playhead")
         # BUILD 260: keys outside the clip's [in, out) of the right-clicked
         # keyframe clip, or of every selected keyframe clip when it is
         # selected; disabled when there are none
