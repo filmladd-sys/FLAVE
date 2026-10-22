@@ -7,9 +7,6 @@
 import os
 import sqlite3
 import threading
-import time
-
-import preview_log     # BUILD 249: dirty queue timing
 
 
 def project_name(project_path):
@@ -121,8 +118,6 @@ def mark_clean(project_path, sequence_id, frame_num):
 _DIRTY_SEQ = [0]
 _DIRTY_LOG = []     # (seq, key, first, last), newest last, kept short
 _DIRTY_QUEUE = []   # (project_path, sequence_id, first, last[, delta, seq])
-# apply_dirty_queue logs each item slower than this (preview_log on)
-SLOW_ITEM_S = 0.05
 
 
 def FramesMarkDirty(project_path, sequence_id, ranges):
@@ -261,21 +256,7 @@ def apply_dirty_queue():
     with _CLEAN_LOCK:
         items = list(_DIRTY_QUEUE)
         del _DIRTY_QUEUE[:]
-    # Timing (PREVIEW_LOG on, also outside a session): every item slower
-    # than SLOW_ITEM_S, and a summary when the whole queue was slower
-    timed = preview_log.PREVIEW_LOG and bool(items)
-    if timed:
-        kinds = {"mark": 0, "shift": 0, "relocate": 0}
-        for it in items:
-            if len(it) > 4 and isinstance(it[4], tuple):
-                kinds["relocate"] += 1
-            elif len(it) > 4:
-                kinds["shift"] += 1
-            else:
-                kinds["mark"] += 1
-        t_all = time.perf_counter()
     for item in items:
-        t_it = time.perf_counter()
         project_path, sequence_id, first, last = item[:4]
         if not os.path.isfile(preview_db_path(project_path, sequence_id)):
             continue
@@ -287,9 +268,6 @@ def apply_dirty_queue():
                 _apply_relocate(project_path, sequence_id, item[4][1], item[5])
             except Exception as e:
                 print(f"Preview relocate failed: {e}")
-            if timed and time.perf_counter() - t_it > SLOW_ITEM_S:
-                preview_log.log("dirty queue: relocate of %d spans %.3fs" % (
-                    len(item[4][1]), time.perf_counter() - t_it))
             continue
         if len(item) > 4:
             # (project, sequence, first, last, delta, seq): row shift. On a
@@ -300,29 +278,13 @@ def apply_dirty_queue():
                              item[4], item[5])
             except Exception as e:
                 print(f"Preview shift failed: {e}")
-            if timed and time.perf_counter() - t_it > SLOW_ITEM_S:
-                preview_log.log("dirty queue: shift %d..%d by %d %.3fs" % (
-                    first, last, item[4], time.perf_counter() - t_it))
             continue
         conn = _connect(project_path, sequence_id)
-        t_c = time.perf_counter()
         try:
-            n_rows = _mark_dirty_sql(conn, first, last)
-            t_u = time.perf_counter()
+            _mark_dirty_sql(conn, first, last)
             conn.commit()
-            t_m = time.perf_counter()
-            if timed and t_m - t_it > SLOW_ITEM_S:
-                preview_log.log("dirty queue: mark %d..%d, %d newly dirty: open %.3fs, "
-                                "update %.3fs, commit %.3fs" % (
-                                    first, last, n_rows, t_c - t_it,
-                                    t_u - t_c, t_m - t_u))
         finally:
             conn.close()
-    if timed and time.perf_counter() - t_all > SLOW_ITEM_S:
-        preview_log.log("dirty queue: %d items (%d marks, %d shifts, "
-                        "%d relocates) in %.3fs" % (
-                            len(items), kinds["mark"], kinds["shift"],
-                            kinds["relocate"], time.perf_counter() - t_all))
 
 
 def dirty_queue_pending():

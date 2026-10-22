@@ -125,8 +125,6 @@ class PreviewWorker(object):
             if idle_release:
                 _release_headless()
                 continue
-            if plog.active():
-                plog.log("worker: woke for gen %d" % gen)     # BUILD 248
             try:
                 self._pass(target, gen)
             except Exception as e:
@@ -162,11 +160,7 @@ class PreviewWorker(object):
         import sequence_player
         project, sequence_id, center, total, snapshot, run = target
         # Queued dirty marks from edits, written on this thread
-        t_q = time.perf_counter()
         apply_dirty_queue()
-        if plog.active():
-            plog.log("worker: dirty queue written (%.3fs)" % (
-                time.perf_counter() - t_q))     # BUILD 248
         if total <= 0:
             return
         if _refresh_all[0] or _play_priority[0]:
@@ -190,12 +184,15 @@ class PreviewWorker(object):
     def _commit(self, batch):
         # Commit the open transaction; counts rows for the ruler repaint and
         # the status percent (BUILD 129)
+        # Returns the SQLite commit seconds (0.0 if nothing was pending)
         if batch.pending:
             n = len(batch.pending)
-            batch.commit()
+            dt = batch.commit()
             self.saved += n
             self._done += n
             plog.once("first commit", "first frames written (%d)" % n)
+            return dt
+        return 0.0
 
     def _gui_busy(self, sp):
         # The GUI wants the lock or was active within the idle time.
@@ -214,6 +211,7 @@ class PreviewWorker(object):
         plog.once("clean set", "clean set read: %d clean (%.3fs)" % (
             len(clean), time.perf_counter() - t_c0))
         burst_left = 0
+        t_cycle = [None]    # BUILD 252: end of the previous card-pass write
         burst_t0 = 0.0
         batch_frames = run
         # Frames per card pass, read at the start of a pass
@@ -422,19 +420,44 @@ class PreviewWorker(object):
                     continue
                 if not jpegs:
                     return
+                # BUILD 252: write timing per card pass (preview_log on):
+                # row inserts, commits (with the dirty queue they run) and
+                # the SQLite commit alone
+                t_w0 = time.perf_counter()
+                t_add = t_com = t_sql = 0.0
+                n_com = 0
                 for f, jpeg in zip(chunk, jpegs):
                     if jpeg is None:
                         return
+                    t_a = time.perf_counter()
                     batch.add(f, jpeg, seq0)
+                    t_add += time.perf_counter() - t_a
                     plog.frames_done(1)
                     made += 1
                     burst_left -= 1
                     if len(batch.pending) >= batch_frames:
-                        self._commit(batch)
+                        t_a = time.perf_counter()
+                        t_sql += self._commit(batch)
+                        t_com += time.perf_counter() - t_a
+                        n_com += 1
                 # The playhead frame must be readable before the rest of the
                 # batch, so the player can show it without waiting
                 if center in chunk and batch.pending:
-                    self._commit(batch)
+                    t_a = time.perf_counter()
+                    t_sql += self._commit(batch)
+                    t_com += time.perf_counter() - t_a
+                    n_com += 1
+                if plog.active() and len(chunk) > 1:
+                    t_all = time.perf_counter() - t_w0
+                    t_prev = t_cycle[0]
+                    t_cycle[0] = time.perf_counter()
+                    plog.log("write %d..%d: card %.3fs, write %.3fs (inserts "
+                             "%.3fs, %d commits %.3fs of which SQLite %.3fs, "
+                             "other %.3fs)%s" % (
+                                 chunk[0], chunk[-1], dt, t_all, t_add, n_com,
+                                 t_com, t_sql, t_all - t_add - t_com,
+                                 "" if t_prev is None else
+                                 ", since last write %.3fs" % (t_cycle[0] - t_prev)))
                 i = j
         finally:
             sp._worker_burst[0] = False
