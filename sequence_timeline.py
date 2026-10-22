@@ -636,7 +636,9 @@ class SequenceTimeline(QMainWindow):
 
     def _update_edit_actions(self):
         # Copy/Cut need a selection; Paste needs a clipboard from this
-        # sequence; Paste w/New Tracks one from any sequence of the project
+        # sequence, or from another one with matching tracks selected
+        # (timeline_clipboard.has_clipboard); Paste w/New Tracks one from
+        # any sequence of the project
         if not hasattr(self, "_copy_action"):
             return
         try:
@@ -706,8 +708,8 @@ class SequenceTimeline(QMainWindow):
 
     def _add_clipboard_actions(self, menu):
         # BUILD 156: Copy / Cut / Paste on a clip's right-click menu. Paste
-        # only when this sequence's clipboard has something (hidden, not
-        # disabled). Returns (copy, cut, paste or None).
+        # only when has_clipboard (this sequence's clipboard, or another
+        # sequence's with matching tracks selected; hidden, not disabled). Returns (copy, cut, paste or None).
         # BUILD 159: called first on a new menu: Copy, Cut, Paste at the top,
         # then one separator before the rest of the menu
         from timeline_clipboard import has_clipboard

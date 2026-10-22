@@ -3,9 +3,11 @@
 # project file: the last Copy or Cut in any of its sequences (never the
 # system clipboard). Stores row data, not ids, plus the source sequence id,
 # its fps and the rows of the source tracks that hold copied items.
-# Paste (Ctrl+V, Paste To Tic, Paste to End, right-click Paste) only pastes
-# into the sequence the clipboard came from; Paste w/New Tracks pastes into
-# any sequence of the project on new tracks (paste_new_tracks). ASCII only.
+# Paste (Ctrl+V, Paste To Tic, Paste to End, right-click Paste) pastes into
+# the sequence the clipboard came from, or into another sequence onto the
+# selected tracks when they match the source tracks (cross_track_map);
+# Paste w/New Tracks pastes into any sequence of the project on new tracks
+# (paste_new_tracks). ASCII only.
 
 import math
 import os
@@ -31,9 +33,58 @@ def _clipboard(tl):
 
 
 def has_clipboard(tl):
-    # True when the clipboard came from this sequence (plain Paste)
+    # True when plain Paste can run: the clipboard came from this sequence,
+    # or from another one and the selected tracks match (cross_track_map)
     clip = _clipboard(tl)
-    return clip is not None and int(clip["sequence_id"]) == int(tl.sequence_id)
+    if clip is None:
+        return False
+    if int(clip["sequence_id"]) == int(tl.sequence_id):
+        return True
+    return cross_track_map(tl, clip)[0] is not None
+
+
+def _source_tracks(clip):
+    # Source track rows that hold copied items, top to bottom
+    return [t for t in clip["tracks"]
+            if any(it["track_id"] == t.get("id") for it in clip["items"])]
+
+
+def _type_label(track_type):
+    from track_names import TRACK_NAME_PREFIX
+    t = (track_type or "").lower()
+    return TRACK_NAME_PREFIX.get(t, t or "Track")
+
+
+def cross_track_map(tl, clip):
+    # BUILD 290: plain Paste into another sequence. The selected tracks of
+    # this sequence (tl._selected_track_ids, in track order) must match the
+    # source tracks holding copied items: same count, same type at each
+    # position. Returns ({source track id: selected track id}, None) when
+    # they match, else (None, hint) with a status bar hint naming what to
+    # select.
+    src = _source_tracks(clip)
+    selected = set(getattr(tl, "_selected_track_ids", ()) or ())
+    dst = []
+    if selected:
+        try:
+            conn = sqlite3.connect(tl._project_db())
+            try:
+                dst = [r for r in conn.execute(
+                    "SELECT id, track_type FROM tracks WHERE sequence_id = ? "
+                    "ORDER BY sort_order, id", (int(tl.sequence_id),))
+                    if r[0] in selected]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            dst = []
+    if src and len(dst) == len(src) and all(
+            (d[1] or "").lower() == (t.get("track_type") or "").lower()
+            for d, t in zip(dst, src)):
+        return {t["id"]: d[0] for t, d in zip(src, dst)}, None
+    names = ", ".join(_type_label(t.get("track_type")) for t in src)
+    return None, (f"Paste: the clipboard is from another sequence; select "
+                  f"{len(src)} track(s) top to bottom: {names}, or use "
+                  f"Edit > Paste w/New Tracks")
 
 
 def has_any_clipboard(tl):
@@ -155,9 +206,19 @@ def cut_selection(tl):
 
 
 def end_anchor(tl):
-    # Latest out-point of any clip in the sequence (0 if none)
+    # Latest out-point of any clip in the sequence (0 if none). A clipboard
+    # from another sequence pasted onto matching selected tracks: latest
+    # out-point on those tracks only.
+    only = None
+    clip = _clipboard(tl)
+    if clip is not None and int(clip["sequence_id"]) != int(tl.sequence_id):
+        track_map = cross_track_map(tl, clip)[0]
+        if track_map:
+            only = set(track_map.values())
     end = 0
-    for clips in tl.clips_by_track.values():
+    for tid, clips in tl.clips_by_track.items():
+        if only is not None and tid not in only:
+            continue
         for c in clips:
             end = max(end, int(c[2]) + int(c[3]))
     return end
@@ -178,10 +239,7 @@ def paste(tl, anchor, make_room):
     if clip is None or tl._edge_drag is not None:
         return
     if int(clip["sequence_id"]) != int(tl.sequence_id):
-        # Plain paste stays inside the source sequence
-        tl.status_bar.showMessage(
-            "Paste: the clipboard is from another sequence; use "
-            "Edit > Paste w/New Tracks", 5000)
+        _paste_cross(tl, clip, anchor)
         return
     items = clip["items"]
     anchor = max(0, int(anchor))
@@ -200,6 +258,29 @@ def paste(tl, anchor, make_room):
             f"Paste: {skipped} item(s) skipped, their tracks no longer exist", 5000)
         return
     _paste_core(tl, ok, anchor, skipped)
+
+
+def _paste_cross(tl, clip, anchor):
+    # BUILD 290: the clipboard from another sequence onto the selected
+    # tracks (cross_track_map), source track i -> selected track i. Items
+    # are converted to this sequence's rate (convert_items) and pasted by
+    # the same core as a same-sequence paste, overwriting what is under
+    # them on those tracks. No match: a status bar hint, nothing pasted.
+    track_map, hint = cross_track_map(tl, clip)
+    if track_map is None:
+        tl.status_bar.showMessage(hint, 6000)
+        return
+    items = [it for it in clip["items"] if it["track_id"] in track_map]
+    if not items:
+        return
+    conn = sqlite3.connect(tl._project_db())
+    try:
+        dst_fps = _sequence_fps(conn.cursor(), tl.sequence_id)
+    finally:
+        conn.close()
+    items = [dict(it, track_id=track_map[it["track_id"]])
+             for it in convert_items(items, clip["fps"], dst_fps)]
+    _paste_core(tl, items, max(0, int(anchor)), 0)
 
 
 def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
