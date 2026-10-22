@@ -1423,6 +1423,62 @@ def delete_keys_beyond_horizon(timeline, clips):
     timeline._after_clip_change("Deleted %d key(s) beyond the clip range" % count)
 
 
+# BUILD 263: Key > Center Key Beyond Event Horizon, shown only when the
+# right-clicked keyframe clip has exactly one key outside [in, out). A
+# clip holds one type (BUILD 147), so its keys are the rows of one key
+# table (keyframes, or keyframe_border for a border clip); every key row
+# of the clip counts. The key moves to the middle frame
+# in + (out - in) // 2 (value unchanged). When another key of the clip is
+# already there, the nearest free frame inside [in, out) is used, the
+# earlier frame first on a tie; with no free frame nothing moves.
+
+def center_frame_for_key(clip):
+    # (key, frame) for the one key beyond the horizon, frame None when the
+    # clip has no free frame; None when the clip does not have exactly one
+    beyond = keys_beyond_horizon(clip)
+    if len(beyond) != 1:
+        return None
+    key = beyond[0]
+    in_f = max(0, int(clip[2]))
+    out_f = in_f + max(1, int(clip[3]))
+    taken = set(int(k[1] if len(k) >= 3 else k[0]) for k in clip[9] if k is not key)
+    mid = in_f + (out_f - in_f) // 2
+    for d in range(0, out_f - in_f):
+        for f in (mid - d, mid + d):
+            if in_f <= f < out_f and f not in taken:
+                return key, f
+    return key, None
+
+
+def center_key_beyond_horizon(timeline, clip):
+    # Move the clip's one key beyond the horizon to the middle (one undo
+    # step); the refresh's snapshot diff marks the frames that change
+    got = center_frame_for_key(clip)
+    if got is None:
+        return
+    key, frame = got
+    if frame is None or len(key) < 3:
+        timeline.status_bar.showMessage(
+            "Center Key: no free frame inside the clip", 3000)
+        return
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    from undo import push_undo
+    push_undo(project_db, "Center key")
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        persist_keyframe_frame(cur, key[0], frame, key_table_for_type(
+            clip[10] if len(clip) > 10 else ""))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Center Key", "Could not save: %s" % e)
+        return
+    timeline._after_clip_change("Centered key at frame %d" % frame)
+
+
 def key_context_menu(timeline, key_hit, pos):
     # Right-click on a key box: Edit Keyframe / Delete Keyframe
     from PySide6.QtWidgets import QMenu
