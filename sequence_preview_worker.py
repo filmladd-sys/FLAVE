@@ -181,16 +181,18 @@ class PreviewWorker(object):
             self.saved += n
             self._done += n
 
-    def _commit(self, batch):
+    def _commit(self, batch, wait=True):
         # Commit the open transaction; counts rows for the ruler repaint and
         # the status percent (BUILD 129)
-        # Returns the SQLite commit seconds (0.0 if nothing was pending)
+        # wait=False (BUILD 254): hand the frames to the batch's writer
+        # thread and return. Returns the seconds this thread spent (0.0 if
+        # nothing was pending); counted as saved when handed off.
         if batch.pending:
             n = len(batch.pending)
-            dt = batch.commit()
+            dt = batch.commit() if wait else batch.commit_async()
             self.saved += n
             self._done += n
-            plog.once("first commit", "first frames written (%d)" % n)
+            plog.once("first commit", "first frames handed to the writer (%d)" % n)
             return dt
         return 0.0
 
@@ -212,6 +214,7 @@ class PreviewWorker(object):
             len(clean), time.perf_counter() - t_c0))
         burst_left = 0
         t_cycle = [None]    # BUILD 252: end of the previous card-pass write
+        w_seen = [0.0]      # writer thread seconds already logged
         burst_t0 = 0.0
         batch_frames = run
         # Frames per card pass, read at the start of a pass
@@ -421,10 +424,11 @@ class PreviewWorker(object):
                 if not jpegs:
                     return
                 # BUILD 252: write timing per card pass (preview_log on):
-                # adds (frames kept in memory), commits (bulk insert, SQLite
-                # commit and the dirty queue they run) and the SQL alone
+                # adds (frames kept in memory), hand-offs to the writer
+                # thread (time blocked on a full queue) and the writer's own
+                # write time since the previous line
                 t_w0 = time.perf_counter()
-                t_add = t_com = t_sql = 0.0
+                t_add = t_com = 0.0
                 n_com = 0
                 for f, jpeg in zip(chunk, jpegs):
                     if jpeg is None:
@@ -437,25 +441,27 @@ class PreviewWorker(object):
                     burst_left -= 1
                     if len(batch.pending) >= batch_frames:
                         t_a = time.perf_counter()
-                        t_sql += self._commit(batch)
+                        self._commit(batch, wait=False)
                         t_com += time.perf_counter() - t_a
                         n_com += 1
                 # The playhead frame must be readable before the rest of the
                 # batch, so the player can show it without waiting
                 if center in chunk and batch.pending:
                     t_a = time.perf_counter()
-                    t_sql += self._commit(batch)
+                    self._commit(batch, wait=False)
                     t_com += time.perf_counter() - t_a
                     n_com += 1
                 if plog.active() and len(chunk) > 1:
                     t_all = time.perf_counter() - t_w0
                     t_prev = t_cycle[0]
                     t_cycle[0] = time.perf_counter()
+                    t_sql = batch.write_s - w_seen[0]
+                    w_seen[0] = batch.write_s
                     plog.log("write %d..%d: card %.3fs, write %.3fs (adds "
-                             "%.3fs, %d commits %.3fs of which SQLite %.3fs, "
-                             "other %.3fs)%s" % (
+                             "%.3fs, %d hand-offs %.3fs blocked, other %.3fs), "
+                             "writer thread %.3fs%s" % (
                                  chunk[0], chunk[-1], dt, t_all, t_add, n_com,
-                                 t_com, t_sql, t_all - t_add - t_com,
+                                 t_com, t_all - t_add - t_com, t_sql,
                                  "" if t_prev is None else
                                  ", since last write %.3fs" % (t_cycle[0] - t_prev)))
                 i = j

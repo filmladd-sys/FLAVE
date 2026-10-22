@@ -371,11 +371,20 @@ def FrameCleanRange(project_path, sequence_id, first, last):
     return [r[0] for r in rows]
 
 
+# Card-pass writes handed to the writer thread that may wait before the
+# worker blocks (each is one batch of frames, kept in memory)
+WRITE_QUEUE_MAX = 4
+
+
 class PreviewBatch(object):
-    # Many clean frames written at once: add() keeps them in memory, commit()
-    # writes them in one transaction (one bulk JPEG insert, one bulk
+    # Many clean frames written at once: add() keeps them in memory; a
+    # commit writes them in one transaction (one bulk JPEG insert, one bulk
     # DirtyImage delete) and only then adds them to the in-memory clean set
     # (bar moves). Used by the preview worker on its own thread.
+    # BUILD 254: commit_async() hands the frames to a writer thread (its own
+    # connection) and returns, so the card builds the next frames while they
+    # are written. commit() and close() first wait for every handed-off
+    # write, so their callers still see everything on disk.
 
     def __init__(self, project_path, sequence_id):
         self.project_path = project_path
@@ -384,6 +393,9 @@ class PreviewBatch(object):
         self.pending = []
         self.blobs = []      # JPEG of each pending frame (same order)
         self.seqs = []       # dirty mark number when each pending frame was built
+        self._jobs = None    # writer thread queue, started on first use
+        self._writer = None
+        self.write_s = 0.0   # seconds the writer thread spent writing
 
     def add(self, frame_num, jpeg_blob, seq=None):
         # seq: dirty mark number from before the frame was built (see
@@ -393,43 +405,110 @@ class PreviewBatch(object):
         with _CLEAN_LOCK:
             self.seqs.append(_DIRTY_SEQ[0] if seq is None else int(seq))
 
-    def commit(self):
-        # Seconds spent committing (0.0 if nothing pending)
-        if not self.pending:
-            return 0.0
+    def _take(self):
+        # The pending frames as one job; the batch is empty after
+        job = (self.pending, self.blobs, self.seqs)
+        self.pending = []
+        self.blobs = []
+        self.seqs = []
+        return job
+
+    def _write(self, conn, job):
+        # One transaction for a job; seconds spent. Frames marked dirty
+        # after they were built stay dirty.
         import time
+        frames, blobs, seqs = job
         key = (os.path.abspath(self.project_path), int(self.sequence_id))
         t0 = time.perf_counter()
-        if self.conn is None:
-            self.conn = _connect(self.project_path, self.sequence_id)
-        self.conn.executemany(
+        conn.executemany(
             "INSERT OR REPLACE INTO preview (frame, jpeg) VALUES (?, ?)",
-            zip(self.pending, self.blobs))
-        self.conn.executemany("DELETE FROM DirtyImage WHERE frame = ?",
-                              ((f,) for f in self.pending))
+            zip(frames, blobs))
+        conn.executemany("DELETE FROM DirtyImage WHERE frame = ?",
+                         ((f,) for f in frames))
         with _CLEAN_LOCK:
-            stale = [f for f, q in zip(self.pending, self.seqs)
+            stale = [f for f, q in zip(frames, seqs)
                      if _dirty_since(key, q, f)]
         # Built before an edit marked them dirty: keep them dirty
         for f in stale:
-            self.conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) VALUES (?)",
-                              (f,))
-        self.conn.commit()
+            conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) VALUES (?)",
+                         (f,))
+        conn.commit()
         dt = time.perf_counter() - t0
         s = clean_set(self.project_path, self.sequence_id)
         stale = set(stale)
         with _CLEAN_LOCK:
-            s.update(f for f in self.pending if f not in stale)
-        self.pending = []
-        self.blobs = []
-        self.seqs = []
+            s.update(f for f in frames if f not in stale)
         apply_dirty_queue()
         return dt
+
+    def _writer_run(self):
+        # Writer thread: jobs in order until None
+        conn = None
+        try:
+            while True:
+                job = self._jobs.get()
+                try:
+                    if job is None:
+                        return
+                    if conn is None:
+                        conn = _connect(self.project_path, self.sequence_id)
+                    self.write_s += self._write(conn, job)
+                except Exception as e:
+                    # The frames stay not clean: the next pass rebuilds them
+                    print(f"Preview write failed: {e}")
+                    try:
+                        if conn is not None:
+                            conn.rollback()
+                    except Exception:
+                        pass
+                finally:
+                    self._jobs.task_done()
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def commit_async(self):
+        # Hand the pending frames to the writer thread. Returns the seconds
+        # spent waiting for room in its queue (0.0 if nothing pending).
+        if not self.pending:
+            return 0.0
+        import queue
+        import time
+        if self._writer is None:
+            self._jobs = queue.Queue(maxsize=WRITE_QUEUE_MAX)
+            self._writer = threading.Thread(target=self._writer_run,
+                                            name="PreviewWriter", daemon=True)
+            self._writer.start()
+        t0 = time.perf_counter()
+        self._jobs.put(self._take())
+        return time.perf_counter() - t0
+
+    def flush(self):
+        # Wait until every handed-off write is on disk
+        if self._jobs is not None:
+            self._jobs.join()
+
+    def commit(self):
+        # Wait for the writer thread, then write the pending frames here.
+        # Seconds spent (0.0 if nothing to do).
+        import time
+        t0 = time.perf_counter()
+        self.flush()
+        if self.pending:
+            if self.conn is None:
+                self.conn = _connect(self.project_path, self.sequence_id)
+            self._write(self.conn, self._take())
+        return time.perf_counter() - t0
 
     def close(self):
         try:
             self.commit()
         finally:
+            if self._writer is not None:
+                self._jobs.put(None)
+                self._writer.join()
+                self._writer = None
+                self._jobs = None
             if self.conn is not None:
                 self.conn.close()
                 self.conn = None
