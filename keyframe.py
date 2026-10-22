@@ -786,6 +786,18 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
             "INSERT INTO %s (keyframe_clip_id, %s) SELECT ?, %s FROM %s "
             "WHERE keyframe_clip_id = ? ORDER BY frame, id"
             % (table, col_sql, col_sql, table), (new_db, db_id))
+    # BUILD 267: a clip with exactly one key gets that key centered in each
+    # piece (value unchanged; one key is a flat value, so nothing renders
+    # differently), so neither piece is left with a key beyond its range
+    for table in key_tables(cur):
+        cur.execute("SELECT COUNT(*) FROM %s WHERE keyframe_clip_id = ?"
+                    % table, (db_id,))
+        if cur.fetchone()[0] != 1:
+            continue
+        for owner, lo, hi in ((db_id, int(in_f), split),
+                              (new_db, split, int(out_f))):
+            cur.execute("UPDATE %s SET frame = ? WHERE keyframe_clip_id = ?"
+                        % table, (lo + (hi - lo) // 2, owner))
     return mem_id_from_db(new_db)
 
 
