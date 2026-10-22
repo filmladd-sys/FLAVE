@@ -566,20 +566,41 @@ def _open_progress(self, cid, job):
     # BUILD 232: one progress window for the whole run, under the
     # timeline's menu bar (window_place key caption_progress). Text and bar
     # per stage (_on_stage; the download bytes from a 250 ms timer); Cancel
-    # (or closing it) cancels the run (_cancel_generate). BUILD 233:
-    # window-modal to the timeline (Qt also blocks the timeline's parent
-    # windows: Sequence Manager / Project Manager), undo / redo blocked and
-    # the sequence marked busy (caption_job_active) until it closes
+    # (the title bar X, or Esc) cancels the run (_cancel_generate).
+    # Application-modal: every other FLAVE window (all Sequence Timelines,
+    # Sequence Manager, Footage Manager, Project Manager, players) is
+    # blocked until it closes; owned by the timeline so it stays above it,
+    # and raised again whenever FLAVE's focus or active state changes so a
+    # click on another FLAVE window cannot bury it (no stay-on-top hint, so
+    # other applications can still cover it). Undo / redo are blocked and
+    # the sequence is marked busy (caption_job_active) until it closes
     from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QProgressDialog
+    from PySide6.QtWidgets import QApplication, QProgressDialog
     dlg = QProgressDialog("Reading audio...", "Cancel", 0, 0, self)
     dlg.setWindowTitle("Generate Captions")
-    dlg.setWindowModality(Qt.WindowModal)
+    dlg.setWindowModality(Qt.ApplicationModal)
     dlg.setAutoClose(False)
     dlg.setAutoReset(False)
     dlg.setMinimumDuration(0)
     dlg.setMinimumWidth(380)
     dlg.canceled.connect(lambda: _cancel_generate(self, cid))
+    # Esc (QDialog reject) also counts as Cancel; never just hides the window
+    dlg.rejected.connect(lambda: _cancel_generate(self, cid))
+
+    def keep_on_top(*_args):
+        try:
+            if dlg.isVisible():
+                dlg.raise_()
+                if QApplication.applicationState() == Qt.ApplicationActive:
+                    dlg.activateWindow()
+        except RuntimeError:
+            pass   # window already deleted
+
+    app = QApplication.instance()
+    if app is not None:
+        app.focusWindowChanged.connect(keep_on_top)
+        app.applicationStateChanged.connect(keep_on_top)
+        job["raise_fn"] = keep_on_top
     from window_place import place_under_parent
     place_under_parent(dlg, self, "caption_progress")
     timer = QTimer(dlg)
@@ -602,10 +623,21 @@ def _close_progress(job):
     undo.set_blocked("captions:%d:%d" % key, False)
     job["timer"].stop()
     dlg = job["dlg"]
-    try:
-        dlg.canceled.disconnect()
-    except (RuntimeError, TypeError):
-        pass
+    fn = job.pop("raise_fn", None)
+    if fn is not None:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        for sig in ((app.focusWindowChanged, app.applicationStateChanged)
+                    if app is not None else ()):
+            try:
+                sig.disconnect(fn)
+            except (RuntimeError, TypeError):
+                pass
+    for sig in (dlg.canceled, dlg.rejected):
+        try:
+            sig.disconnect()
+        except (RuntimeError, TypeError):
+            pass
     dlg.close()
     dlg.deleteLater()
 
