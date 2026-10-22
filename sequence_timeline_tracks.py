@@ -290,11 +290,16 @@ def _add_track_menu_items(self, menu, name_item, enabled):
     collapse_action = coll_menu.addAction("Collapse")
     invert_action = coll_menu.addAction("Invert")
     display_action = menu.addAction("Track Display Properties")
+    # BUILD 262: empty copies of the selected tracks (see _duplicate_tracks)
+    dup_menu = menu.addMenu("Duplicate Track(s)")
+    dup_above_action = dup_menu.addAction("Above")
+    dup_below_action = dup_menu.addAction("Below")
     return {"up": up_action, "down": down_action, "top": top_action,
             "bottom": bottom_action, "enable": enable_action,
             "solo": solo_action, "display": display_action,
             "open": open_action, "collapse": collapse_action,
-            "invert": invert_action}
+            "invert": invert_action, "dup_above": dup_above_action,
+            "dup_below": dup_below_action}
 
 
 def _run_track_menu_action(self, action, acts, track_id):
@@ -318,12 +323,92 @@ def _run_track_menu_action(self, action, acts, track_id):
         self._toggle_track_flag(track_id, "solo")
     elif action == display_action:
         self._track_display_properties(track_id)
+    elif action in (acts["dup_above"], acts["dup_below"]):
+        _duplicate_tracks(self, "above" if action == acts["dup_above"] else "below")
     elif action in (acts["open"], acts["collapse"], acts["invert"]):
         mode = [k for k in ("open", "collapse", "invert") if acts[k] == action][0]
         _set_selected_tracks_collapsed(self, mode)
     else:
         return False
     return True
+
+
+# BUILD 262: Duplicate Track(s) > Above / Below. The selected tracks
+# (_selected_track_ids; a right-click outside the selection selects just
+# that track) are copied as tracks only: no clips, captions, keyframe
+# clips or markers. Each copy keeps every track setting (type, height,
+# collapsed, background color, caption language and stream type) except
+# its name, a new default name per type (track_names.next_default_name,
+# e.g. Video03), and enabled / solo, which start on / off like a new track.
+# The copies form one block in top-to-bottom order of the selection (also
+# when the selection has gaps), placed right above the topmost selected
+# track or right below the bottommost one; sort_order is renumbered
+# 0..n-1. One undo step.
+
+def duplicate_track_order(ids, selected, copies, where):
+    # ids: track ids top to bottom; selected: the tracks copied; copies:
+    # the new ids (same order as the selected tracks top to bottom).
+    # Returns the new top-to-bottom order.
+    rows = [i for i, t in enumerate(ids) if t in selected]
+    at = rows[0] if where == "above" else rows[-1] + 1
+    return list(ids[:at]) + list(copies) + list(ids[at:])
+
+
+def _duplicate_tracks(self, where):
+    project_db = self._project_db()
+    if not project_db or self.sequence_id is None:
+        return
+    selected = set(getattr(self, "_selected_track_ids", ()) or ())
+    if not selected:
+        return
+    from undo import push_undo
+    from track_names import next_default_name
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM tracks WHERE sequence_id = ? "
+                    "ORDER BY sort_order, id", (self.sequence_id,))
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Duplicate Track(s)", f"Could not read tracks: {e}")
+        return
+    ids = [r[0] for r in rows]
+    src = [t for t in ids if t in selected]
+    if not src:
+        return
+    names = [r[1] for r in rows]
+    push_undo(project_db, "Duplicate tracks")
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(tracks)")
+                if r[1] not in ("id", "name", "sort_order", "enabled", "solo")]
+        copies = []
+        for tid in src:
+            cur.execute("SELECT %s FROM tracks WHERE id = ?" % ", ".join(cols),
+                        (tid,))
+            vals = dict(zip(cols, cur.fetchone()))
+            name = next_default_name(vals.get("track_type"), names)
+            names.append(name)
+            vals.update({"name": name, "sort_order": 0, "enabled": 1, "solo": 0})
+            keys = list(vals)
+            cur.execute("INSERT INTO tracks (%s) VALUES (%s)" % (
+                ", ".join(keys), ", ".join("?" for _ in keys)),
+                [vals[k] for k in keys])
+            copies.append(cur.lastrowid)
+        for order, tid in enumerate(duplicate_track_order(ids, selected,
+                                                          copies, where)):
+            cur.execute("UPDATE tracks SET sort_order = ? WHERE id = ?",
+                        (order, tid))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(self, "Duplicate Track(s)", f"Could not add tracks: {e}")
+        return
+    self._after_track_change()
+    self.status_bar.showMessage(
+        "Duplicated %d track(s) %s the selection" % (len(copies), where), 3000)
 
 
 def _track_display_properties(self, track_id):
