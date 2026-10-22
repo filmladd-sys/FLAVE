@@ -1208,10 +1208,10 @@ def _clip_context_menu(self, clip, pos):
                               if c[0] != clip[0] and is_keyframe_clip_id(c[0])]
         horizon_action = key_menu.addAction("Delete Keys Beyond Event Horizon")
         horizon_action.setEnabled(any(keys_beyond_horizon(c) for c in horizon_clips))
-        # BUILD 263: right-clicked clip only; listed only when it has
-        # exactly one key beyond the horizon
+        # BUILD 263: listed when a clip in the same scope has exactly one
+        # key beyond the horizon; each such clip's key is centered
         center_action = None
-        if len(keys_beyond_horizon(clip)) == 1:
+        if any(len(keys_beyond_horizon(c)) == 1 for c in horizon_clips):
             center_action = key_menu.addAction("Center Key Beyond Event Horizon")
         rename_action = menu.addAction("Rename")
         # BUILD 221: a new keyframe clip of any type on this track, starting
@@ -1239,7 +1239,7 @@ def _clip_context_menu(self, clip, pos):
             _add_key(self, clip, int(self.current_frame))
         elif center_action is not None and action == center_action:
             from keyframe import center_key_beyond_horizon
-            center_key_beyond_horizon(self, clip)
+            center_key_beyond_horizon(self, horizon_clips)
         elif action == horizon_action:
             from keyframe import delete_keys_beyond_horizon
             delete_keys_beyond_horizon(self, horizon_clips)

@@ -1423,8 +1423,10 @@ def delete_keys_beyond_horizon(timeline, clips):
     timeline._after_clip_change("Deleted %d key(s) beyond the clip range" % count)
 
 
-# BUILD 263: Key > Center Key Beyond Event Horizon, shown only when the
-# right-clicked keyframe clip has exactly one key outside [in, out). A
+# BUILD 263: Key > Center Key Beyond Event Horizon, shown when a keyframe
+# clip in the menu's scope (the right-clicked clip, plus the other selected
+# keyframe clips when it is selected, as for Delete Keys Beyond Event
+# Horizon) has exactly one key outside [in, out). A
 # clip holds one type (BUILD 147), so its keys are the rows of one key
 # table (keyframes, or keyframe_border for a border clip); every key row
 # of the clip counts. The key moves to the middle frame
@@ -1450,14 +1452,21 @@ def center_frame_for_key(clip):
     return key, None
 
 
-def center_key_beyond_horizon(timeline, clip):
-    # Move the clip's one key beyond the horizon to the middle (one undo
-    # step); the refresh's snapshot diff marks the frames that change
-    got = center_frame_for_key(clip)
-    if got is None:
-        return
-    key, frame = got
-    if frame is None or len(key) < 3:
+def center_key_beyond_horizon(timeline, clips):
+    # For every clip in clips with exactly one key beyond the horizon, move
+    # that key to the middle (one undo step for all of them); the refresh's
+    # snapshot diff marks the frames that change
+    moves = []
+    for clip in clips:
+        got = center_frame_for_key(clip)
+        if got is None:
+            continue
+        key, frame = got
+        if frame is None or len(key) < 3:
+            continue
+        moves.append((key[0], frame, key_table_for_type(
+            clip[10] if len(clip) > 10 else "")))
+    if not moves:
         timeline.status_bar.showMessage(
             "Center Key: no free frame inside the clip", 3000)
         return
@@ -1469,14 +1478,17 @@ def center_key_beyond_horizon(timeline, clip):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        persist_keyframe_frame(cur, key[0], frame, key_table_for_type(
-            clip[10] if len(clip) > 10 else ""))
+        for key_id, frame, table in moves:
+            persist_keyframe_frame(cur, key_id, frame, table)
         conn.commit()
         conn.close()
     except Exception as e:
         QMessageBox.warning(timeline, "Center Key", "Could not save: %s" % e)
         return
-    timeline._after_clip_change("Centered key at frame %d" % frame)
+    if len(moves) == 1:
+        timeline._after_clip_change("Centered key at frame %d" % moves[0][1])
+    else:
+        timeline._after_clip_change("Centered %d keys" % len(moves))
 
 
 def key_context_menu(timeline, key_hit, pos):
