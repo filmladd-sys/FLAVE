@@ -12,6 +12,7 @@
 # keyframe, markers, sql, tracks) is imported, not moved. ASCII only.
 
 import sqlite3
+from bisect import bisect_left, bisect_right
 from sequence_timeline_ruler import CLIPS_COL
 from sequence_timeline_video import (out_frame_for, video_out_pixmap,
                                      icon_source_frame)
@@ -34,6 +35,15 @@ from PySide6.QtGui import QPainter, QColor, QPixmap
 # BUILD 108: clip backgrounds
 VIDEO_CLIP_BG = QColor(70, 90, 130)
 AUDIO_CLIP_BG = QColor(80, 80, 80)
+
+# Zoomed-out drawing: clips narrower than TINY_CLIP_W px are one solid bar in
+# the outline color (adjacent ones merged), plus their markers. Clips
+# narrower than CLIP_DETAIL_MIN_W px get no icons (not fetched or made), no
+# names or caption text, no key graphs and no sequence clip icons.
+TINY_CLIP_W = 3
+CLIP_DETAIL_MIN_W = 12
+CLIP_OUTLINE = QColor(160, 180, 220)
+CLIP_OUTLINE_SELECTED = QColor(255, 255, 160)
 
 
 class ClipDelegate(QStyledItemDelegate):
@@ -77,7 +87,9 @@ class ClipDelegate(QStyledItemDelegate):
             if color.isValid():
                 painter.fillRect(rect, color)
         ppf = tl.pixels_per_frame
-        for clip in tl.clips_by_track.get(track_id, []):
+        markers = getattr(tl, "_markers", None)
+        tiny = _TinyRun(painter, rect.top(), rect.height())
+        for clip in visible_clips(tl, tl.clips_by_track.get(track_id, []), rect, vis):
             (clip_id, footage_id, start_frame, length_frames, filename,
              clip_enabled, clip_solo, in_frame) = clip[:8]
             # Clip rect is the time span only, whatever the icon sizes
@@ -86,6 +98,18 @@ class ClipDelegate(QStyledItemDelegate):
             if x + w < vis.left() or x > vis.right():
                 continue
             clip_rect = QRect(x, rect.top(), w, rect.height())
+            if w < TINY_CLIP_W:
+                tiny.add(x, w, clip_id in tl._selected_clip_ids, clip_enabled)
+                if (markers and not collapsed and track_type not in ("caption", "keyframe")
+                        and clip_id is not None and clip_id > 0 and markers.get(clip_id)):
+                    tiny.flush()
+                    from keyframe import split_title_rect
+                    from markers import paint_markers
+                    paint_markers(painter, split_title_rect(clip_rect)[1], clip, markers,
+                                  ppf, getattr(tl, "_hover_marker_id", None))
+                continue
+            tiny.flush()
+            detail = w >= CLIP_DETAIL_MIN_W
             # Disabled clips draw dimmer
             painter.setOpacity(1.0 if clip_enabled else 0.4)
             if collapsed:
@@ -93,7 +117,8 @@ class ClipDelegate(QStyledItemDelegate):
                 # key boxes or markers)
                 paint_collapsed_clip(painter, clip_rect, track_type,
                                      clip_id in tl._selected_clip_ids,
-                                     (filename or "") + (" [S]" if clip_solo else ""),
+                                     ((filename or "") + (" [S]" if clip_solo else ""))
+                                     if detail else "",
                                      visible_rect=rect)
                 painter.setOpacity(1.0)
                 continue
@@ -102,7 +127,8 @@ class ClipDelegate(QStyledItemDelegate):
                 keys = clip[9] if len(clip) > 9 else []
                 ktype = clip[10] if len(clip) > 10 else ""
                 paint_keyframe_clip(
-                    painter, clip_rect, filename or "", keys=keys,
+                    painter, clip_rect, (filename or "") if detail else "",
+                    keys=keys if detail else None,
                     clip_start=start_frame, ppf=ppf, stored_type=ktype,
                     linked=(len(clip) > 8 and clip[8] is not None),
                     visible_rect=rect,
@@ -133,7 +159,7 @@ class ClipDelegate(QStyledItemDelegate):
                 # Caption: plain bar, no icon, no waveform. BUILD 236: with a
                 # title bar the text is drawn in the pane (word-wrapped);
                 # without one (short row) the old one-line name below
-                if title_rect is not None:
+                if title_rect is not None and detail:
                     from sequence_timeline_captions import paint_caption_text
                     paint_caption_text(painter, clip_rect, filename or "", rect)
             elif seq_ref is not None:
@@ -145,7 +171,7 @@ class ClipDelegate(QStyledItemDelegate):
                 ih = ch
                 lpix = sequence_clip_icon(ih, False)
                 rpix = sequence_clip_icon(ih, True)
-                iw = lpix.width() if lpix is not None else 0
+                iw = lpix.width() if (lpix is not None and detail) else 0
                 if iw and 2 * iw <= w:
                     painter.drawPixmap(x, ctop, lpix)
                     painter.drawPixmap(x + w - iw, ctop, rpix)
@@ -164,19 +190,26 @@ class ClipDelegate(QStyledItemDelegate):
                 # (frame rate conformed); stills use 0
                 icon_frame = (icon_source_frame(tl, footage_id, in_frame)
                               if track_type == "video" else 0)
-                # No grabs mid-drag; generate on release
-                pix = tl.icon_pixmap(footage_id, ch, icon_frame,
-                                     generate=tl._edge_drag is None, clip_id=clip_id)
+                # No grabs mid-drag; generate on release. Narrow clips
+                # (under CLIP_DETAIL_MIN_W) neither fetch nor make icons.
+                pix = None
+                if detail:
+                    pix = tl.icon_pixmap(footage_id, ch, icon_frame,
+                                         generate=tl._edge_drag is None, clip_id=clip_id)
                 has_in = pix is not None and not pix.isNull()
-                # Out icon: video reads storage only (never generated in paint);
-                # stills reuse the in icon; missing draws black
+                in_full_w = pix.width() if has_in else 0
+                # Out icon: video reads storage only (never generated in paint),
+                # and only when in and out icons both fit (the out icon is the
+                # same footage at the same height, so the same width as the in
+                # icon); stills reuse the in icon; missing draws black
                 if track_type == "video":
-                    out_pix = video_out_pixmap(tl, footage_id, ch,
-                                               in_frame, length_frames, clip_id)
+                    out_pix = None
+                    if detail and 2 * (in_full_w if has_in else ch) <= w:
+                        out_pix = video_out_pixmap(tl, footage_id, ch,
+                                                   in_frame, length_frames, clip_id)
                 else:
                     out_pix = pix
                 has_out = out_pix is not None and not out_pix.isNull()
-                in_full_w = pix.width() if has_in else 0
                 if has_out:
                     out_full_w = out_pix.width()
                 else:
@@ -212,27 +245,29 @@ class ClipDelegate(QStyledItemDelegate):
             # by x only, so it still lines up
             from markers import paint_markers
             if track_type != "caption":
-                paint_markers(painter, clip_rect, clip, getattr(tl, "_markers", None), ppf,
+                paint_markers(painter, clip_rect, clip, markers, ppf,
                               getattr(tl, "_hover_marker_id", None))
             # Outline: drawn after the title bar (below)
-            label = filename or ""
-            if clip_solo:
-                label += " [S]"
-            # BUILD 165: non-zero clip gain after the name
-            gain_db = (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0)
-            if gain_db:
-                from clip_gain import gain_label
-                label += gain_label(gain_db)
+            label = ""
+            if detail:
+                label = filename or ""
+                if clip_solo:
+                    label += " [S]"
+                # BUILD 165: non-zero clip gain after the name
+                gain_db = (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0)
+                if gain_db:
+                    from clip_gain import gain_label
+                    label += gain_label(gain_db)
             if title_rect is not None:
                 # BUILD 128: the name lives in the title bar (sticky left,
                 # elided); no in-content name. BUILD 236: caption title =
                 # "Caption | For Clip | In - Out" (+ [S]), text in the pane
-                if track_type == "caption":
+                if track_type == "caption" and detail:
                     from sequence_timeline_captions import caption_title
                     label = caption_title(tl, clip, track_id) + (
                         " [S]" if clip_solo else "")
                 paint_title_bar(painter, title_rect, label, rect)
-            elif clip_rect.width() > 0:
+            elif clip_rect.width() > 0 and detail:
                 # Row too short for a bar: BUILD 127 in-content name
                 draw_clip_name(painter, text_rect, rect, label,
                                caption=(track_type == "caption"),
@@ -246,7 +281,64 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.setPen(QColor(160, 180, 220))
             painter.drawRect(full_rect.adjusted(0, 0, -1, -1))
             painter.setOpacity(1.0)
+        tiny.flush()
         painter.restore()
+
+
+def _clip_start(clip):
+    return clip[2]
+
+
+def visible_clips(tl, clips, rect, vis):
+    # The part of a track's clip list (sorted by start, as refresh leaves
+    # it) that can reach the repainted area vis, found by bisect so paint
+    # cost follows the visible clips. A margin of a few pixels covers the
+    # 1 px minimum clip width; the caller still culls each clip. During a
+    # drag (lists edited in place, maybe unsorted) the whole list is used.
+    ppf = tl.pixels_per_frame
+    if len(clips) < 64 or ppf <= 0 or tl._edge_drag is not None:
+        return clips
+    margin = 4.0 / ppf + 1
+    f0 = tl.view_start_frame + (vis.left() - rect.left()) / ppf - margin
+    f1 = tl.view_start_frame + (vis.right() - rect.left()) / ppf + margin
+    longest = max(c[3] for c in clips)
+    try:
+        lo = bisect_left(clips, f0 - longest, key=_clip_start)
+        hi = bisect_right(clips, f1, key=_clip_start)
+    except TypeError:
+        return clips      # Python before 3.10: no bisect key
+    return clips[lo:hi]
+
+
+class _TinyRun:
+    # Clips under TINY_CLIP_W px: one solid bar in the outline color (what
+    # the outline alone covered at that width); adjacent bars with the same
+    # selection and enabled state are merged into one fillRect
+    def __init__(self, painter, top, height):
+        self.painter = painter
+        self.top = top
+        self.height = height
+        self.key = None
+        self.left = self.right = 0
+
+    def add(self, x, w, selected, enabled):
+        key = (bool(selected), bool(enabled))
+        if key == self.key and x <= self.right + 1:
+            self.right = max(self.right, x + w - 1)
+            return
+        self.flush()
+        self.key, self.left, self.right = key, x, x + w - 1
+
+    def flush(self):
+        if self.key is None:
+            return
+        selected, enabled = self.key
+        self.painter.setOpacity(1.0 if enabled else 0.4)
+        self.painter.fillRect(QRect(self.left, self.top, self.right - self.left + 1,
+                                    self.height),
+                              CLIP_OUTLINE_SELECTED if selected else CLIP_OUTLINE)
+        self.painter.setOpacity(1.0)
+        self.key = None
 
 
 def paint_area(painter, cell):
@@ -318,6 +410,8 @@ def paint_collapsed_clip(painter, clip_rect, track_type, selected, label,
     painter.fillRect(clip_rect, COLLAPSED_BAR_COLORS.get(track_type, VIDEO_CLIP_BG))
     painter.setPen(QColor(255, 255, 160) if selected else QColor(160, 180, 220))
     painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
+    if not label:
+        return
     font = QFont(painter.font())
     font.setPixelSize(max(7, min(11, clip_rect.height() - 4)))
     painter.save()

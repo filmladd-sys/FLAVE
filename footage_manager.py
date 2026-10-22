@@ -530,12 +530,12 @@ class FootageManager(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
-        # One undo step (used or unused): footage row, its icons (thumbnail
-        # rows, in undo SNAP_TABLES), its clips and their markers. Proxies
+        # One undo step (used or unused): footage row, its icons (only this
+        # footage's thumbnail rows), its clips and their markers. Proxies
         # rows, proxy files and peaks are left in place (never deleted here),
         # so undo needs nothing for them; no files are deleted
         from undo import push_undo
-        push_undo(self.project_db, "Remove footage")
+        push_undo(self.project_db, "Remove footage", icons_footage_ids=[footage_id])
         try:
             conn = sqlite3.connect(self.project_db)
             cur = conn.cursor()

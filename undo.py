@@ -3,6 +3,10 @@
 # {ProjectName}_Undo.db next to the project (Test9.db -> Test9_Undo.db,
 # BUILD 223, sequence_preview.temp_file_path).
 # Each snapshot copies whole tables (ATTACH + INSERT ... SELECT), ids kept.
+# The icons table (large thumbnail blobs) is not in ordinary snapshots; a
+# Footage Manager remove snapshots only the removed footage's icon rows
+# (push_undo icons_footage_ids), and a restore touches only the tables and
+# rows its snapshot holds.
 # Snapshot copy tables are named snap_<table>_<hash of column list>, so a
 # later schema change gets a new copy table instead of an ALTER.
 
@@ -14,9 +18,10 @@ import time
 SNAP_TABLES = ("clips", "keyframe_clips", "keyframes", "tracks", "footage",
                "sequences", "captions", "Marker",
                "sequence_children",   # BUILD 106: follows sequence clips
-               "keyframe_border",     # BUILD 222: border clip keys
-               "icons")               # BUILD 235: thumbnails follow footage
-                                      # (Footage Manager Remove is undoable)
+               "keyframe_border")     # BUILD 222: border clip keys
+# Thumbnails follow footage only through a Footage Manager remove (BUILD
+# 235): that snapshot holds the icon rows of the removed footage ids
+ICONS_TABLE = "icons"
 DEFAULT_STACK_MAX = 50
 WHOLE_RANGE = (0, 2 ** 40)
 
@@ -44,6 +49,10 @@ def ensure_undo_db(project_path):
             "CREATE TABLE IF NOT EXISTS snapshot_tables ("
             "snap_id INTEGER NOT NULL, tbl TEXT NOT NULL, "
             "copy_table TEXT, cols TEXT)")
+        # scope: NULL = whole table, else "footage_id=1,2" (only those rows)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(snapshot_tables)")]
+        if "scope" not in cols:
+            conn.execute("ALTER TABLE snapshot_tables ADD COLUMN scope TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -98,8 +107,24 @@ def _q(name):
     return '"%s"' % name.replace('"', '""')
 
 
-def _capture(conn, stack, label):
-    # Insert one snapshot of every table; returns the new snapshot id
+def _scope_where(scope):
+    # (" WHERE col IN (?, ...)", ids) for a scope "col=1,2"; ("", ()) for
+    # None. Only footage_id scopes are made (push_undo).
+    if not scope:
+        return "", ()
+    col, _eq, ids = scope.partition("=")
+    if col != "footage_id":
+        raise ValueError("bad undo scope %r" % scope)
+    ids = tuple(int(x) for x in ids.split(",") if x.strip())
+    if not ids:
+        return " WHERE 0", ()
+    return " WHERE %s IN (%s)" % (_q(col), ", ".join("?" * len(ids))), ids
+
+
+def _capture(conn, stack, label, extra=None):
+    # Insert one snapshot of every SNAP_TABLES table, plus extra
+    # {table: scope} (scope None = whole table, "footage_id=1,2" = those
+    # rows only); returns the new snapshot id
     seq = conn.execute(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM undo.snapshots WHERE stack = ?",
         (stack,)).fetchone()[0]
@@ -107,25 +132,35 @@ def _capture(conn, stack, label):
         "INSERT INTO undo.snapshots (stack, seq, label, created) VALUES (?, ?, ?, ?)",
         (stack, seq, label or "", time.time()))
     snap_id = cur.lastrowid
-    for table in SNAP_TABLES:
+    tables = [(t, None) for t in SNAP_TABLES] + list((extra or {}).items())
+    for table, scope in tables:
         cols = _main_cols(conn, table)
         if not cols:
             conn.execute(
-                "INSERT INTO undo.snapshot_tables (snap_id, tbl, copy_table, cols) "
-                "VALUES (?, ?, NULL, NULL)", (snap_id, table))
+                "INSERT INTO undo.snapshot_tables (snap_id, tbl, copy_table, cols, scope) "
+                "VALUES (?, ?, NULL, NULL, ?)", (snap_id, table, scope))
             continue
+        where, args = _scope_where(scope)
         copy = _copy_name(table, cols)
         col_sql = ", ".join(_q(c) for c in cols)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS undo.%s AS SELECT 0 AS snap_id, %s "
             "FROM main.%s WHERE 0" % (_q(copy), col_sql, _q(table)))
         conn.execute(
-            "INSERT INTO undo.%s (snap_id, %s) SELECT ?, %s FROM main.%s"
-            % (_q(copy), col_sql, col_sql, _q(table)), (snap_id,))
+            "INSERT INTO undo.%s (snap_id, %s) SELECT ?, %s FROM main.%s%s"
+            % (_q(copy), col_sql, col_sql, _q(table), where), (snap_id,) + args)
         conn.execute(
-            "INSERT INTO undo.snapshot_tables (snap_id, tbl, copy_table, cols) "
-            "VALUES (?, ?, ?, ?)", (snap_id, table, copy, ",".join(cols)))
+            "INSERT INTO undo.snapshot_tables (snap_id, tbl, copy_table, cols, scope) "
+            "VALUES (?, ?, ?, ?, ?)", (snap_id, table, copy, ",".join(cols), scope))
     return snap_id
+
+
+def _snapshot_extra(conn, snap_id):
+    # {table: scope} of a snapshot's tables outside SNAP_TABLES (icons), so
+    # the opposite stack captures the same tables and rows
+    return {tbl: scope for tbl, scope in conn.execute(
+        "SELECT tbl, scope FROM undo.snapshot_tables WHERE snap_id = ?",
+        (snap_id,)).fetchall() if tbl not in SNAP_TABLES}
 
 
 def _drop_snapshot(conn, snap_id):
@@ -154,14 +189,17 @@ def _trim(conn, stack, limit):
 
 
 def _restore(conn, snap_id):
-    # Replace every table with the snapshot rows (ids preserved)
-    for table, copy, cols in conn.execute(
-            "SELECT tbl, copy_table, cols FROM undo.snapshot_tables WHERE snap_id = ?",
-            (snap_id,)).fetchall():
+    # Replace each table the snapshot holds with its rows (ids preserved);
+    # a scoped table has only its scope rows replaced. Tables not in the
+    # snapshot (icons in an ordinary snapshot) are left as they are.
+    for table, copy, cols, scope in conn.execute(
+            "SELECT tbl, copy_table, cols, scope FROM undo.snapshot_tables "
+            "WHERE snap_id = ?", (snap_id,)).fetchall():
         now_cols = _main_cols(conn, table)
         if not now_cols:
             continue
-        conn.execute("DELETE FROM main.%s" % _q(table))
+        where, args = _scope_where(scope)
+        conn.execute("DELETE FROM main.%s%s" % (_q(table), where), args)
         if not copy:
             continue
         use = [c for c in (cols or "").split(",") if c and c in now_cols]
@@ -169,8 +207,9 @@ def _restore(conn, snap_id):
             continue
         col_sql = ", ".join(_q(c) for c in use)
         conn.execute(
-            "INSERT INTO main.%s (%s) SELECT %s FROM undo.%s WHERE snap_id = ?"
-            % (_q(table), col_sql, col_sql, _q(copy)), (snap_id,))
+            "INSERT %sINTO main.%s (%s) SELECT %s FROM undo.%s WHERE snap_id = ?"
+            % ("OR REPLACE " if scope else "", _q(table), col_sql, col_sql, _q(copy)),
+            (snap_id,))
         if "id" in now_cols:
             has_seq = conn.execute(
                 "SELECT 1 FROM main.sqlite_master WHERE name = 'sqlite_sequence'"
@@ -182,15 +221,21 @@ def _restore(conn, snap_id):
                     % _q(table), (table,))
 
 
-def push_undo(project_path, label=""):
-    # Before an undoable edit: snapshot onto undo, clear redo, trim to max
+def push_undo(project_path, label="", icons_footage_ids=None):
+    # Before an undoable edit: snapshot onto undo, clear redo, trim to max.
+    # icons_footage_ids (Footage Manager remove): also snapshot the icon
+    # rows of those footage ids; ordinary edits leave icons out.
     if not project_path or not os.path.isfile(project_path):
         return
     try:
         conn = _open(project_path)
         try:
             conn.execute("BEGIN")
-            _capture(conn, "undo", label)
+            extra = None
+            if icons_footage_ids:
+                extra = {ICONS_TABLE: "footage_id=" + ",".join(
+                    str(int(i)) for i in icons_footage_ids)}
+            _capture(conn, "undo", label, extra)
             _clear_stack(conn, "redo")
             _trim(conn, "undo", stack_max())
             conn.execute("COMMIT")
@@ -224,7 +269,7 @@ def _step(project_path, src, dst):
         snap_id, label = top
         conn.execute("BEGIN")
         try:
-            _capture(conn, dst, label)
+            _capture(conn, dst, label, _snapshot_extra(conn, snap_id))
             _trim(conn, dst, stack_max())
             _restore(conn, snap_id)
             _drop_snapshot(conn, snap_id)

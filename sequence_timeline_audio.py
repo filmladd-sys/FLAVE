@@ -6,6 +6,42 @@ from PySide6.QtGui import QColor
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg")
 
 
+_PY_MAX_BUCKETS_PER_PX = 64
+
+
+def _waveform_lines_np(values, n_buckets, left, x0, x1, first_bucket,
+                       buckets_per_px, mid, half, scale):
+    # Vertical min..max QLines for columns x0..x1 (the repainted part of the
+    # clip) with numpy reductions over each column's buckets (same buckets
+    # as the per-column loop). None when numpy is not available.
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    from PySide6.QtCore import QLine
+    pairs = np.frombuffer(values, dtype=np.int16) if not isinstance(values, list) \
+        else np.asarray(values, dtype=np.int16)
+    cols = np.arange(x0, x1 + 1, dtype=np.float64) - left
+    b0 = np.maximum((first_bucket + cols * buckets_per_px).astype(np.int64), 0)
+    b1 = (first_bucket + (cols + 1) * buckets_per_px).astype(np.int64)
+    b1 = np.maximum(b1, b0 + 1)
+    keep = b0 < n_buckets
+    if not keep.any():
+        return []
+    b0, b1, cols = b0[keep], np.minimum(b1[keep], n_buckets), cols[keep]
+    end = int(b1[-1])
+    mins = pairs[0:2 * end:2]
+    maxs = pairs[1:2 * end:2]
+    # reduceat sums [b0[i], b0[i + 1]); one bucket where b0 does not advance
+    lo = np.minimum.reduceat(mins, b0)
+    hi = np.maximum.reduceat(maxs, b0)
+    y_hi = mid - np.clip((hi * scale).astype(np.int64), -half, half)
+    y_lo = mid - np.clip((lo * scale).astype(np.int64), -half, half)
+    xs = (cols + left).astype(np.int64)
+    return [QLine(int(x), int(a), int(x), int(b))
+            for x, a, b in zip(xs.tolist(), y_hi.tolist(), y_lo.tolist())]
+
+
 def _draw_waveform(self, painter, tl, clip_rect, footage_id, in_frame, length_frames,
                    gain_db=0.0):
     # Center line plus a vertical min..max bar per pixel column. The clip's
@@ -35,6 +71,14 @@ def _draw_waveform(self, painter, tl, clip_rect, footage_id, in_frame, length_fr
     w = max(1, clip_rect.width())
     buckets_per_px = (length_frames / float(tl.fps)) * pps / float(w)
     first_bucket = (in_frame / float(tl.fps)) * pps
+    lines = _waveform_lines_np(values, n_buckets, clip_rect.left(), x0, x1,
+                               first_bucket, buckets_per_px, mid, half, scale)
+    if lines is not None:
+        if lines:
+            painter.drawLines(lines)
+        return
+    # Without numpy: per-column loop; wide columns sample at most
+    # _PY_MAX_BUCKETS_PER_PX buckets so zoomed-out paints stay bounded
     for px in range(x0, x1 + 1):
         b0 = int(first_bucket + (px - clip_rect.left()) * buckets_per_px)
         b1 = int(first_bucket + (px - clip_rect.left() + 1) * buckets_per_px)
@@ -43,8 +87,9 @@ def _draw_waveform(self, painter, tl, clip_rect, footage_id, in_frame, length_fr
         if b0 >= n_buckets:
             break
         b1 = min(b1, n_buckets)
-        lo = min(values[2 * k] for k in range(b0, b1))
-        hi = max(values[2 * k + 1] for k in range(b0, b1))
+        step = max(1, (b1 - b0) // _PY_MAX_BUCKETS_PER_PX)
+        lo = min(values[2 * k] for k in range(b0, b1, step))
+        hi = max(values[2 * k + 1] for k in range(b0, b1, step))
         y_hi = mid - max(-half, min(half, int(hi * scale)))
         y_lo = mid - max(-half, min(half, int(lo * scale)))
         painter.drawLine(px, y_hi, px, y_lo)

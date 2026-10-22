@@ -643,6 +643,8 @@ def paint_title_bar(painter, title_rect, title, visible_rect=None):
     painter.fillRect(title_rect, QColor(0, 0, 0))
     painter.setPen(QPen(QColor(255, 255, 255)))
     painter.drawRect(title_rect.adjusted(0, 0, -1, -1))
+    if not title:
+        return
     name_rect = sticky_name_rect(title_rect, visible_rect, 3)
     if name_rect is not None and name_rect.width() > 2:
         text = painter.fontMetrics().elidedText(
