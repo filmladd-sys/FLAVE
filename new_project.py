@@ -15,6 +15,14 @@ from PySide6.QtCore import Qt, Signal
 
 
 PROJECT_EXT = ".db"
+# Icon lookups (Sequence Timeline and Footage Manager) filter on footage_id,
+# frame_number, is_original and height (width too for the bin), and
+# deletes on footage_id; this one index serves all of them. Created with the
+# schema and, for older projects, on project open
+# (footage_manager_display.ensure_icons_index).
+ICONS_INDEX_NAME = "idx_icons_lookup"
+ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
+                   "ON icons (footage_id, frame_number, is_original, height)")
 # Characters Windows does not allow in a file name, plus control characters
 _BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = set(["CON", "PRN", "AUX", "NUL"] +
@@ -192,6 +200,7 @@ class NewProjectWindow(QMainWindow):
                 data BLOB
             )
         """)
+        cur.execute(ICONS_INDEX_SQL)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS clips (

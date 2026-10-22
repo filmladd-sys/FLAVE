@@ -112,6 +112,16 @@ def _prune_proxies_for(project_db):
         print("Proxy check failed: %s" % e)
 
 
+def _ensure_icons_index_for(project_db):
+    # Icons table check and lookup index for older projects
+    # (footage_manager_display)
+    try:
+        from footage_manager_display import ensure_icons_index
+        ensure_icons_index(project_db)
+    except Exception as e:
+        print("Icon index check failed: %s" % e)
+
+
 def _ensure_undo_db_for(project_db):
     # {ProjectName}_Undo.db next to the project, created if missing
     try:
@@ -284,6 +294,7 @@ class ProjectManager(QMainWindow):
             _ensure_keyframe_tables_for(path)
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
+            _ensure_icons_index_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -357,6 +368,7 @@ class ProjectManager(QMainWindow):
             _ensure_keyframe_tables_for(path)
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
+            _ensure_icons_index_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

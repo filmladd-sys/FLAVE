@@ -1020,12 +1020,14 @@ class SequenceTimeline(QMainWindow):
     def _read_icon_blob(self, footage_id, frame_number, height):
         # Stored resized icon for footage_id at frame_number that is exactly
         # height tall (real stored size, width follows aspect), as a QPixmap
-        conn = sqlite3.connect(self._project_db())
+        from footage_manager_display import icons_table_ready
+        project_db = self._project_db()
+        conn = sqlite3.connect(project_db)
         try:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(icons)")
-            if not cur.fetchall():
+            # Table check is done once per project (on open or here)
+            if not icons_table_ready(project_db, conn):
                 return None
+            cur = conn.cursor()
             cur.execute(
                 "SELECT data FROM icons WHERE footage_id = ? AND frame_number = ? "
                 "AND is_original = 0 AND height = ? AND data IS NOT NULL "
