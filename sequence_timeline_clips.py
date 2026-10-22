@@ -839,12 +839,17 @@ def _relocate_clip(self, clip, track_id):
 
 
 # Track moves keep time and move the whole drag group (a linked stack, or
-# the selection): the dragged clip goes to the track under the mouse, and
-# every other video / audio / image member moves the same number of tracks
-# of its own type in the same direction (V1/A1 -> V2/A2 with sets laid out
-# V1, A1, V2, A2). Keyframe and caption members stay on their tracks. The
-# move is refused when a member has no such track or would overlap a clip
-# that is not moving. Mouse x is ignored.
+# the selection): the dragged clip goes to the track under the mouse.
+# BUILD 259: pack move first (_pack_plan): every member, captions and
+# keyframes included, moves by the same number of rows in the track list,
+# so a stack on V1, C1, A1, A2 lands on the next V2, C2, A3, A4 laid out
+# the same way. It is used when every destination row has its member's
+# track type and is free over the member's frames. Otherwise the type
+# move: every other video / audio / image member moves the same number of
+# tracks of its own type in the same direction, keyframe and caption
+# members stay on their tracks, and the move is refused when a member has
+# no such track or would overlap a clip that is not moving. Mouse x is
+# ignored.
 
 CROSS_TRACK_TYPES = ("video", "audio", "image")
 
@@ -859,18 +864,57 @@ def _tracks_of_type(self, ttype):
     return out
 
 
+def _pack_plan(self, drag, target, src_tracks):
+    # BUILD 259: {clip id: track id} moving every member by the row offset
+    # from the dragged clip's track to target, or None when a destination
+    # row is missing, has another track type, or holds a clip that is not
+    # moving over that member's drag-start frames
+    rows, kinds = {}, []
+    for r in range(self.table.rowCount()):
+        item = self.table.item(r, 0)
+        tid = None if item is None else item.data(Qt.UserRole)
+        rows[tid] = r
+        kinds.append((tid, "" if item is None else
+                      (item.data(Qt.UserRole + 4) or "").lower()))
+    src = drag["src_track"]
+    if src not in rows or target not in rows:
+        return None
+    step = rows[target] - rows[src]
+    group = drag.get("group") or [{"clip": drag["clip"]}]
+    ids = set(m["clip"][0] for m in group)
+    plan = {}
+    for m in group:
+        c = m["clip"]
+        r = rows.get(src_tracks.get(c[0]))
+        if r is None or not (0 <= r + step < len(kinds)):
+            return None
+        tid, kind = kinds[r + step]
+        if tid is None or kind != kinds[r][1]:
+            return None
+        start = m.get("start", c[2])
+        end = start + c[3]
+        for o in self.clips_by_track.get(tid, []):
+            if o[0] not in ids and o[2] < end and o[2] + o[3] > start:
+                return None
+        plan[c[0]] = tid
+    return plan
+
+
 def _cross_track_plan(self, drag, target):
     # {clip id: target track id} for every member that changes track, or
     # None when a member has nowhere to go
     clip = drag["clip"]
     src = drag["src_track"]
+    src_tracks = drag.setdefault(
+        "src_tracks", {m["clip"][0]: self._clip_track_id(m["clip"])
+                       for m in drag.get("group") or [{"clip": clip}]})
+    plan = _pack_plan(self, drag, target, src_tracks)
+    if plan is not None:
+        return plan
     order = _tracks_of_type(self, self._track_type(src))
     if src not in order or target not in order:
         return None
     steps = order.index(target) - order.index(src)
-    src_tracks = drag.setdefault(
-        "src_tracks", {m["clip"][0]: self._clip_track_id(m["clip"])
-                       for m in drag.get("group") or [{"clip": clip}]})
     plan = {}
     for m in drag.get("group") or [{"clip": clip}]:
         c = m["clip"]
