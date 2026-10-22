@@ -91,6 +91,28 @@ def _candidates(changed, new_edges, new_rel, old_table):
     return [d for d, _n in order[:MAX_CANDIDATES]]
 
 
+def _clip_deltas(old, new):
+    # BUILD 258: start deltas of the clips found in both snapshots (same
+    # clip id) that moved, most frequent first. A ripple delete moves every
+    # clip right of the cut by one delta, and a new span can start inside
+    # an old span (a clip on another track that did not move ends there),
+    # which the span-start table of _candidates cannot match. Proposals
+    # only: diff_video proves every span before it relocates.
+    starts = {}
+    for t in old.tracks:
+        for c in t[3]:
+            starts[c[0]] = int(c[2])
+    count = {}
+    for t in new.tracks:
+        for c in t[3]:
+            s0 = starts.get(c[0])
+            if s0 is not None and int(c[2]) != s0:
+                d = int(c[2]) - s0
+                count[d] = count.get(d, 0) + 1
+    order = sorted(count.items(), key=lambda kv: (-kv[1], abs(kv[0])))
+    return [d for d, _n in order[:MAX_CANDIDATES]]
+
+
 def _runs(frames):
     # Sorted frame list -> inclusive runs
     out = []
@@ -124,7 +146,9 @@ def diff_video(old, new):
     table = _rel_table(old, old_e, old.end, old.rel)
     left = list(changed)
     relocs = []
-    for d in _candidates(changed, new_e, new.rel, table):
+    cands = _candidates(changed, new_e, new.rel, table)
+    cands += [d for d in _clip_deltas(old, new) if d not in cands]
+    for d in cands:
         if not left:
             break
         cuts = new_e + [e + d for e in old_e]

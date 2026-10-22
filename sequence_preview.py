@@ -421,58 +421,119 @@ def FramesShift(project_path, sequence_id, first, last, delta):
 def FramesRelocate(project_path, sequence_id, relocs):
     # BUILD 146: mile-marker relocations [(first, last, delta)] (a pure move
     # proved span by span): the clean rows of first..last are copied to
-    # first+delta..last+delta. GUI thread. Only the targets leave the clean
-    # set now (logged dirty, so an in-flight worker batch keeps them dirty);
-    # the sources keep their rows (the marker diff marks them if their own
-    # picture changed, queued after this). The worker reads every source
-    # before writing any target (one transaction), so swapped blocks copy
-    # correctly.
+    # first+delta..last+delta. GUI thread. The targets are logged dirty, so
+    # an in-flight worker batch built before the edit cannot land there as
+    # clean. The sources keep their rows (the marker diff marks them if
+    # their own picture changed, queued after this).
+    # BUILD 258: the clean set moves with the rows at once (a ripple delete
+    # keeps its bar green right of the cut): each clean source frame is
+    # clean at its target now; the worker copies the rows
+    # (_apply_relocate) and then sets the targets from what it moved.
     key = (os.path.abspath(project_path), int(sequence_id))
     relocs = [(int(a), int(b), int(d)) for a, b, d in relocs if int(b) >= int(a)]
     if not relocs:
         return
     s = clean_set(project_path, sequence_id)
     with _CLEAN_LOCK:
+        moved = []
+        for a, b, d in relocs:
+            moved.extend(f + d for f in s if a <= f <= b and f + d >= 0)
         for a, b, d in relocs:
             for f in [f for f in s if a + d <= f <= b + d]:
                 s.discard(f)
             _DIRTY_SEQ[0] += 1
             _DIRTY_LOG.append((_DIRTY_SEQ[0], key, a + d, b + d))
+        s.update(moved)
         _DIRTY_QUEUE.append((project_path, int(sequence_id), None, None,
                              ("relocate", relocs), _DIRTY_SEQ[0]))
         del _DIRTY_LOG[:-256]
 
 
+# Frames copied per commit by _apply_relocate (BUILD 258): the memory
+# journal and the page cache hold one chunk, not the whole move
+RELOCATE_CHUNK = 64
+
+
+def _relocate_order(relocs):
+    # BUILD 258: (ordered, rest). A relocation is copied when its targets
+    # miss the sources of every relocation not yet copied, so no copy
+    # writes over a frame still to be read (a relocation's overlap with its
+    # own source is handled by the copy direction). rest: relocations that
+    # swap blocks with each other; they are read whole before any write.
+    left = list(relocs)
+    out = []
+    while left:
+        for i, (a, b, d) in enumerate(left):
+            if all(b + d < a2 or a + d > b2
+                   for j, (a2, b2, _d2) in enumerate(left) if j != i):
+                out.append(left.pop(i))
+                break
+        else:
+            break
+    return out, left
+
+
+def _copy_rows(conn, rows, delta):
+    # Rows [(frame, jpeg)] written clean at frame + delta; the new frames
+    out = [(int(f) + delta, j) for f, j in rows
+           if j is not None and int(f) + delta >= 0]
+    conn.executemany("INSERT OR REPLACE INTO preview (frame, jpeg) VALUES (?, ?)",
+                     out)
+    conn.executemany("DELETE FROM DirtyImage WHERE frame = ?",
+                     ((f,) for f, _j in out))
+    return [f for f, _j in out]
+
+
 def _apply_relocate(project_path, sequence_id, relocs, seq):
-    # Worker thread: FramesRelocate's copies in one transaction
+    # Worker thread: FramesRelocate's copies. The clean source frames are
+    # listed first, then every target row joins DirtyImage (one commit), so
+    # a frame dirty before the move stays dirty after it. Then the clean
+    # rows are copied RELOCATE_CHUNK frames per commit, each relocation in
+    # the direction that reads a frame before anything is written over it
+    # (ascending for a move left, descending for a move right). A failure
+    # or crash part way leaves the targets not yet copied dirty (rebuilt);
+    # a source is never overwritten before it is read.
     key = (os.path.abspath(project_path), int(sequence_id))
+    ordered, rest = _relocate_order(relocs)
     conn = _connect(project_path, sequence_id)
     moved = []
     try:
+        clean = []
+        for a, b, d in ordered + rest:
+            clean.append(set(r[0] for r in conn.execute(
+                "SELECT frame FROM preview WHERE frame BETWEEN ? AND ? "
+                "AND jpeg IS NOT NULL AND " + CLEAN_SQL, (a, b))))
         got = []
-        for a, b, d in relocs:
-            rows = conn.execute(
-                "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
-                "AND jpeg IS NOT NULL AND " + CLEAN_SQL, (a, b)).fetchall()
-            got.append((d, rows))
+        for (a, b, d), keep in zip(rest, clean[len(ordered):]):
+            rows = conn.execute("SELECT frame, jpeg FROM preview "
+                                "WHERE frame BETWEEN ? AND ?", (a, b)).fetchall()
+            got.append((d, [r for r in rows if r[0] in keep]))
         for a, b, d in relocs:
             _mark_dirty_sql(conn, a + d, b + d)
+        conn.commit()
+        for (a, b, d), keep in zip(ordered, clean):
+            starts = range(a, b + 1, RELOCATE_CHUNK)
+            if d > 0:
+                starts = reversed(starts)
+            for x in starts:
+                rows = conn.execute(
+                    "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ?",
+                    (x, min(b, x + RELOCATE_CHUNK - 1))).fetchall()
+                moved.extend(_copy_rows(conn, [r for r in rows if r[0] in keep], d))
+                conn.commit()
         for d, rows in got:
-            for frame, jpeg in rows:
-                nf = int(frame) + d
-                if nf < 0 or jpeg is None:
-                    continue
-                _save_clean_sql(conn, nf, jpeg)
-                moved.append(nf)
+            moved.extend(_copy_rows(conn, rows, d))
         conn.commit()
     finally:
         conn.close()
-    s = clean_set(project_path, sequence_id)
-    with _CLEAN_LOCK:
-        for a, b, d in relocs:
-            for f in [f for f in s if a + d <= f <= b + d]:
-                s.discard(f)
-        s.update(f for f in moved if not _dirty_since(key, seq, f))
+        # The clean set matches the file: targets clean only where a row
+        # was copied and no mark came after FramesRelocate
+        s = clean_set(project_path, sequence_id)
+        with _CLEAN_LOCK:
+            for a, b, d in relocs:
+                for f in [f for f in s if a + d <= f <= b + d]:
+                    s.discard(f)
+            s.update(f for f in moved if not _dirty_since(key, seq, f))
 
 
 def _apply_shift(project_path, sequence_id, first, last, delta, seq):
@@ -520,8 +581,8 @@ def apply_dirty_queue():
             continue
         if len(item) > 4 and isinstance(item[4], tuple) and item[4][0] == "relocate":
             # BUILD 146: (project, sequence, None, None, ("relocate", relocs),
-            # seq). On a failure the targets are already out of the clean
-            # set, so the worker rebuilds them.
+            # seq). On a failure the targets not copied leave the clean
+            # set (_apply_relocate), so the worker rebuilds them.
             try:
                 _apply_relocate(project_path, sequence_id, item[4][1], item[5])
             except Exception as e:
@@ -710,24 +771,24 @@ class PreviewBatch(object):
         frames, blobs, seqs = job
         key = (os.path.abspath(self.project_path), int(self.sequence_id))
         t0 = time.perf_counter()
+        with _CLEAN_LOCK:
+            stale = set(f for f, q in zip(frames, seqs)
+                        if _dirty_since(key, q, f))
+        # Built before an edit marked them dirty: not written (BUILD 258).
+        # A dirty JPEG is never shown, and the row there may already hold
+        # the edit's own result (a relocated clean frame); the edit's queued
+        # mark dirties an old row.
+        fresh = [(f, b) for f, b in zip(frames, blobs) if f not in stale]
         conn.executemany(
             "INSERT OR REPLACE INTO preview (frame, jpeg) VALUES (?, ?)",
-            zip(frames, blobs))
+            fresh)
         conn.executemany("DELETE FROM DirtyImage WHERE frame = ?",
-                         ((f,) for f in frames))
-        with _CLEAN_LOCK:
-            stale = [f for f, q in zip(frames, seqs)
-                     if _dirty_since(key, q, f)]
-        # Built before an edit marked them dirty: keep them dirty
-        for f in stale:
-            conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) VALUES (?)",
-                         (f,))
+                         ((f,) for f, _b in fresh))
         conn.commit()
         dt = time.perf_counter() - t0
         s = clean_set(self.project_path, self.sequence_id)
-        stale = set(stale)
         with _CLEAN_LOCK:
-            s.update(f for f in frames if f not in stale)
+            s.update(f for f, _b in fresh)
         apply_dirty_queue()
         return dt
 
