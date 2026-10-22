@@ -49,6 +49,10 @@ def _connect(project_path, sequence_id):
     # Open WAL; create the tables if the file or a table is missing
     conn = sqlite3.connect(preview_db_path(project_path, sequence_id))
     conn.execute("PRAGMA journal_mode=WAL")
+    # BUILD 253: a commit does not wait for a disk flush (WAL stays
+    # consistent; a crash can only lose the last commits, and those frames
+    # are simply not clean and get rebuilt). Per connection.
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS preview (
             frame INTEGER PRIMARY KEY,
@@ -368,34 +372,41 @@ def FrameCleanRange(project_path, sequence_id, first, last):
 
 
 class PreviewBatch(object):
-    # One open transaction for many clean frames; commit() writes them at
-    # once and only then adds them to the in-memory clean set (bar moves).
-    # Used by the preview worker on its own thread.
+    # Many clean frames written at once: add() keeps them in memory, commit()
+    # writes them in one transaction (one bulk JPEG insert, one bulk
+    # DirtyImage delete) and only then adds them to the in-memory clean set
+    # (bar moves). Used by the preview worker on its own thread.
 
     def __init__(self, project_path, sequence_id):
         self.project_path = project_path
         self.sequence_id = sequence_id
         self.conn = None
         self.pending = []
+        self.blobs = []      # JPEG of each pending frame (same order)
         self.seqs = []       # dirty mark number when each pending frame was built
 
     def add(self, frame_num, jpeg_blob, seq=None):
         # seq: dirty mark number from before the frame was built (see
         # dirty_seq); default is the current number
-        if self.conn is None:
-            self.conn = _connect(self.project_path, self.sequence_id)
-        _save_clean_sql(self.conn, frame_num, sqlite3.Binary(jpeg_blob))
         self.pending.append(int(frame_num))
+        self.blobs.append(sqlite3.Binary(jpeg_blob))
         with _CLEAN_LOCK:
             self.seqs.append(_DIRTY_SEQ[0] if seq is None else int(seq))
 
     def commit(self):
         # Seconds spent committing (0.0 if nothing pending)
-        if self.conn is None or not self.pending:
+        if not self.pending:
             return 0.0
         import time
         key = (os.path.abspath(self.project_path), int(self.sequence_id))
         t0 = time.perf_counter()
+        if self.conn is None:
+            self.conn = _connect(self.project_path, self.sequence_id)
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO preview (frame, jpeg) VALUES (?, ?)",
+            zip(self.pending, self.blobs))
+        self.conn.executemany("DELETE FROM DirtyImage WHERE frame = ?",
+                              ((f,) for f in self.pending))
         with _CLEAN_LOCK:
             stale = [f for f, q in zip(self.pending, self.seqs)
                      if _dirty_since(key, q, f)]
@@ -410,6 +421,7 @@ class PreviewBatch(object):
         with _CLEAN_LOCK:
             s.update(f for f in self.pending if f not in stale)
         self.pending = []
+        self.blobs = []
         self.seqs = []
         apply_dirty_queue()
         return dt

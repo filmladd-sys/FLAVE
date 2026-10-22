@@ -421,8 +421,8 @@ class PreviewWorker(object):
                 if not jpegs:
                     return
                 # BUILD 252: write timing per card pass (preview_log on):
-                # row inserts, commits (with the dirty queue they run) and
-                # the SQLite commit alone
+                # adds (frames kept in memory), commits (bulk insert, SQLite
+                # commit and the dirty queue they run) and the SQL alone
                 t_w0 = time.perf_counter()
                 t_add = t_com = t_sql = 0.0
                 n_com = 0
@@ -451,7 +451,7 @@ class PreviewWorker(object):
                     t_all = time.perf_counter() - t_w0
                     t_prev = t_cycle[0]
                     t_cycle[0] = time.perf_counter()
-                    plog.log("write %d..%d: card %.3fs, write %.3fs (inserts "
+                    plog.log("write %d..%d: card %.3fs, write %.3fs (adds "
                              "%.3fs, %d commits %.3fs of which SQLite %.3fs, "
                              "other %.3fs)%s" % (
                                  chunk[0], chunk[-1], dt, t_all, t_add, n_com,
