@@ -1,9 +1,10 @@
 # sequence_timeline_slice.py
 # BUILD 131: slice mode for the Sequence Timeline. C enters, Escape / V /
-# right-click exit. A 1 px yellow line shows where the cut lands on the clip
-# under the mouse and its link-group partners; left-click cuts through the
-# existing slice path (slice_clip, the right-click Slice item). Functions
-# take the SequenceTimeline as tl. ASCII only.
+# right-click exit, and so does a cut (BUILD 269). A 1 px yellow line shows
+# where the cut lands on the clip under the mouse and its link-group
+# partners; left-click cuts through the existing slice path (slice_clip,
+# the right-click Slice item). Functions take the SequenceTimeline as tl.
+# ASCII only.
 # BUILD 132: keyframe clips slice too (slice_clip -> keyframe.
 # slice_keyframe_clip_db). Every tl attribute is read with getattr so a
 # call before SequenceTimeline.__init__ finishes cannot raise.
@@ -123,8 +124,9 @@ def slice_hover(tl, pos):
 
 
 def slice_click(tl, pos):
-    # Left-click: the existing slice path at this x, stay in slice mode and
-    # show the line on whatever piece is under the mouse now. True if cut.
+    # Left-click: the existing slice path at this x, then back to regular
+    # mode (BUILD 269; the button release of this click is still swallowed,
+    # see slice_event). True if cut.
     if getattr(tl, "sequence_id", None) is None:
         return False
     clip = slice_clip_at(tl, pos)
@@ -134,8 +136,8 @@ def slice_click(tl, pos):
     if slice_split_frame(clip, x, tl.view_start_frame, tl.pixels_per_frame) is None:
         return False
     tl.slice_clip(clip, x)
-    _set_lines(tl, [])
-    slice_hover(tl, pos)
+    exit_slice_mode(tl)
+    tl._slice_eat_release = True
     return True
 
 
@@ -199,6 +201,15 @@ def slice_event(tl, obj, event):
     # Viewport events in slice mode. True = consumed, False = pass on
     # (the normal handling runs), None = not a slice-mode event
     if not getattr(tl, "_slice_mode", False):
+        if (getattr(tl, "_slice_eat_release", False)
+                and event.type() == QEvent.MouseButtonRelease
+                and event.button() == Qt.LeftButton):
+            # Release of the click that cut and left slice mode
+            tl._slice_eat_release = False
+            return True
+        if event.type() == QEvent.MouseButtonPress:
+            # That release never came: a later click is handled normally
+            tl._slice_eat_release = False
         return None
     try:
         return _slice_event(tl, obj, event)

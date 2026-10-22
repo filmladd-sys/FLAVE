@@ -1139,8 +1139,10 @@ class SequenceTimeline(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is self.table.viewport():
             etype = event.type()
-            if getattr(self, "_slice_mode", False):
-                # BUILD 131: slice mode takes the mouse first
+            if (getattr(self, "_slice_mode", False)
+                    or getattr(self, "_slice_eat_release", False)):
+                # BUILD 131: slice mode takes the mouse first (BUILD 269:
+                # and the release of the click that cut and left it)
                 from sequence_timeline_slice import slice_event
                 handled = slice_event(self, obj, event)
                 if handled is not None:
