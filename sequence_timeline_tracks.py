@@ -354,6 +354,33 @@ def duplicate_track_order(ids, selected, copies, where):
     return list(ids[:at]) + list(copies) + list(ids[at:])
 
 
+def insert_track_copies(cur, sequence_id, src_rows):
+    # Insert one track in sequence_id per source track row (dict column ->
+    # value, top to bottom; from any sequence). Each copy keeps every column
+    # of its source except id, sequence_id, name (a new default name per
+    # type, unique in sequence_id), sort_order (0; the caller renumbers),
+    # enabled (on) and solo (off). Returns the new ids in source order.
+    # Used by Duplicate Track(s) and Paste w/New Tracks (BUILD 288).
+    from track_names import next_default_name
+    names = [r[0] for r in cur.execute(
+        "SELECT name FROM tracks WHERE sequence_id = ?", (sequence_id,))]
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(tracks)")
+            if r[1] not in ("id", "name", "sort_order", "enabled", "solo")]
+    copies = []
+    for src in src_rows:
+        vals = {c: src[c] for c in cols if c in src}
+        vals["sequence_id"] = sequence_id
+        name = next_default_name(vals.get("track_type"), names)
+        names.append(name)
+        vals.update({"name": name, "sort_order": 0, "enabled": 1, "solo": 0})
+        keys = list(vals)
+        cur.execute("INSERT INTO tracks (%s) VALUES (%s)" % (
+            ", ".join(keys), ", ".join("?" for _ in keys)),
+            [vals[k] for k in keys])
+        copies.append(cur.lastrowid)
+    return copies
+
+
 def _duplicate_tracks(self, where):
     project_db = self._project_db()
     if not project_db or self.sequence_id is None:
@@ -362,7 +389,6 @@ def _duplicate_tracks(self, where):
     if not selected:
         return
     from undo import push_undo
-    from track_names import next_default_name
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
@@ -377,26 +403,16 @@ def _duplicate_tracks(self, where):
     src = [t for t in ids if t in selected]
     if not src:
         return
-    names = [r[1] for r in rows]
     push_undo(project_db, "Duplicate tracks")
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(tracks)")
-                if r[1] not in ("id", "name", "sort_order", "enabled", "solo")]
-        copies = []
+        tcols = [r[1] for r in cur.execute("PRAGMA table_info(tracks)")]
+        src_rows = []
         for tid in src:
-            cur.execute("SELECT %s FROM tracks WHERE id = ?" % ", ".join(cols),
-                        (tid,))
-            vals = dict(zip(cols, cur.fetchone()))
-            name = next_default_name(vals.get("track_type"), names)
-            names.append(name)
-            vals.update({"name": name, "sort_order": 0, "enabled": 1, "solo": 0})
-            keys = list(vals)
-            cur.execute("INSERT INTO tracks (%s) VALUES (%s)" % (
-                ", ".join(keys), ", ".join("?" for _ in keys)),
-                [vals[k] for k in keys])
-            copies.append(cur.lastrowid)
+            cur.execute("SELECT * FROM tracks WHERE id = ?", (tid,))
+            src_rows.append(dict(zip(tcols, cur.fetchone())))
+        copies = insert_track_copies(cur, self.sequence_id, src_rows)
         for order, tid in enumerate(duplicate_track_order(ids, selected,
                                                           copies, where)):
             cur.execute("UPDATE tracks SET sort_order = ? WHERE id = ?",

@@ -1,23 +1,54 @@
 # timeline_clipboard.py
 # In-memory Copy / Cut / Paste for the Sequence Timeline. One clipboard per
-# (project file, sequence_id); never the system clipboard and never shared
-# between sequences. Stores row data, not ids. ASCII only.
+# project file: the last Copy or Cut in any of its sequences (never the
+# system clipboard). Stores row data, not ids, plus the source sequence id,
+# its fps and the rows of the source tracks that hold copied items.
+# Paste (Ctrl+V, Paste To Tic, Paste to End, right-click Paste) only pastes
+# into the sequence the clipboard came from; Paste w/New Tracks pastes into
+# any sequence of the project on new tracks (paste_new_tracks). ASCII only.
 
+import math
 import os
 import sqlite3
 
-# (abs project path, sequence_id) -> list of item dicts
-_CLIPBOARDS = {}
+# The last Copy / Cut: dict(project=abs project path, sequence_id, fps,
+# tracks=[source track rows as dicts, top to bottom], items=[item dicts]),
+# or None
+_CLIPBOARD = None
 
 
-def _key(tl):
-    return (os.path.abspath(tl._project_db() or ""), int(tl.sequence_id))
+def _project_key(tl):
+    return os.path.abspath(tl._project_db() or "")
+
+
+def _clipboard(tl):
+    # The clipboard when it belongs to this timeline's project, else None
+    if tl.sequence_id is None or _CLIPBOARD is None:
+        return None
+    if _CLIPBOARD["project"] != _project_key(tl) or not _CLIPBOARD["items"]:
+        return None
+    return _CLIPBOARD
 
 
 def has_clipboard(tl):
-    if tl.sequence_id is None:
-        return False
-    return bool(_CLIPBOARDS.get(_key(tl)))
+    # True when the clipboard came from this sequence (plain Paste)
+    clip = _clipboard(tl)
+    return clip is not None and int(clip["sequence_id"]) == int(tl.sequence_id)
+
+
+def has_any_clipboard(tl):
+    # True when the clipboard came from any sequence of this project
+    # (Paste w/New Tracks)
+    return _clipboard(tl) is not None
+
+
+def _sequence_fps(cur, sequence_id):
+    try:
+        r = cur.execute("SELECT fps FROM sequences WHERE id = ?",
+                        (int(sequence_id),)).fetchone()
+        return float(r[0]) if r and r[0] else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
 
 
 def _selection_set(tl):
@@ -44,8 +75,10 @@ def _start_len(table, row):
 
 
 def copy_selection(tl):
-    # Snapshot the selected set into this sequence's clipboard. Returns the
-    # item count (0 = nothing copied, clipboard unchanged).
+    # Snapshot the selected set into the project clipboard, with this
+    # sequence's id and fps and the rows of the tracks holding the items.
+    # Returns the item count (0 = nothing copied, clipboard unchanged).
+    global _CLIPBOARD
     if tl.sequence_id is None or not tl._selected_clip_ids:
         return 0
     from sequence_timeline_captions import clip_table_and_id
@@ -89,6 +122,13 @@ def copy_selection(tl):
             items.append({"table": table, "row": row, "track_id": row.get("track_id"),
                           "start": start, "length": length, "link_id": link_id,
                           "keys": keys, "markers": marks})
+        fps = _sequence_fps(cur, tl.sequence_id)
+        used = {it["track_id"] for it in items}
+        tcols = _columns(cur, "tracks")
+        cur.execute("SELECT * FROM tracks WHERE sequence_id = ? "
+                    "ORDER BY sort_order, id", (int(tl.sequence_id),))
+        tracks = [d for d in (dict(zip(tcols, r)) for r in cur.fetchall())
+                  if d.get("id") in used]
     finally:
         conn.close()
     if not items:
@@ -96,7 +136,8 @@ def copy_selection(tl):
     first = min(it["start"] for it in items)
     for it in items:
         it["offset"] = it["start"] - first
-    _CLIPBOARDS[_key(tl)] = items
+    _CLIPBOARD = {"project": _project_key(tl), "sequence_id": int(tl.sequence_id),
+                  "fps": fps, "tracks": tracks, "items": items}
     return len(items)
 
 
@@ -108,7 +149,7 @@ def cut_selection(tl):
     if not n:
         return
     ranges = [(it["start"], it["start"] + it["length"] - 1)
-              for it in _CLIPBOARDS[_key(tl)]]
+              for it in _CLIPBOARD["items"]]
     tl._mark_preview_dirty(ranges)
     tl.delete_selected_clip()
 
@@ -123,7 +164,9 @@ def end_anchor(tl):
 
 
 def paste(tl, anchor, make_room):
-    # Paste this sequence's clipboard with its earliest in-point at anchor.
+    # Paste the clipboard with its earliest in-point at anchor when it came
+    # from this sequence; from another sequence: nothing pasted, a status
+    # bar hint names Edit > Paste w/New Tracks.
     # Overwrite: existing clips under a pasted item are trimmed, moved in or
     # deleted (see the plan below). make_room is kept for callers; Paste To
     # Tic and Paste to End both overwrite.
@@ -131,11 +174,16 @@ def paste(tl, anchor, make_room):
     # End, right-click Paste > To Mouse / To Tick) overwrites the same way:
     # covered clips removed, partly covered trimmed, a clip the paste lands
     # inside split around it (overwrite_plan / apply_overwrite).
-    from PySide6.QtWidgets import QMessageBox
-    from keyframe import mem_id_from_db
-    items = _CLIPBOARDS.get(_key(tl)) if tl.sequence_id is not None else None
-    if not items or tl._edge_drag is not None:
+    clip = _clipboard(tl)
+    if clip is None or tl._edge_drag is not None:
         return
+    if int(clip["sequence_id"]) != int(tl.sequence_id):
+        # Plain paste stays inside the source sequence
+        tl.status_bar.showMessage(
+            "Paste: the clipboard is from another sequence; use "
+            "Edit > Paste w/New Tracks", 5000)
+        return
+    items = clip["items"]
     anchor = max(0, int(anchor))
     project = tl._project_db()
     conn = sqlite3.connect(project)
@@ -151,6 +199,19 @@ def paste(tl, anchor, make_room):
         tl.status_bar.showMessage(
             f"Paste: {skipped} item(s) skipped, their tracks no longer exist", 5000)
         return
+    _paste_core(tl, ok, anchor, skipped)
+
+
+def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips"):
+    # Insert the items ok with their earliest in-point at anchor, in one
+    # undo step (label). make_tracks None: each item goes to its own
+    # track_id and overwrites what is under it there. make_tracks(cur):
+    # called inside the paste's transaction, creates the destination tracks
+    # and returns {source track id: new track id}; the new tracks are empty,
+    # so nothing is overwritten.
+    from PySide6.QtWidgets import QMessageBox
+    from keyframe import mem_id_from_db
+    project = tl._project_db()
     # Overwrite plan against the current clips on each target track (all
     # types). Items in paste order per track; each existing clip's state is
     # updated as it goes. Left overlap or spanning: out-point trimmed to the
@@ -186,7 +247,7 @@ def paste(tl, anchor, make_room):
     # pieces: deleted. One piece: trimmed. Two or more (the paste lands
     # inside it): split, the first piece keeps the row, the others are new
     # rows (see apply_overwrite). Never refuses because of overlap.
-    state = overwrite_plan(tl, ok, anchor)
+    state = overwrite_plan(tl, ok, anchor) if make_tracks is None else {}
     # BUILD 106: sequence clips in the paste must pass the self / cycle
     # check against this sequence, else the whole paste is refused
     children = set()
@@ -208,7 +269,7 @@ def paste(tl, anchor, make_room):
             QMessageBox.information(tl, "Paste", text)
             return
     from undo import push_undo
-    push_undo(project, "Paste clips")
+    push_undo(project, label)
     ranges = []
     conn = None
     try:
@@ -252,6 +313,7 @@ def paste(tl, anchor, make_room):
         #             f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
         #             (st["cs"], new_len, row_id))
         trimmed, deleted = apply_overwrite(cur, state, ranges)
+        track_map = make_tracks(cur) if make_tracks is not None else {}
         cols_by_table = {}
         groups = {}     # original link_id -> [(table, new row id, mem id)]
         for it in ok:
@@ -261,7 +323,7 @@ def paste(tl, anchor, make_room):
             cols = cols_by_table[table]
             s = anchor + it["offset"]
             row = dict(it["row"])
-            row["track_id"] = it["track_id"]
+            row["track_id"] = track_map.get(it["track_id"], it["track_id"])
             if table == "keyframe_clips":
                 row["in_frame"] = s
                 row["out_frame"] = s + it["length"]
@@ -353,6 +415,8 @@ def paste(tl, anchor, make_room):
         return
     tl._mark_preview_dirty(ranges)
     msg = f"Pasted {len(ok)} item(s) at frame {anchor}"
+    if track_map:
+        msg += f" on {len(track_map)} new track(s)"
     if trimmed:
         msg += f", trimmed {trimmed}"
     if deleted:
@@ -519,3 +583,89 @@ def apply_overwrite(cur, state, ranges):
             cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
                         (new_link, row_id))
     return trimmed, deleted
+
+
+# ---------------------------------------------------------------- BUILD 288
+# Paste w/New Tracks: paste the clipboard (from any sequence of the
+# project) into this sequence on new tracks, one per source track that
+# holds copied items, created as one block above all existing tracks in the
+# source top-to-bottom order (sequence_timeline_tracks.insert_track_copies:
+# default names, other settings copied, enabled on, solo off). The earliest
+# in-point lands at anchor; links get new ids per original group, keyframe
+# clips, captions and markers come along as in Paste. One undo step.
+
+
+def _round_frame(x):
+    # Nearest whole frame, halves up (also below 0)
+    return int(math.floor(x + 0.5))
+
+
+def convert_items(items, src_fps, dst_fps):
+    # Clipboard items re-timed from src_fps to dst_fps sequence frames.
+    # Same rate (or a rate unknown): the items unchanged. Else r = dst / src
+    # and each item's edges are scaled and rounded (start and end, so pieces
+    # that touched still touch), its length is end - start (at least 1);
+    # a clip's in_frame, keyframe key frames and marker frames are scaled
+    # too, so each item shows the same footage time. Offsets are recomputed
+    # from the new starts. Other values (caption pos_x / pos_y, key values)
+    # are unchanged.
+    from sequence_player import fps_conform_ratio
+    r = fps_conform_ratio(dst_fps, src_fps)
+    if r is None:
+        return items
+    out = []
+    for it in items:
+        s = _round_frame(it["start"] * r)
+        e = max(s + 1, _round_frame((it["start"] + it["length"]) * r))
+        row = dict(it["row"])
+        if it["table"] != "keyframe_clips":
+            row["length_frames"] = e - s
+        if it["table"] == "clips" and row.get("in_frame") is not None:
+            row["in_frame"] = _round_frame(int(row["in_frame"]) * r)
+        keys = []
+        for kd in it["keys"]:
+            kd = dict(kd)
+            kd["frame"] = _round_frame(int(kd.get("frame", 0)) * r)
+            keys.append(kd)
+        marks = [(m[0], _round_frame(int(m[1]) * r)) + tuple(m[2:])
+                 for m in it.get("markers") or ()]
+        out.append(dict(it, row=row, start=s, length=e - s, keys=keys,
+                        markers=marks))
+    first = min(it["start"] for it in out)
+    for it in out:
+        it["offset"] = it["start"] - first
+    return out
+
+
+def paste_new_tracks(tl, anchor):
+    clip = _clipboard(tl)
+    if clip is None or tl._edge_drag is not None:
+        return
+    src_tracks = [t for t in clip["tracks"]
+                  if any(it["track_id"] == t.get("id") for it in clip["items"])]
+    have = {t.get("id") for t in src_tracks}
+    items = [it for it in clip["items"] if it["track_id"] in have]
+    skipped = len(clip["items"]) - len(items)
+    if not items:
+        return
+    conn = sqlite3.connect(tl._project_db())
+    try:
+        dst_fps = _sequence_fps(conn.cursor(), tl.sequence_id)
+    finally:
+        conn.close()
+    items = convert_items(items, clip["fps"], dst_fps)
+    seq_id = int(tl.sequence_id)
+
+    def make_tracks(cur):
+        from sequence_timeline_tracks import insert_track_copies
+        copies = insert_track_copies(cur, seq_id, src_tracks)
+        cur.execute("SELECT id FROM tracks WHERE sequence_id = ? "
+                    "ORDER BY sort_order, id", (seq_id,))
+        rest = [r[0] for r in cur.fetchall() if r[0] not in set(copies)]
+        for order, tid in enumerate(list(copies) + rest):
+            cur.execute("UPDATE tracks SET sort_order = ? WHERE id = ?",
+                        (order, tid))
+        return dict(zip([t["id"] for t in src_tracks], copies))
+
+    _paste_core(tl, items, max(0, int(anchor)), skipped, make_tracks,
+                "Paste w/New Tracks")

@@ -500,8 +500,13 @@ class SequenceTimeline(QMainWindow):
         self._paste_end_action.triggered.connect(self._clip_paste_end)
         self._cut_action = QAction("Cut\tCtrl+X", self)
         self._cut_action.triggered.connect(self._clip_cut)
+        # BUILD 288: the clipboard from any sequence of the project, pasted
+        # at the playhead on new tracks (timeline_clipboard.paste_new_tracks)
+        self._paste_new_tracks_action = QAction("Paste w/New Tracks", self)
+        self._paste_new_tracks_action.triggered.connect(self._clip_paste_new_tracks)
         for a in (self._copy_action, self._paste_tic_action,
-                  self._paste_end_action, self._cut_action):
+                  self._paste_end_action, self._paste_new_tracks_action,
+                  self._cut_action):
             edit_menu.addAction(a)
         # BUILD 280: Find in captions (sequence_timeline_find.py); the keys
         # are the QShortcuts above, shown as text only
@@ -624,19 +629,22 @@ class SequenceTimeline(QMainWindow):
         caption_find_prev(self)
 
     def _update_edit_actions(self):
-        # Copy/Cut need a selection; Paste needs this sequence's clipboard
+        # Copy/Cut need a selection; Paste needs a clipboard from this
+        # sequence; Paste w/New Tracks one from any sequence of the project
         if not hasattr(self, "_copy_action"):
             return
         try:
-            from timeline_clipboard import has_clipboard
+            from timeline_clipboard import has_clipboard, has_any_clipboard
             has = has_clipboard(self)
+            has_any = has_any_clipboard(self)
         except Exception:
-            has = False
+            has = has_any = False
         sel = bool(getattr(self, "_selected_clip_ids", None))
         self._copy_action.setEnabled(sel)
         self._cut_action.setEnabled(sel)
         self._paste_tic_action.setEnabled(has)
         self._paste_end_action.setEnabled(has)
+        self._paste_new_tracks_action.setEnabled(has_any)
 
     def _clip_copy(self):
         from timeline_clipboard import copy_selection
@@ -653,6 +661,11 @@ class SequenceTimeline(QMainWindow):
     def _clip_paste_tic(self):
         from timeline_clipboard import paste
         paste(self, int(self.current_frame), True)
+        self._update_edit_actions()
+
+    def _clip_paste_new_tracks(self):
+        from timeline_clipboard import paste_new_tracks
+        paste_new_tracks(self, int(self.current_frame))
         self._update_edit_actions()
 
     def _clip_paste_end(self):
