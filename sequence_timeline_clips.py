@@ -1198,6 +1198,13 @@ def _clip_context_menu(self, clip, pos):
         key_menu = menu.addMenu("Key")
         key_click_action = key_menu.addAction("Add At Mouse Click")
         key_tick_action = key_menu.addAction("Add At Playhead")
+        # BUILD 270: paste a copied key (Copy Keyframe on a key box)
+        from keyframe import can_paste_key, paste_frame, paste_key
+        paste_menu = key_menu.addMenu("Paste")
+        paste_acts = {paste_menu.addAction("At Mouse Click"): "mouse",
+                      paste_menu.addAction("At Playhead"): "playhead",
+                      paste_menu.addAction("At Clip Center"): "center"}
+        paste_menu.setEnabled(can_paste_key(clip))
         # BUILD 260: keys outside the clip's [in, out) of the right-clicked
         # keyframe clip, or of every selected keyframe clip when it is
         # selected; disabled when there are none
@@ -1232,7 +1239,11 @@ def _clip_context_menu(self, clip, pos):
         # if self._run_clipboard_action(action, clip_acts, clip):
         if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
             return
-        if action == key_click_action:
+        if action in paste_acts:
+            click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
+            paste_key(self, clip, paste_frame(clip, paste_acts[action],
+                                              click_frame, self.current_frame))
+        elif action == key_click_action:
             click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
             _add_key(self, clip, click_frame)
         elif action == key_tick_action:

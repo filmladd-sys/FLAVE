@@ -1522,14 +1522,112 @@ def center_key_beyond_horizon(timeline, clips):
     timeline._after_clip_change(msg)
 
 
+# BUILD 270: key clipboard. Copy Keyframe on a key box keeps its type and
+# value (and a border key's colour); the keyframe clip Key > Paste submenu
+# adds that key to a clip at the mouse click, the playhead or the clip's
+# center frame (clamped to [in, out)). Pasting needs a clip of the same
+# type, or a clip with no keys yet (it takes the copied type, BUILD 147).
+# A key already on that frame takes the pasted value instead of a second
+# key being added. One undo step per paste.
+_key_clipboard = None
+
+
+def copy_key(timeline, key_hit):
+    global _key_clipboard
+    clip = key_hit["clip"]
+    stored_type = clip[10] if len(clip) > 10 else ""
+    rgba = border_rgba(clip, key_hit["key_id"]) if stored_type == BORDER_TYPE else None
+    _key_clipboard = {"type": stored_type, "value": float(key_hit["value"]),
+                      "rgba": rgba}
+    timeline.status_bar.showMessage(
+        "Copied key %s" % format_key_value(key_hit["value"], stored_type), 3000)
+
+
+def can_paste_key(clip):
+    # True when the clipboard holds a key this clip accepts
+    if _key_clipboard is None:
+        return False
+    stored_type = clip[10] if len(clip) > 10 else ""
+    keys = clip[9] if len(clip) > 9 and clip[9] else []
+    return stored_type == _key_clipboard["type"] or not keys
+
+
+def paste_frame(clip, where, click_frame=None, playhead=None):
+    # Target frame for where in ("mouse", "playhead", "center"), clamped
+    in_f = max(0, int(clip[2]))
+    out_f = in_f + max(1, int(clip[3]))
+    if where == "mouse":
+        f = int(click_frame)
+    elif where == "playhead":
+        f = int(playhead)
+    else:
+        f = in_f + (out_f - in_f) // 2
+    return max(in_f, min(out_f - 1, f))
+
+
+def paste_key(timeline, clip, frame):
+    if not can_paste_key(clip):
+        timeline.status_bar.showMessage(
+            "Paste Key refused: the clip has keys of another type", 3000)
+        return
+    data = _key_clipboard
+    stored_type = data["type"]
+    db_id = db_id_from_mem(clip[0])
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    from undo import push_undo
+    push_undo(project_db, "Paste key")
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        ensure_keyframe_tables(conn)
+        if not set_clip_type(cur, db_id, stored_type):
+            conn.close()
+            timeline.status_bar.showMessage(
+                "Paste Key refused: the clip has keys of another type", 3000)
+            return
+        table = key_table_for_type(stored_type)
+        cur.execute("SELECT id FROM %s WHERE keyframe_clip_id = ? AND frame = ? "
+                    "ORDER BY id LIMIT 1" % table, (db_id, int(frame)))
+        row = cur.fetchone()
+        if stored_type == BORDER_TYPE:
+            rgba = tuple(data["rgba"] or (255.0, 255.0, 255.0, 255.0))
+            if row is not None:
+                cur.execute("UPDATE keyframe_border SET px = ?, r = ?, g = ?, "
+                            "b = ?, a = ? WHERE id = ?",
+                            (data["value"],) + rgba + (row[0],))
+            else:
+                cur.execute(
+                    "INSERT INTO keyframe_border (keyframe_clip_id, frame, px, "
+                    "r, g, b, a) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (db_id, int(frame), data["value"]) + rgba)
+        elif row is not None:
+            cur.execute("UPDATE keyframes SET value = ? WHERE id = ?",
+                        (data["value"], row[0]))
+        else:
+            cur.execute("INSERT INTO keyframes (keyframe_clip_id, frame, value) "
+                        "VALUES (?, ?, ?)", (db_id, int(frame), data["value"]))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Paste Key", "Could not paste key: %s" % e)
+        return
+    mark_keyframe_clip_preview_dirty(timeline, clip)
+    timeline._after_clip_change("Pasted key at frame %d" % int(frame))
+
+
 def key_context_menu(timeline, key_hit, pos):
-    # Right-click on a key box: Edit Keyframe / Delete Keyframe
+    # Right-click on a key box: Edit / Copy / Delete Keyframe
     from PySide6.QtWidgets import QMenu
     menu = QMenu(timeline)
     edit_action = menu.addAction("Edit Keyframe")
+    copy_action = menu.addAction("Copy Keyframe")     # BUILD 270
     delete_action = menu.addAction("Delete Keyframe")
     action = menu.exec(timeline.table.viewport().mapToGlobal(pos))
-    if action == edit_action:
+    if action == copy_action:
+        copy_key(timeline, key_hit)
+    elif action == edit_action:
         edit_key(timeline, key_hit["clip"], key_hit["key_id"],
                  key_hit["frame"], key_hit["value"])
     elif action == delete_action:
