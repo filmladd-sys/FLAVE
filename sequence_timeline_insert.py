@@ -31,21 +31,11 @@ def _not_in(column, ids):
     return f" AND {column} NOT IN ({','.join('?' * len(ids))})", ids
 
 
-def insert_drop(tl, group):
-    # group: the drag group (dicts with "clip"); the clips already hold
-    # their drop positions in memory
-    from keyframe import (is_keyframe_clip_id, persist_keyframe_clip_time,
-                          shift_clip_keys)
-    from sequence_timeline_captions import clip_table_and_id
-    from sequence_timeline_sql import slice_members_db
-    moving = [m["clip"] for m in group]
-    if not moving or tl.sequence_id is None:
-        return
-    ids = {c[0] for c in moving}
-    at = max(0, min(int(c[2]) for c in moving))
-    span = max(int(c[2]) + int(c[3]) for c in moving) - at
-    # Clips that span the insert frame, one entry per link group so the
-    # right pieces of a linked stack share one new link_id
+def insert_cuts(tl, at, ids=()):
+    # Clips (any track or type, except ids) that span frame at (start < at
+    # < end), one entry (members, linked) per link group so the right
+    # pieces of a linked stack share one new link_id. Read from memory
+    # before the undo step.
     cuts = []
     seen = set()
     for clips in tl.clips_by_track.values():
@@ -55,6 +45,57 @@ def insert_drop(tl, group):
             members = [c] + [p for p in tl._linked_clips(c) if p[0] not in ids]
             seen.update(p[0] for p in members)
             cuts.append((members, len(c) > 8 and c[8] is not None))
+    return cuts
+
+
+def ripple_insert_db(tl, cur, at, span, cuts, rows=None):
+    # The database part of an insert, in the caller's transaction and undo
+    # step: slice every cut at frame at (slice_members_db, the Slice cut),
+    # then move every clip, caption and keyframe clip of the sequence that
+    # starts at or after at (the right pieces too) right by span, on every
+    # track; keyframe clips carry their keys, markers are source-relative
+    # and follow their clips. rows: {table: [row ids]} left in place (the
+    # dragged clips of a Shift+drag insert); None = none.
+    from keyframe import shift_clip_keys
+    from sequence_timeline_sql import slice_members_db
+    rows = rows or {}
+    for members, linked in cuts:
+        slice_members_db(tl, cur, members, at, linked)
+    seq = tl.sequence_id
+    sql, extra = _not_in("id", rows.get("clips", ()))
+    cur.execute(
+        "UPDATE clips SET start_frame = start_frame + ? WHERE start_frame >= ? "
+        "AND track_id IN (SELECT id FROM tracks WHERE sequence_id = ?)" + sql,
+        [span, at, seq] + extra)
+    sql, extra = _not_in("id", rows.get("captions", ()))
+    cur.execute(
+        "UPDATE captions SET start_frame = start_frame + ? "
+        "WHERE start_frame >= ? AND sequence_id = ?" + sql,
+        [span, at, seq] + extra)
+    sql, extra = _not_in("id", rows.get("keyframe_clips", ()))
+    cur.execute(
+        "SELECT id FROM keyframe_clips WHERE in_frame >= ? AND sequence_id = ?" + sql,
+        [at, seq] + extra)
+    kf_ids = [r[0] for r in cur.fetchall()]
+    for kid in kf_ids:
+        cur.execute("UPDATE keyframe_clips SET in_frame = in_frame + ?, "
+                    "out_frame = out_frame + ? WHERE id = ?", (span, span, kid))
+        # keyframes / keyframe_border rows (BUILD 222)
+        shift_clip_keys(cur, kid, span)
+
+
+def insert_drop(tl, group):
+    # group: the drag group (dicts with "clip"); the clips already hold
+    # their drop positions in memory
+    from keyframe import is_keyframe_clip_id, persist_keyframe_clip_time
+    from sequence_timeline_captions import clip_table_and_id
+    moving = [m["clip"] for m in group]
+    if not moving or tl.sequence_id is None:
+        return
+    ids = {c[0] for c in moving}
+    at = max(0, min(int(c[2]) for c in moving))
+    span = max(int(c[2]) + int(c[3]) for c in moving) - at
+    cuts = insert_cuts(tl, at, ids)
     rows = {"clips": [], "captions": [], "keyframe_clips": []}
     for c in moving:
         table, row_id = clip_table_and_id(c[0])
@@ -64,29 +105,7 @@ def insert_drop(tl, group):
     try:
         conn = sqlite3.connect(tl._project_db())
         cur = conn.cursor()
-        for members, linked in cuts:
-            slice_members_db(tl, cur, members, at, linked)
-        seq = tl.sequence_id
-        sql, extra = _not_in("id", rows["clips"])
-        cur.execute(
-            "UPDATE clips SET start_frame = start_frame + ? WHERE start_frame >= ? "
-            "AND track_id IN (SELECT id FROM tracks WHERE sequence_id = ?)" + sql,
-            [span, at, seq] + extra)
-        sql, extra = _not_in("id", rows["captions"])
-        cur.execute(
-            "UPDATE captions SET start_frame = start_frame + ? "
-            "WHERE start_frame >= ? AND sequence_id = ?" + sql,
-            [span, at, seq] + extra)
-        sql, extra = _not_in("id", rows["keyframe_clips"])
-        cur.execute(
-            "SELECT id FROM keyframe_clips WHERE in_frame >= ? AND sequence_id = ?" + sql,
-            [at, seq] + extra)
-        kf_ids = [r[0] for r in cur.fetchall()]
-        for kid in kf_ids:
-            cur.execute("UPDATE keyframe_clips SET in_frame = in_frame + ?, "
-                        "out_frame = out_frame + ? WHERE id = ?", (span, span, kid))
-            # keyframes / keyframe_border rows (BUILD 222)
-            shift_clip_keys(cur, kid, span)
+        ripple_insert_db(tl, cur, at, span, cuts, rows)
         # The dragged clips at their drop positions (keyframe clips carry
         # their keys, as in a normal move)
         for c in moving:

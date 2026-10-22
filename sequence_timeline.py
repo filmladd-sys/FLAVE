@@ -504,9 +504,15 @@ class SequenceTimeline(QMainWindow):
         # at the playhead on new tracks (timeline_clipboard.paste_new_tracks)
         self._paste_new_tracks_action = QAction("Paste w/New Tracks", self)
         self._paste_new_tracks_action.triggered.connect(self._clip_paste_new_tracks)
+        # BUILD 289: the same, after inserting the pasted span at the
+        # playhead on every existing track (paste_new_tracks insert=True)
+        self._paste_insert_new_tracks_action = QAction(
+            "Paste Insert w/New Tracks", self)
+        self._paste_insert_new_tracks_action.triggered.connect(
+            self._clip_paste_insert_new_tracks)
         for a in (self._copy_action, self._paste_tic_action,
                   self._paste_end_action, self._paste_new_tracks_action,
-                  self._cut_action):
+                  self._paste_insert_new_tracks_action, self._cut_action):
             edit_menu.addAction(a)
         # BUILD 280: Find in captions (sequence_timeline_find.py); the keys
         # are the QShortcuts above, shown as text only
@@ -645,6 +651,7 @@ class SequenceTimeline(QMainWindow):
         self._paste_tic_action.setEnabled(has)
         self._paste_end_action.setEnabled(has)
         self._paste_new_tracks_action.setEnabled(has_any)
+        self._paste_insert_new_tracks_action.setEnabled(has_any)
 
     def _clip_copy(self):
         from timeline_clipboard import copy_selection
@@ -666,6 +673,11 @@ class SequenceTimeline(QMainWindow):
     def _clip_paste_new_tracks(self):
         from timeline_clipboard import paste_new_tracks
         paste_new_tracks(self, int(self.current_frame))
+        self._update_edit_actions()
+
+    def _clip_paste_insert_new_tracks(self):
+        from timeline_clipboard import paste_new_tracks
+        paste_new_tracks(self, int(self.current_frame), insert=True)
         self._update_edit_actions()
 
     def _clip_paste_end(self):

@@ -202,13 +202,15 @@ def paste(tl, anchor, make_room):
     _paste_core(tl, ok, anchor, skipped)
 
 
-def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips"):
+def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
+                inserted=0):
     # Insert the items ok with their earliest in-point at anchor, in one
     # undo step (label). make_tracks None: each item goes to its own
     # track_id and overwrites what is under it there. make_tracks(cur):
     # called inside the paste's transaction, creates the destination tracks
     # and returns {source track id: new track id}; the new tracks are empty,
-    # so nothing is overwritten.
+    # so nothing is overwritten. inserted: frames make_tracks pushed the
+    # later clips by (Paste Insert w/New Tracks), named in the status.
     from PySide6.QtWidgets import QMessageBox
     from keyframe import mem_id_from_db
     project = tl._project_db()
@@ -417,6 +419,8 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips"):
     msg = f"Pasted {len(ok)} item(s) at frame {anchor}"
     if track_map:
         msg += f" on {len(track_map)} new track(s)"
+    if inserted:
+        msg += f", later clips pushed {inserted} frames"
     if trimmed:
         msg += f", trimmed {trimmed}"
     if deleted:
@@ -593,6 +597,12 @@ def apply_overwrite(cur, state, ranges):
 # default names, other settings copied, enabled on, solo off). The earliest
 # in-point lands at anchor; links get new ids per original group, keyframe
 # clips, captions and markers come along as in Paste. One undo step.
+# BUILD 289: Paste Insert w/New Tracks (insert=True) first makes room in
+# the same undo step: the pasted span (earliest in to latest out, at the
+# target rate) is inserted at anchor on every existing track exactly like
+# a Shift+drag insert (sequence_timeline_insert.ripple_insert_db): clips
+# spanning anchor are sliced there and everything starting at or after
+# anchor moves later by the span.
 
 
 def _round_frame(x):
@@ -637,7 +647,7 @@ def convert_items(items, src_fps, dst_fps):
     return out
 
 
-def paste_new_tracks(tl, anchor):
+def paste_new_tracks(tl, anchor, insert=False):
     clip = _clipboard(tl)
     if clip is None or tl._edge_drag is not None:
         return
@@ -655,9 +665,18 @@ def paste_new_tracks(tl, anchor):
         conn.close()
     items = convert_items(items, clip["fps"], dst_fps)
     seq_id = int(tl.sequence_id)
+    anchor = max(0, int(anchor))
+    span = max(it["offset"] + it["length"] for it in items)
+    cuts = None
+    if insert:
+        from sequence_timeline_insert import insert_cuts
+        cuts = insert_cuts(tl, anchor)
 
     def make_tracks(cur):
         from sequence_timeline_tracks import insert_track_copies
+        if cuts is not None:
+            from sequence_timeline_insert import ripple_insert_db
+            ripple_insert_db(tl, cur, anchor, span, cuts)
         copies = insert_track_copies(cur, seq_id, src_tracks)
         cur.execute("SELECT id FROM tracks WHERE sequence_id = ? "
                     "ORDER BY sort_order, id", (seq_id,))
@@ -667,5 +686,6 @@ def paste_new_tracks(tl, anchor):
                         (order, tid))
         return dict(zip([t["id"] for t in src_tracks], copies))
 
-    _paste_core(tl, items, max(0, int(anchor)), skipped, make_tracks,
-                "Paste w/New Tracks")
+    _paste_core(tl, items, anchor, skipped, make_tracks,
+                "Paste Insert w/New Tracks" if insert else "Paste w/New Tracks",
+                span if insert else 0)
