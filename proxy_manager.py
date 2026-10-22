@@ -33,6 +33,84 @@ def get_proxy_path(db_path):
     return value if value else _project_folder(db_path)
 
 
+def prune_missing_proxies(db_path):
+    # Run once per project open (project_manager). Deletes each Proxies
+    # row whose proxy file is gone, in one transaction, then resets any
+    # footage / clips proxy_percent that pointed at a percent with no
+    # Proxies row left for that footage to 0 (None: decode the original,
+    # the same fallback resolve_proxies uses for a missing file). The
+    # Proxy Manager then offers that percent again, so deleting a proxy
+    # file is a way to regenerate it. Paths are checked as stored, the way
+    # resolve_proxies opens them. Rows are kept (not checked) when the
+    # path is not absolute or its folder does not exist (e.g. a
+    # disconnected drive), so an unavailable drive never removes entries.
+    # Proxy files are never touched. Returns the number of rows removed;
+    # never raises.
+    if not db_path or not os.path.isfile(db_path):
+        return 0
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception as e:
+        print("Proxy check skipped: %s" % e)
+        return 0
+    removed = 0
+    try:
+        tables = set(r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"))
+        if "Proxies" not in tables:
+            return 0
+        rows = conn.execute(
+            "SELECT id, footage_id, path, percentage FROM Proxies").fetchall()
+        gone, kept_dirs = [], set()
+        for pid, fid, path, pct in rows:
+            path = path or ""
+            if path and os.path.isfile(path):
+                continue
+            folder = os.path.dirname(path)
+            if not path or not os.path.isabs(path):
+                print("Proxy check skipped (path not absolute): %s" % (path or "(empty)"))
+                continue
+            if not os.path.isdir(folder):
+                kept_dirs.add(folder)
+                continue
+            gone.append((pid, fid, path, pct))
+        for folder in sorted(kept_dirs):
+            print("Proxy check skipped (folder not available): %s" % folder)
+        if not gone:
+            print("Proxy check: %d entr%s, none removed" % (
+                len(rows), "y" if len(rows) == 1 else "ies"))
+            return 0
+        cols = {}
+        for t in ("footage", "clips"):
+            if t in tables:
+                cols[t] = [r[1] for r in conn.execute("PRAGMA table_info(%s)" % t)]
+        with conn:
+            for pid, fid, path, pct in gone:
+                conn.execute("DELETE FROM Proxies WHERE id = ?", (int(pid),))
+                print("Proxy entry removed (file missing): %s" % path)
+            for fid, pct in sorted(set((r[1], r[3]) for r in gone)):
+                left = conn.execute(
+                    "SELECT 1 FROM Proxies WHERE footage_id = ? AND percentage = ? "
+                    "LIMIT 1", (fid, pct)).fetchone()
+                if left:
+                    continue
+                if "proxy_percent" in cols.get("footage", []):
+                    conn.execute("UPDATE footage SET proxy_percent = 0 WHERE id = ? "
+                                 "AND proxy_percent = ?", (fid, pct))
+                if "proxy_percent" in cols.get("clips", []):
+                    conn.execute("UPDATE clips SET proxy_percent = 0 WHERE "
+                                 "footage_id = ? AND proxy_percent = ?", (fid, pct))
+        removed = len(gone)
+    except Exception as e:
+        print("Proxy check failed: %s: %s" % (type(e).__name__, e))
+        return 0
+    finally:
+        conn.close()
+    print("Proxy check: %d missing proxy entr%s removed"
+          % (removed, "y" if removed == 1 else "ies"))
+    return removed
+
+
 def proxy_counts(db_path):
     # {footage_id: number of Proxies rows}; {} if the table is missing
     if not db_path:

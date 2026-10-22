@@ -101,6 +101,17 @@ def _ensure_keyframe_tables_for(project_db):
         pass
 
 
+def _prune_proxies_for(project_db):
+    # Proxies rows whose file is missing are removed (proxy_manager)
+    if not project_db:
+        return
+    try:
+        from proxy_manager import prune_missing_proxies
+        prune_missing_proxies(project_db)
+    except Exception as e:
+        print("Proxy check failed: %s" % e)
+
+
 def _ensure_undo_db_for(project_db):
     # {ProjectName}_Undo.db next to the project, created if missing
     try:
@@ -272,6 +283,7 @@ class ProjectManager(QMainWindow):
             _ensure_audiotmp_for(path)
             _ensure_keyframe_tables_for(path)
             _ensure_undo_db_for(path)
+            _prune_proxies_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -344,6 +356,7 @@ class ProjectManager(QMainWindow):
             _ensure_audiotmp_for(path)
             _ensure_keyframe_tables_for(path)
             _ensure_undo_db_for(path)
+            _prune_proxies_for(path)
             self._update_windows_menu()
 
     def _close_project(self):
