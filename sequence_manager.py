@@ -187,6 +187,9 @@ class SequenceManager(QMainWindow):
         self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
         self._loading = False
         self.table.itemChanged.connect(self._name_changed)
+        # BUILD 281: selecting a row selects that sequence; its Sequence
+        # Player comes to the front (player_front)
+        self.table.itemSelectionChanged.connect(self._row_selected)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._apply_column_sizing()
 
@@ -348,6 +351,16 @@ class SequenceManager(QMainWindow):
             self._replace_sequence(sequence_id)
         elif action == remove_action:
             self._remove_sequence(sequence_id)
+
+    def _row_selected(self):
+        if self._loading:
+            return
+        sid = self.table._row_id(self.table.currentRow())
+        if sid is None:
+            return
+        from player_front import install, select_sequence
+        install()
+        select_sequence(sid)
 
     def _edit_sequence(self, sequence_id):
         if SequenceTimeline is None:

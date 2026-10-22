@@ -463,6 +463,10 @@ class SequenceTimeline(QMainWindow):
         QShortcut(QKeySequence("Shift+F3"), self, activated=self._caption_find_prev)
 
         self._create_menus()
+        # BUILD 281: activating this window selects its sequence; its
+        # Sequence Player stays in front of the other FLAVE windows
+        from player_front import install as _player_front_install
+        _player_front_install()
         self.refresh()
         self._update_clips_width()
         self._update_status()
