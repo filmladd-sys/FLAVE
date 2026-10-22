@@ -456,6 +456,11 @@ class SequenceTimeline(QMainWindow):
         QShortcut(QKeySequence("Ctrl+V"), self, activated=self._key_paste)
         # BUILD 166: F5 = Refresh Preview (dirty video frames + audio mix)
         QShortcut(QKeySequence(Qt.Key_F5), self, activated=self.refresh_preview)
+        # BUILD 280: Ctrl+F = Edit > Find... (captions); F3 / Shift+F3 =
+        # next / previous match
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._caption_find)
+        QShortcut(QKeySequence(Qt.Key_F3), self, activated=self._caption_find_next)
+        QShortcut(QKeySequence("Shift+F3"), self, activated=self._caption_find_prev)
 
         self._create_menus()
         self.refresh()
@@ -490,6 +495,12 @@ class SequenceTimeline(QMainWindow):
         for a in (self._copy_action, self._paste_tic_action,
                   self._paste_end_action, self._cut_action):
             edit_menu.addAction(a)
+        # BUILD 280: Find in captions (sequence_timeline_find.py); the keys
+        # are the QShortcuts above, shown as text only
+        edit_menu.addSeparator()
+        find_action = QAction("Find...\tCtrl+F", self)
+        find_action.triggered.connect(lambda checked=False: self._caption_find())
+        edit_menu.addAction(find_action)
         edit_menu.aboutToShow.connect(self._update_edit_actions)
         self._update_edit_actions()
 
@@ -591,6 +602,18 @@ class SequenceTimeline(QMainWindow):
 
     def _project_db(self):
         return _get_global_setting("current_project", "")
+
+    def _caption_find(self):
+        from sequence_timeline_find import open_caption_find
+        open_caption_find(self)
+
+    def _caption_find_next(self):
+        from sequence_timeline_find import caption_find_next
+        caption_find_next(self)
+
+    def _caption_find_prev(self):
+        from sequence_timeline_find import caption_find_prev
+        caption_find_prev(self)
 
     def _update_edit_actions(self):
         # Copy/Cut need a selection; Paste needs this sequence's clipboard
