@@ -2,6 +2,8 @@
 # Proxies for footage: ProxyPath setting and a read-only Proxies list
 # window. The Proxies table and the ProxyPath setting are created only in
 # new_project.py _init_db; older project DBs without them read as empty.
+# The window's 'Set All Clips' box sets the proxy of every clip of the
+# footage in every sequence (set_all_clips_proxy).
 # ASCII only.
 
 import os
@@ -798,6 +800,64 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="norma
     return True, out
 
 
+# Clips of a footage on video / image tracks (the clips that carry a proxy,
+# as for a new clip and the timeline 'Proxy' submenu) whose proxy differs
+_ALL_CLIPS_WHERE = (
+    "footage_id = ? AND COALESCE(proxy_percent, 0) <> ? AND track_id IN "
+    "(SELECT id FROM tracks WHERE LOWER(COALESCE(track_type, '')) "
+    "IN ('video', 'image'))")
+
+
+def set_all_clips_proxy(db_path, footage_id, pct):
+    # BUILD 291: clips.proxy_percent = pct for every video / image clip of
+    # footage_id in every sequence (0 = None: the original). One undo step, taken only
+    # when some clip changes. Returns the number of clips changed, or None
+    # when the project has no clips.proxy_percent column (older version).
+    conn = sqlite3.connect(db_path)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(clips)")]
+        if "proxy_percent" not in cols:
+            return None
+        n = conn.execute(
+            "SELECT COUNT(*) FROM clips WHERE " + _ALL_CLIPS_WHERE,
+            (int(footage_id), int(pct))).fetchone()[0]
+    finally:
+        conn.close()
+    if not n:
+        return 0
+    try:
+        from undo import push_undo
+        push_undo(db_path, "Set all clips proxy")
+    except Exception:
+        pass
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE clips SET proxy_percent = ? WHERE " + _ALL_CLIPS_WHERE,
+            (int(pct), int(footage_id), int(pct)))
+        conn.commit()
+    finally:
+        conn.close()
+    return int(n)
+
+
+def refresh_open_timelines(db_path, message):
+    # Every open timeline of this project reloads (same path as a clip
+    # proxy change): the reload's mile-marker diff re-resolves proxies and
+    # redraws the player frames that changed
+    try:
+        import sequence_timeline
+        timelines = list(sequence_timeline._open_windows.values())
+    except Exception:
+        return
+    for tl in timelines:
+        try:
+            if os.path.abspath(tl._project_db()) == os.path.abspath(db_path):
+                tl._after_clip_change(message)
+        except Exception as e:
+            print(f"Proxy refresh failed: {e}")
+
+
 def show_message(parent, title, text):
     # Error / info dialog: selectable monospace text, Copy and Close
     from PySide6.QtWidgets import (
@@ -834,7 +894,7 @@ _open_windows = []   # keeps windows alive (no garbage collection)
 def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None):
     from PySide6.QtWidgets import (
         QMainWindow, QTableWidget, QTableWidgetItem, QHeaderView, QWidget,
-        QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
+        QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QGroupBox,
     )
 
     src, fname = footage_source(db_path, footage_id)
@@ -869,6 +929,20 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.table.setSelectionBehavior(QTableWidget.SelectRows)
             self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
             layout.addWidget(self.table, 1)
+            # BUILD 291: Set All Clips: None (original) or a percent that
+            # already has a proxy for this footage (clip_proxy.proxy_options;
+            # nothing is generated here). Refilled by _reload.
+            box = QGroupBox("Set All Clips")
+            box_row = QHBoxLayout(box)
+            box_row.addWidget(QLabel("Proxy"))
+            self.all_combo = QComboBox()
+            box_row.addWidget(self.all_combo, 1)
+            self.all_btn = QPushButton("Apply")
+            self.all_btn.clicked.connect(self._apply_all)
+            box_row.addWidget(self.all_btn)
+            self.all_status = QLabel("")
+            box_row.addWidget(self.all_status, 2)
+            layout.addWidget(box)
             self.setCentralWidget(central)
             self._reload()
 
@@ -894,6 +968,41 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.mode_label.setVisible(show)
             self.mode_combo.setVisible(show)
             self._fill_modes()
+            self._fill_all_combo()
+
+        def _fill_all_combo(self):
+            # Keeps the chosen percent when it is still listed
+            from clip_proxy import proxy_options, proxy_kinds, proxy_label
+            keep = self.all_combo.currentData()
+            kinds = proxy_kinds(db_path, footage_id)
+            self.all_combo.blockSignals(True)
+            self.all_combo.clear()
+            for pct in proxy_options(db_path, footage_id):
+                text = proxy_label(pct, kinds.get(int(pct))) if pct else "None (original)"
+                self.all_combo.addItem(text, int(pct))
+            i = self.all_combo.findData(keep) if keep is not None else -1
+            self.all_combo.setCurrentIndex(i if i >= 0 else 0)
+            self.all_combo.blockSignals(False)
+
+        def _apply_all(self):
+            pct = self.all_combo.currentData()
+            if pct is None:
+                return
+            text = self.all_combo.currentText()
+            try:
+                n = set_all_clips_proxy(db_path, footage_id, int(pct))
+            except Exception as e:
+                show_message(self, "Proxy Manager", "Could not set clips: %s" % e)
+                return
+            if n is None:
+                self.all_status.setText(
+                    "Proxy not available in this project (older version)")
+                return
+            self.all_status.setText("%d clip(s) set to %s" % (n, text))
+            if n:
+                refresh_open_timelines(
+                    db_path, "Proxy: %d clip(s) of %s set to %s"
+                    % (n, title_name, text))
 
         def _fill_modes(self, *_args):
             pct = self.combo.currentData()
