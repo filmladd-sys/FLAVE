@@ -6,14 +6,21 @@
 # prefetch, decoder opens, first frame per decoder, first composite, first
 # commit), a progress line about every PROGRESS_SEC and a summary at the
 # end of the pass. Outside a session only decoder opens and audio mix
-# start / end print (time since the previous line). Set PREVIEW_LOG = False
-# to silence everything. Timing only: no behavior depends on it. ASCII only.
+# start / end print (time since the previous line). PREVIEW_LOG follows
+# RENDER_LOG. Timing only: no behavior depends on it. ASCII only.
 
 import os
 import threading
 import time
 
-PREVIEW_LOG = True
+# RENDER_LOG: the one switch for the verbose render / preview console
+# instrumentation: these [preview] lines, the WORKER refresh states /
+# decoders / plan / range / pool / batch lines, DECODER open / close and
+# RENDER decoders. False (default): silent; errors, warnings, the VRAM
+# fatal stop and the one-line pass / render summaries still print. Set
+# True to re-enable the instrumentation.
+RENDER_LOG = False
+PREVIEW_LOG = RENDER_LOG
 PROGRESS_SEC = 2.0
 
 _LOCK = threading.Lock()

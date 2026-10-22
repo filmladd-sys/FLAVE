@@ -561,6 +561,8 @@ def _log_refresh_batch(chunk, gpu_n, dt):
     # One console line per refresh card pass: frames built (N, or fewer
     # at a dirty run end) against the N the pool holds for this range; no
     # VRAM query per pass
+    if not plog.RENDER_LOG:
+        return
     try:
         print("WORKER refresh batch: %d frames %d..%d in %.0f ms (%.1f fps) | "
               "N %d (refresh pool)" % (
@@ -597,13 +599,14 @@ def _log_refresh_vram(project, sequence_id):
         fv = free_vram()
         gen = _generator_for(project, sequence_id)
         base = _POOL_FREE[0]
-        print("WORKER refresh vram: %s | holds %s | free now %s, drift since "
-              "reserve %s" % (
-                  "; ".join(_refresh_trace),
-                  refresh_owned(gen) if gen is not None else "?",
-                  _mb(fv[0]) if fv else "?",
-                  ("%+.0f MB" % ((fv[0] - base) / float(1 << 20)))
-                  if (fv and base is not None) else "?"))
+        if plog.RENDER_LOG:
+            print("WORKER refresh vram: %s | holds %s | free now %s, drift since "
+                  "reserve %s" % (
+                      "; ".join(_refresh_trace),
+                      refresh_owned(gen) if gen is not None else "?",
+                      _mb(fv[0]) if fv else "?",
+                      ("%+.0f MB" % ((fv[0] - base) / float(1 << 20)))
+                      if (fv and base is not None) else "?"))
         if fv:
             got = refresh_vram_guard(project, sequence_id, fv[1] // 4)
             if got is not None:

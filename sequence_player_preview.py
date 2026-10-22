@@ -21,6 +21,7 @@ import os
 import sys
 import time
 
+import preview_log      # RENDER_LOG: verbose console instrumentation switch
 from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
 
@@ -1012,7 +1013,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     keep = _refresh_keep(fv[1]) if fv else 0
     # the n0 reserved buffers count as free (the range's N includes them)
     budget = (fv[0] + n0 * pool_px - keep) if fv else 0
-    if fv0 and fv:
+    if fv0 and fv and preview_log.RENDER_LOG:
         print("WORKER refresh states: %d nvJPEG states + %d buffers reserved, "
               "free %d -> %d MB (states %.0f MB measured)" % (
                   len(gen.nvj.states) if gen.nvj is not None else 0, n0,
@@ -1025,7 +1026,8 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 if 0 < f < total:
                     cuts.add(f)
     cuts = sorted(cuts)
-    print("WORKER refresh decoders: " + decoder_keys_text(gen, snapshot))
+    if preview_log.RENDER_LOG:
+        print("WORKER refresh decoders: " + decoder_keys_text(gen, snapshot))
     ranges = []
     for a, b in zip(cuts[:-1], cuts[1:]):
         items = gen._layer_items(a, snapshot)
@@ -1038,13 +1040,14 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     plan = []
     from sequence_preview import preview_size_percent
     pw, ph = _preview_dims(gen)
-    print("WORKER refresh plan: %d ranges, free %s of %s MB, keep %d MB, "
-          "pool %.1f MB/frame, Preview Frame Cap %d, Preview Size %d%% "
-          "(%dx%d)" % (
-              len(ranges), (fv[0] >> 20) if fv else "?",
-              (fv[1] >> 20) if fv else "?", keep >> 20,
-              pool_px / float(1 << 20), pool_n,
-              preview_size_percent(gen.timeline._project_db()), pw, ph))
+    if preview_log.RENDER_LOG:
+        print("WORKER refresh plan: %d ranges, free %s of %s MB, keep %d MB, "
+              "pool %.1f MB/frame, Preview Frame Cap %d, Preview Size %d%% "
+              "(%dx%d)" % (
+                  len(ranges), (fv[0] >> 20) if fv else "?",
+                  (fv[1] >> 20) if fv else "?", keep >> 20,
+                  pool_px / float(1 << 20), pool_n,
+                  preview_size_percent(gen.timeline._project_db()), pw, ph))
     for a, b, _sig, items in ranges:
         per, still, big_path, big_size = 0, 0, None, None
         per_all = {}
@@ -1080,12 +1083,13 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         held = k * sum_per
         plan.append((a, b, n, 0 if k else per, still, k, held,
                      frozenset(per_all)))
-        print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
-              "%d video layers %.1f MB/frame, pulls of %d frames (%d MB held), "
-              "stills %d MB" % (
-                  a, b, n, ("%dx%d" % big_size) if big_size else "none",
-                  big_path or "", len(per_all), sum_per / float(1 << 20),
-                  k, held >> 20, still >> 20))
+        if preview_log.RENDER_LOG:
+            print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
+                  "%d video layers %.1f MB/frame, pulls of %d frames (%d MB held), "
+                  "stills %d MB" % (
+                      a, b, n, ("%dx%d" % big_size) if big_size else "none",
+                      big_path or "", len(per_all), sum_per / float(1 << 20),
+                      k, held >> 20, still >> 20))
     return plan
 
 
@@ -1212,12 +1216,13 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
             return n
         _vram_base[0] = fv[0]
         short = _refresh_keep(fv[1]) - (fv[0] - n * per - held - still)
-        print("WORKER refresh pool: N %d reserved, free after %d of %d MB, "
-              "decode %d x %.1f MB + pulls of %d (%d MB) + stills %d MB, "
-              "keep %d MB%s" % (
-                  n, fv[0] >> 20, fv[1] >> 20, n, per / float(1 << 20),
-                  k, held >> 20, still >> 20, _refresh_keep(fv[1]) >> 20,
-                  (", short %d MB" % (short >> 20)) if short > 0 else ""))
+        if preview_log.RENDER_LOG:
+            print("WORKER refresh pool: N %d reserved, free after %d of %d MB, "
+                  "decode %d x %.1f MB + pulls of %d (%d MB) + stills %d MB, "
+                  "keep %d MB%s" % (
+                      n, fv[0] >> 20, fv[1] >> 20, n, per / float(1 << 20),
+                      k, held >> 20, still >> 20, _refresh_keep(fv[1]) >> 20,
+                      (", short %d MB" % (short >> 20)) if short > 0 else ""))
         if short <= 0 or n <= 1:
             return n
         if k:
@@ -1227,8 +1232,9 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
             short -= held - held2
             k, held = k2, held2
             if short <= 0:
-                print("WORKER refresh pool: pulls lowered to %d (%d MB), "
-                      "N %d kept" % (k, held >> 20, n))
+                if preview_log.RENDER_LOG:
+                    print("WORKER refresh pool: pulls lowered to %d (%d MB), "
+                          "N %d kept" % (k, held >> 20, n))
                 return n
         unit = per + int(gen.row) * int(gen.seq_h)
         n = max(1, n - (short + unit - 1) // unit)

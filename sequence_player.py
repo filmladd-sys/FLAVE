@@ -1058,8 +1058,9 @@ class SequencePlayer(QWindow):
         self.dec_used.pop(key, None)
         self.dec_last.pop(key, None)
         if dec is not None:
-            print("DECODER close: %s #%d (%s; %d open)" % (
-                key[1], int(key[0] or 0), why, len(self.decoders)))
+            if preview_log.RENDER_LOG:
+                print("DECODER close: %s #%d (%s; %d open)" % (
+                    key[1], int(key[0] or 0), why, len(self.decoders)))
             del dec
 
     def _close_all_decoders(self):
@@ -1117,9 +1118,10 @@ class SequencePlayer(QWindow):
             self.decoders[key] = dec
             # BUILD 247: open time on the console (preview_log)
             preview_log.decoder_opened(path, _time.perf_counter() - t_open)
-            print("DECODER open: %s #%d (%.0f ms; %d open)" % (
-                path, int(key[0] or 0), (_time.perf_counter() - t_open) * 1000.0,
-                len(self.decoders)))
+            if preview_log.RENDER_LOG:
+                print("DECODER open: %s #%d (%.0f ms; %d open)" % (
+                    path, int(key[0] or 0), (_time.perf_counter() - t_open) * 1000.0,
+                    len(self.decoders)))
             if getattr(self, "_refresh_hold", 0):
                 # BUILD 182: explicit refresh: hard VRAM exit check
                 # BUILD 183: full path (footage or proxy) logged at open

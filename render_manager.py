@@ -784,8 +784,10 @@ def _make_window_class():
                 try:
                     # the distinct decoder keys (file + instance) the
                     # render decodes, on the console
+                    import preview_log
                     from sequence_player_preview import decoder_keys_text
-                    print("RENDER decoders: " + decoder_keys_text(player, snapshot))
+                    if preview_log.RENDER_LOG:
+                        print("RENDER decoders: " + decoder_keys_text(player, snapshot))
                 except Exception as e:
                     print("RENDER decoders: not listed (%s)" % e)
                 try:
