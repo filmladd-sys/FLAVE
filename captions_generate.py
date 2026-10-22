@@ -469,7 +469,8 @@ def _download_files(repo, files, state, cancel, hook, hf_hub_download):
 
 
 def _load_model(device, allow_download=False):
-    # One WhisperModel per device, kept for the session. cuda: float16;
+    # One WhisperModel per device, kept for one run (transcribe releases
+    # it with release_models). cuda: float16;
     # cpu: int8 on cpu_threads() threads. allow_download False: local files
     # only (BUILD 231: a download needs the user's Yes in generate_captions
     # first).
@@ -535,8 +536,47 @@ def _hms(seconds):
     return "%d:%02d:%02d" % (s // 3600, s // 60 % 60, s % 60)
 
 
+def _release(device):
+    # Drops one loaded Whisper model; unload_model frees its CTranslate2
+    # weights even while a traceback still references it. Never raises.
+    m = _models.pop(device, None)
+    if m is None:
+        return False
+    try:
+        unload = getattr(getattr(m, "model", None), "unload_model", None)
+        if unload is not None:
+            unload()
+    except Exception as e:
+        _log("unload of the %s model failed: %s: %s" % (device, type(e).__name__, e))
+    del m
+    if device == "cuda":
+        _log("released CUDA model")
+    return True
+
+
+def release_models():
+    # Frees every loaded Whisper model, so its GPU memory and cuBLAS /
+    # cuDNN state go back to the player, preview and render decoders.
+    # Never raises.
+    import gc
+    for device in list(_models.keys()):
+        _release(device)
+    gc.collect()
+
+
 def transcribe(audio, cancel=None, allow_download=False, progress=None, stage=None,
                stats=None):
+    # _transcribe, then release_models whether it finished, was cancelled
+    # or failed: the model is reloaded (well under a second from the local
+    # cache) on the next run instead of holding GPU memory all session.
+    try:
+        return _transcribe(audio, cancel, allow_download, progress, stage, stats)
+    finally:
+        release_models()
+
+
+def _transcribe(audio, cancel=None, allow_download=False, progress=None, stage=None,
+                stats=None):
     # (words [(start_s, end_s, text)], language 2-letter, device used).
     # CUDA first (float16); any CUDA / cuDNN failure falls back to CPU int8
     # (logged with its traceback). Without allow_download a model missing
@@ -570,8 +610,8 @@ def transcribe(audio, cancel=None, allow_download=False, progress=None, stage=No
     except CaptionGenError:
         raise
     except Exception as e:
-        _models.pop("cuda", None)
         _log_exception("CUDA %s failed" % step, e)
+        _release("cuda")
         _log(CUDA_HINT)
     restarted = step == "transcription" and (state.get("segments", 0) > 0
                                              or state.get("pos", 0.0) > 0)

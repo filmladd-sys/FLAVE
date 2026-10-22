@@ -214,6 +214,40 @@ def _original_size(path, w, h):
     return size
 
 
+_PROXY_SIZE_CACHE = {}  # (proxy path, mtime, bytes) -> (w, h) or None
+
+
+def _proxy_decodable(path):
+    # False for a video proxy file smaller than the NVDEC minimum
+    # (proxy_manager.PROXY_MIN_SIDE, e.g. an old 10% proxy of 1080p at
+    # 192x108): resolve_proxies skips it and the clip decodes its original.
+    # ffprobe once per file version (cached); one console line per file.
+    # Images and unreadable files count as decodable (unchanged behavior).
+    from proxy_manager import is_video_path, decodable_size, PROXY_MIN_SIDE
+    if not is_video_path(path):
+        return True
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime, st.st_size)
+    except OSError:
+        return True
+    if key not in _PROXY_SIZE_CACHE:
+        size = None
+        try:
+            from clip_proxy import probe_video_info
+            info = probe_video_info(path)
+            if info and info[0] and info[1]:
+                size = (int(info[0]), int(info[1]))
+        except Exception:
+            size = None
+        _PROXY_SIZE_CACHE[key] = size
+        if not decodable_size(size):
+            print("Proxy skipped (%dx%d is below the %d px decoder minimum; "
+                  "using the original footage): %s"
+                  % (size[0], size[1], PROXY_MIN_SIDE, path))
+    return decodable_size(_PROXY_SIZE_CACHE[key])
+
+
 # BUILD 119: when several proxies share a percent (Normal and Deinterlace
 # 50%, ...), the composite uses the first of this order: an in-place
 # deinterlace keeps the source frame count; IVTC and double rate are
@@ -381,7 +415,8 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
     # (BUILD 119, final render with use_proxies False): MKV clips whose
     # footage has a 100% deinterlaced / IVTC proxy decode it, nothing else
     # (never another percent). Anything else (0, no row, no file, old DB,
-    # unknown original size) is absent and the clip decodes its original.
+    # unknown original size) is absent and the clip decodes its original;
+    # so is a video proxy below the decoder minimum (_proxy_decodable).
     # ratio: proxy_frame_ratio (None = same frame count).
     if not project_db or not track_ids or not (use_proxies or render_deint):
         return {}
@@ -414,7 +449,7 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
         return {}
     by_clip = {}
     for clip_id, mode, pfps, pframes, sfps, ppath, opath, w, h in rows:
-        if not ppath or not os.path.isfile(ppath):
+        if not ppath or not os.path.isfile(ppath) or not _proxy_decodable(ppath):
             continue
         by_clip.setdefault(int(clip_id), []).append(
             (mode, pfps, pframes, sfps, ppath, opath, w, h))

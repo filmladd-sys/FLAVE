@@ -263,16 +263,48 @@ def video_proxy_path(proxy_dir, source_path, percentage, mode="normal"):
                         str(int(percentage)) + tail + ".mp4")
 
 
+# Smallest proxy side the NVDEC HEVC decoder accepts (its minimum coded
+# size is 144 x 144). NVENC encodes smaller frames without complaint, but
+# a proxy below this cannot be decoded (cuvidCreateDecoder fails), so
+# scaled_size never makes one and resolve_proxies skips existing ones.
+PROXY_MIN_SIDE = 144
+
+
 def scaled_size(width, height, percentage):
     # Percent of each side, rounded to even, minimum 2. 100% = the source
-    # size cut down to even (no scale-down).
+    # size cut down to even (no scale-down). A percent whose short side
+    # falls below PROXY_MIN_SIDE is raised so the short side is
+    # PROXY_MIN_SIDE (aspect kept, even sides, never larger than the
+    # source); a source whose short side is already at or below
+    # PROXY_MIN_SIDE gives the source size (never upscaled). The file name
+    # keeps the requested percent; the player scales by the real decoded
+    # size, not by the percent.
+    src_w = max(2, int(width) - int(width) % 2)
+    src_h = max(2, int(height) - int(height) % 2)
     if int(percentage) >= 100:
-        return max(2, int(width) - int(width) % 2), max(2, int(height) - int(height) % 2)
+        return src_w, src_h
 
-    def side(v):
-        s = int(round(float(v) * int(percentage) / 100.0 / 2.0)) * 2
+    def side(v, f):
+        s = int(round(float(v) * f / 2.0)) * 2
         return max(2, s)
-    return side(width), side(height)
+    f = int(percentage) / 100.0
+    w, h = side(width, f), side(height, f)
+    if min(w, h) >= PROXY_MIN_SIDE:
+        return w, h
+    short = min(int(width), int(height))
+    if short <= PROXY_MIN_SIDE:
+        return src_w, src_h
+    f = float(PROXY_MIN_SIDE) / float(short)
+    w, h = side(width, f), side(height, f)
+    return min(w, src_w), min(h, src_h)
+
+
+def decodable_size(size):
+    # False only for a known (width, height) with a side below PROXY_MIN_SIDE
+    try:
+        return size is None or min(int(size[0]), int(size[1])) >= PROXY_MIN_SIDE
+    except Exception:
+        return True
 
 
 def _no_window_flags():
