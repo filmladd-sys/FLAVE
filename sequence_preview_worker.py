@@ -401,7 +401,7 @@ class PreviewWorker(object):
                     # range holding this frame and stops at that range's
                     # end (the next chunk is the next range's)
                     limit = gpu_n
-                    for r0, r1, rn, rper, rstill, rk, rheld in plan:
+                    for r0, r1, rn, rper, rstill, rk, rheld, rkeys in plan:
                         if r0 <= frame <= r1:
                             range_end = r1
                             # first chunk of this range: fit the pool (and
@@ -409,7 +409,8 @@ class PreviewWorker(object):
                             # then the hard VRAM check
                             if self._pool_fit != r0:
                                 self._pool_n = fit_refresh_pool(
-                                    project, sequence_id, rn, rper, rstill, rk, rheld)
+                                    project, sequence_id, rn, rper, rstill, rk, rheld,
+                                    keys=rkeys)
                                 self._pool_fit = r0
                                 _vram_fatal_check("after reserve %d..%d" % (r0, r1))
                             limit = self._pool_n or 1

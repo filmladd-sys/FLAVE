@@ -253,8 +253,11 @@ def decode_play_jpegs(self, dec, jpegs, bufs):
 
 
 def _prefetch(self, frames, snapshot, clips=None):
-    # {((clip_id, path), src_frame): decoded frame} per clip whose source
-    # frames run consecutively across the batch (one decoder per clip).
+    # {((instance, path), src_frame): decoded frame} per decoder key
+    # (layer item [16], one decoder per file instance) whose source frames
+    # run consecutively across the batch. Callers split a batch where a
+    # key's source jumps (split_runs), so consecutive clips of one file
+    # (Scene Detect pieces) decode as one run on one decoder.
     # clips (set of clip ids, or None for all): only those clips' layers
     # (the explicit refresh decodes one track at a time)
     reqs = {}
@@ -269,7 +272,7 @@ def _prefetch(self, frames, snapshot, clips=None):
             if clips is not None and item[6][0] not in clips:
                 continue
             if kind == "video" and os.path.isfile(path):
-                key = item[6] if len(item) > 6 else (None, path)
+                key = item[16] if len(item) > 16 else (0, path)
                 reqs.setdefault(key, []).append(src)
                 last[key] = fr
     pre = {}
@@ -313,6 +316,87 @@ def _prefetch(self, frames, snapshot, clips=None):
     preview_log.once("first prefetch", "first prefetch: %d frames, %d decoded "
                      "(%.3fs)" % (len(frames), len(pre), time.perf_counter() - t_pre))
     return pre
+
+def split_runs(self, frames, snapshot, clips=None):
+    # frames cut into runs (lists) so that no decoder key's source jumps
+    # inside a run: a cut goes before a frame where a key changes to
+    # another clip whose source frame is not the one that key decodes
+    # next (a backward or forward jump between clips of one file).
+    # Within one clip nothing is cut (repeats and skips of a frame-mapped
+    # proxy decode per frame in _build_dst, as before). One decoder
+    # cannot hold two runs' frames at once (a later get_batch_frames
+    # hands earlier frames back), so each run is decoded, blended and
+    # synced before the next. clips: as in _prefetch.
+    runs = []
+    cur = []
+    nxt = {}        # key -> (clip_id, source frame decoded next)
+    for fr in frames:
+        layers = []
+        cut = False
+        for item in self._layer_items(fr, snapshot):
+            if item[0] != "video" or (clips is not None and item[6][0] not in clips):
+                continue
+            key = item[16] if len(item) > 16 else (0, item[1])
+            layers.append((key, item[6][0], item[2]))
+            seen = nxt.get(key)
+            if seen is not None and seen[0] != item[6][0] and seen[1] != item[2]:
+                cut = True
+        if cut and cur:
+            runs.append(cur)
+            cur = []
+            nxt = {}
+        cur.append(fr)
+        for key, clip_id, src in layers:
+            nxt[key] = (clip_id, src + 1)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def decoder_keys_text(self, snapshot):
+    # Console text: the distinct decoder keys of a snapshot (file and
+    # instance, with its clip count), e.g. for the refresh and render
+    # start lines
+    inst = self._dec_instances(snapshot)
+    count = {}
+    for key in inst.values():
+        count[key] = count.get(key, 0) + 1
+    keys = sorted(count, key=lambda k: (str(k[1]), int(k[0])))
+    shown = ["%s #%d (%d clips)" % (k[1], int(k[0]), count[k]) for k in keys[:20]]
+    if len(keys) > 20:
+        shown.append("... %d more" % (len(keys) - 20))
+    files = len(set(k[1] for k in keys))
+    return "%d decoder keys, %d files: %s" % (
+        len(keys), files, "; ".join(shown) if shown else "none")
+
+
+# Device memory one decoder is assumed to hold for decoder_capacity: its
+# largest source's REFRESH_DECODE_BYTES_PX x w x h per frame, times the
+# pull size (gen._pull_k), or DEC_EST_FRAMES when there is none
+DEC_EST_FRAMES = 8
+
+
+def decoder_capacity(gen, live):
+    # How many decoders may stay open (sequence_player._prune_decoders):
+    # the ones open now plus as many more of the largest live source as
+    # fit in free VRAM above the refresh keep (_refresh_keep), or minus
+    # as many as free VRAM is short of the keep, between 1 and DEC_MAX.
+    # Open decoders are already out of free VRAM. DEC_MAX when free VRAM
+    # cannot be read.
+    from sequence_player import DEC_MAX
+    fv = free_vram()
+    if fv is None:
+        return DEC_MAX
+    pull = int(getattr(gen, "_pull_k", 0) or 0) or DEC_EST_FRAMES
+    big = 0
+    for key in live:
+        size = _source_size(key[1]) or (int(gen.seq_w), int(gen.seq_h))
+        big = max(big, size[0] * size[1])
+    est = int(big * REFRESH_DECODE_BYTES_PX * pull)
+    room = fv[0] - _refresh_keep(fv[1])
+    more = int(room // est) if est > 0 else 0
+    return max(1, min(DEC_MAX, len(gen.decoders) + more))
+
 
 # Composite buffers / nvJPEG states a composer keeps after a normal pass.
 # A pass of more than GEN_KEEP frames frees what it grew beyond that, so
@@ -389,16 +473,21 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
         _composite_by_layer(self, frames, snapshot, dark, bufs)
         out = sink(self, bufs)
         return out
-    # 1) decode
-    pre = self._prefetch(frames, snapshot)
-    # 2) composite all N on the card (prefetched blends are stream
-    # ordered, no host sync between frames)
-    for k, fr in enumerate(frames):
-        self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False)
-    _check(cudart.cudaStreamSynchronize(self.stream), sync_name)
+    # 1) decode, per run (split_runs: no decoder's source jumps inside a
+    # run; usually the whole batch is one run)
+    # 2) composite the run's frames on the card (prefetched blends are
+    # stream ordered, no host sync between frames); a run is synced
+    # before the next run decodes on the same decoders
+    k = 0
+    for run in split_runs(self, frames, snapshot):
+        pre = self._prefetch(run, snapshot)
+        for fr in run:
+            self._build_dst(fr, dark, bufs[k], snapshot, False, pre, sync=False)
+            k += 1
+        _check(cudart.cudaStreamSynchronize(self.stream), sync_name)
+        del pre
     # 3) sink: encode / copy out from the device buffers
     out = sink(self, bufs)
-    del pre
     return out
 
 
@@ -448,8 +537,13 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
 # otherwise N gets the room left after pulls of STATES_MAX frames, and k
 # gets whatever room N leaves.
 #
-# fit_refresh_pool() runs at the start of each range. It closes every
-# decoder, re-reads the real free VRAM, sizes the pool to the range's N
+# Decoders are per file (decoder key (instance, path), see
+# sequence_player._dec_instances): refresh_plan closes every decoder once
+# at the start of the pass, and a file's decoder then stays open across
+# ranges while the ranges use it (seeking in it when the source jumps).
+#
+# fit_refresh_pool() runs at the start of each range. It closes the
+# decoders the range does not use, re-reads the real free VRAM, sizes the pool to the range's N
 # and checks the keep again after reserving. On a shortfall it lowers k
 # first (never below STATES_MAX, or k if that is smaller) and lowers N
 # only for what that cannot cover, so N still covers the range.
@@ -468,36 +562,43 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     # first: decode that track's frames in pulls of gen._pull_k, blend
     # each pull into its buffers, sync. Every frame still gets its layers
     # blended bottom first, the same image as composite_batch.
-    # Decoders of clips not in this batch are closed before each track
-    # (their output pools would otherwise stay allocated). With
-    # gen._keep_dec on (set by fit_refresh_pool), the decoders of this
-    # batch stay open for the next batch of the range; with it off, each
-    # track's decoders are closed as soon as its blend is synced, so only
-    # one layer's decode is held at a time. Stills are freed after their
+    # Decoders (per file instance) this batch does not use are closed
+    # before each track (their output pools would otherwise stay
+    # allocated). With gen._keep_dec on (set by fit_refresh_pool), the
+    # decoders of this batch stay open for the next batch; with it off,
+    # each track's decoders are closed as soon as its blend is synced, so
+    # only one layer's decode is held at a time. Each pull is split where
+    # a decoder's source jumps (split_runs). Stills are freed after their
     # track, and any other still left from earlier batches at the end.
     cudart = _libs()[0]
     for b in bufs:
         _check(cudart.cudaMemsetAsync(b, 0 if dark else 255,
                                       self.row * self.seq_h, self.stream), "clear")
     used = set()
+    used_keys = {}      # clip id -> decoder key
     stills = set()
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
             used.add(item[6][0])
             if item[0] == "image":
                 stills.add(item[1])
+            elif len(item) > 16:
+                used_keys[item[6][0]] = item[16]
+    batch_keys = set(used_keys.values())
     clips_by_track = snapshot[1]
     for track_id, _en, _solo, _kind in reversed(snapshot[0]):
         clips = set(c[0] for c in clips_by_track.get(track_id, [])) & used
         if not clips:
             continue
+        track_keys = set(used_keys[c] for c in clips if c in used_keys)
         closed = 0
-        # keep_dec: close only decoders of clips not in this batch; else
+        # keep_dec: close only decoders this batch does not use; else
         # also every other track's (one layer's decoders at a time)
         keep_dec = getattr(self, "_keep_dec", False)
         for key in list(self.decoders.keys()):
-            if key[0] not in (used if keep_dec else clips):
-                self._close_decoder(key)
+            if key not in (batch_keys if keep_dec else track_keys):
+                self._close_decoder(key, "not in this batch" if keep_dec
+                                    else "not in this track")
                 closed += 1
         # Pull size k (gen._pull_k, 0: the whole batch). A decoder's pool
         # is sized by its largest pull, so open decoders hold k frames
@@ -505,30 +606,31 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
         # one: the next get_batch_frames hands the previous pull's frames
         # back to the decoder.
         step = int(getattr(self, "_pull_k", 0) or 0) or len(frames)
+        index = dict((fr, i) for i, fr in enumerate(frames))
         for s0 in range(0, len(frames), step):
-            sub = frames[s0:s0 + step]
-            pre = self._prefetch(sub, snapshot, clips)
-            # the files (footage or proxy) this track decoded, for the log
-            files = ", ".join(sorted(set(k[1] for k in self.decoders
-                                         if k[0] in clips)))
-            vram_fatal_check("track %s decode, frames %d..%d, files %s" % (
-                track_id, sub[0], sub[-1], files or "none"))
-            for k, fr in enumerate(sub):
-                self._build_dst(fr, dark, bufs[s0 + k], snapshot, False, pre,
-                                sync=False, clips=clips, clear=False)
-            _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
-            vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
-                track_id, sub[0], sub[-1], files or "none"))
-            pre.clear()
-            del pre
+            for sub in split_runs(self, frames[s0:s0 + step], snapshot, clips):
+                pre = self._prefetch(sub, snapshot, clips)
+                # the files (footage or proxy) this track decoded, for the log
+                files = ", ".join(sorted(set(k[1] for k in self.decoders
+                                             if k in track_keys)))
+                vram_fatal_check("track %s decode, frames %d..%d, files %s" % (
+                    track_id, sub[0], sub[-1], files or "none"))
+                for fr in sub:
+                    self._build_dst(fr, dark, bufs[index[fr]], snapshot, False, pre,
+                                    sync=False, clips=clips, clear=False)
+                _check(cudart.cudaStreamSynchronize(self.stream), "composite sync")
+                vram_fatal_check("track %s blend, frames %d..%d, files %s" % (
+                    track_id, sub[0], sub[-1], files or "none"))
+                pre.clear()
+                del pre
         # This track is blended (synced above). Without keep_dec its
         # decoders are closed now, so no source-size frame coexists with
         # the next layer's decode or the JPEG encode. Its stills are
         # freed either way.
         if not keep_dec:
             for key in list(self.decoders.keys()):
-                if key[0] in clips:
-                    self._close_decoder(key)
+                if key in track_keys:
+                    self._close_decoder(key, "track blended")
         for path in track_stills(self, frames, snapshot, clips):
             item = self.images.pop(path, None)
             if item is not None:
@@ -868,8 +970,9 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     #    already out of free. budget = that free + the reserved buffers
     #    (they are part of every range's N) - the keep.
     # 2) Cut the sequence at every clip start and end on any track; merge
-    #    neighbouring ranges whose layers at their first frame are the
-    #    same clips and files. Gaps are ranges too.
+    #    neighbouring ranges whose layers at their first frame use the
+    #    same decoder keys (file instances) and stills, so consecutive
+    #    clips of one file are one range. Gaps are ranges too.
     # 3) Per range: still bytes (RGBA, 4 per pixel) and each video
     #    layer's decode cost per frame (REFRESH_DECODE_BYTES_PX x source
     #    w x h; sequence size when ffprobe fails); sum_per is their sum.
@@ -882,11 +985,12 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     #      - no video layer: N = buffers that fit, k = 0
     #      - no room or no VRAM reading: N = 1
     # pool_n is the Preview Frame Cap: it only lowers N.
-    # Returns [(start, end, n, per, still, k, held)], end inclusive:
+    # Returns [(start, end, n, per, still, k, held, keys)], end inclusive:
     # per = largest layer's decode bytes/frame when k is 0 (layers then
     # decode one at a time, N frames each), else 0 (decode is in held);
-    # still = still bytes; k = pull size; held = k x sum_per. The worker
-    # passes these to fit_refresh_pool at each range.
+    # still = still bytes; k = pull size; held = k x sum_per; keys = the
+    # range's decoder keys (frozenset). The worker passes these to
+    # fit_refresh_pool at each range.
     gen = _generator_for(project_path, sequence_id)
     if gen is None or total <= 0:
         return []
@@ -921,10 +1025,12 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 if 0 < f < total:
                     cuts.add(f)
     cuts = sorted(cuts)
+    print("WORKER refresh decoders: " + decoder_keys_text(gen, snapshot))
     ranges = []
     for a, b in zip(cuts[:-1], cuts[1:]):
         items = gen._layer_items(a, snapshot)
-        sig = tuple(sorted((it[0], it[6]) for it in items))
+        sig = tuple(sorted((it[0], it[16] if it[0] == "video" else it[1])
+                           for it in items))
         if ranges and ranges[-1][2] == sig:
             ranges[-1][1] = b - 1
         else:
@@ -948,7 +1054,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 still += 4 * size[0] * size[1]
             elif it[0] == "video":
                 cost = int(size[0] * size[1] * REFRESH_DECODE_BYTES_PX)
-                per_all[it[6]] = cost
+                per_all[it[16]] = cost
                 if cost > per:
                     per, big_path, big_size = cost, it[1], size
         # Decoders stay open for the range and pull k frames at a time,
@@ -972,7 +1078,8 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                 n = min(want, n)
                 k = max(k0, min(n, int((room - n * pool_px) // sum_per)))
         held = k * sum_per
-        plan.append((a, b, n, 0 if k else per, still, k, held))
+        plan.append((a, b, n, 0 if k else per, still, k, held,
+                     frozenset(per_all)))
         print("WORKER refresh range %d..%d: N %d | largest source %s %s, "
               "%d video layers %.1f MB/frame, pulls of %d frames (%d MB held), "
               "stills %d MB" % (
@@ -1026,12 +1133,16 @@ def reserve_refresh_pool(project_path, sequence_id, n):
         _GEN_LOCK.release()
 
 
-def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
+def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
+                     keys=None):
     # Worker, at the first batch of each plan range: make the pool hold
     # exactly n frames and check it against the real free VRAM.
-    # n, per, still, k, held come from the range's refresh_plan entry.
-    # 1) Close every decoder (the previous range's kept decoders are not
-    #    in this range's math); _keep_dec = k > 0, _pull_k = k.
+    # n, per, still, k, held, keys come from the range's refresh_plan
+    # entry.
+    # 1) Close the decoders whose key is not in keys (every decoder when
+    #    keys is None). A kept decoder's memory is already out of the
+    #    free VRAM read below and is counted again in held, so the fit
+    #    errs low. _keep_dec = k > 0, _pull_k = k.
     # 2) If the pool is not n yet: predict from free VRAM before
     #    reserving (buffers are exactly row x height each, already held
     #    ones count as free). A shortfall comes out of the pulls first
@@ -1051,7 +1162,12 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0):
     _GEN_LOCK.acquire()
     try:
         _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
-        gen._close_all_decoders()
+        if keys is None:
+            gen._close_all_decoders()
+        else:
+            for key in list(gen.decoders.keys()):
+                if key not in keys:
+                    gen._close_decoder(key, "not in this range")
         gen._keep_dec = k > 0
         gen._pull_k = k
     finally:

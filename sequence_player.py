@@ -19,9 +19,10 @@ import os
 import sqlite3
 import threading
 
-# Per-clip decoders: close one unused this many frames from the playhead,
-# and keep at most DEC_MAX open (each may hold an NVDEC session).
-DEC_IDLE_FRAMES = 300
+# Decoders are per source file (decoder key (instance, path), see
+# _dec_instances): one stays open while the file is in the sequence, and
+# at most DEC_MAX are open (each may hold an NVDEC session), fewer when
+# free VRAM is short (sequence_player_preview.decoder_capacity).
 DEC_MAX = 8
 DEC_SKIP_MAX = 4      # BUILD 119: decode through gaps up to this, else seek
 
@@ -570,12 +571,14 @@ class SequencePlayer(QWindow):
         self.gen_bufs = []               # GPU pass composite buffers (worker)
         self._frame_tms = []             # per-frame timing for the last batch
         self._glb = None                 # GL 1.5 buffer functions (wglGetProcAddress)
-        # One SimpleDecoder per clip: key (clip_id, path). Two clips of the
-        # same file each decode forward on their own (no ping-pong seeks).
-        self.decoders = {}               # (clip_id, path) -> SimpleDecoder
-        self.dec_next = {}               # (clip_id, path) -> next index it yields
-        self.dec_used = {}               # (clip_id, path) -> last sequence frame used
-        # BUILD 119: (clip_id, path) -> (index, frame, decoder) of the last
+        # One SimpleDecoder per source file: key (instance, path), layer
+        # item [16]. Clips of one file share instance 0 unless they overlap
+        # in time; an overlapping clip gets its own instance (decoder), so
+        # each decodes forward on its own (see _dec_instances).
+        self.decoders = {}               # (instance, path) -> SimpleDecoder
+        self.dec_next = {}               # (instance, path) -> next index it yields
+        self.dec_used = {}               # (instance, path) -> last sequence frame used
+        # BUILD 119: (instance, path) -> (index, frame, decoder) of the last
         # single decode, reused when a frame-mapped proxy repeats an index
         self.dec_last = {}
         self.images = {}                 # path -> (ptr, w, h, stride) or None
@@ -891,9 +894,11 @@ class SequencePlayer(QWindow):
 
     def _layer_items(self, frame, snapshot=None):
         # (kind, path, source_frame, scale_percent_or_None, pos_dx, pos_dy)
-        # bottom first. Scale / position X / Y apply only from a linked keyframe clip
-        # whose track sits above this clip on the timeline (smaller table
-        # row / sort_order). Video/image base scale is 100.
+        # bottom first. [6] is (clip_id, path), the clip's identity; [16]
+        # is the decoder key (instance, path) (_dec_instances). Scale /
+        # position X / Y apply only from a linked keyframe clip whose track
+        # sits above this clip on the timeline (smaller table row /
+        # sort_order). Video/image base scale is 100.
         if snapshot is None:
             snapshot = timeline_snapshot(self.timeline)
         rows = snapshot[0]
@@ -929,6 +934,7 @@ class SequencePlayer(QWindow):
         from keyframe import scale_percent_for_link, position_x_offset
         from keyframe import position_y_offset
         any_solo = any(solo for _tid, _en, solo, _k in rows)
+        instances = self._dec_instances(snapshot)
         layers = []
         for track_id, enabled, solo, kind in reversed(rows):
             if not enabled or (any_solo and not solo):
@@ -983,9 +989,60 @@ class SequencePlayer(QWindow):
                     layers.append((kind, path, max(0, int(src)), scale, pos_dx,
                                    pos_dy, (clip[0], path), orig_size, opacity,
                                    crop_x, crop_y, gamma, brightness, contrast,
-                                   rotate, outline))
+                                   rotate, outline,
+                                   instances.get(clip[0], (0, path))))
                 break
         return layers
+
+    def _clip_path(self, clip, proxies):
+        # The file a clip decodes: its proxy when one is resolved, else the
+        # footage path (same rule as _layer_items)
+        path = self._footage_path(clip[1])
+        if path and clip[0] in proxies:
+            path = proxies[clip[0]][0]
+        return path
+
+    def _dec_instances(self, snapshot):
+        # {clip_id: decoder key (instance, path)} for the enabled video
+        # clips of the snapshot's enabled (and soloed) video tracks, built
+        # once per snapshot. Clips of one file are sorted by start; each
+        # takes the lowest instance no clip of that file overlapping it in
+        # time holds. Clips that never overlap (Scene Detect pieces, a file
+        # reused many times) all get instance 0: one decoder for the file.
+        # Two clips of a file shown in the same frame get different
+        # instances (two decoders) for as long as they overlap.
+        cache = getattr(self, "_dec_inst_cache", None)
+        if cache is not None and cache[0] is snapshot:
+            return cache[1]
+        rows = snapshot[0]
+        proxies = snapshot[6] if len(snapshot) >= 7 else {}
+        any_solo = any(solo for _tid, _en, solo, _k in rows)
+        by_path = {}
+        for track_id, enabled, solo, kind in rows:
+            if kind != "video" or not enabled or (any_solo and not solo):
+                continue
+            for clip in snapshot[1].get(track_id, []):
+                if not clip[5]:
+                    continue
+                path = self._clip_path(clip, proxies)
+                if path:
+                    start = int(clip[2])
+                    by_path.setdefault(path, []).append(
+                        (start, start + max(1, int(clip[3])), clip[0]))
+        out = {}
+        for path, spans in by_path.items():
+            spans.sort(key=lambda t: (t[0], t[1]))
+            active = []         # (end, instance) of clips still running
+            for start, end, clip_id in spans:
+                active = [a for a in active if a[0] > start]
+                taken = set(a[1] for a in active)
+                inst = 0
+                while inst in taken:
+                    inst += 1
+                active.append((end, inst))
+                out[clip_id] = (inst, path)
+        self._dec_inst_cache = (snapshot, out)
+        return out
 
     def _layers(self, frame, snapshot=None):
         # (kind, path, source_frame) for prefetch / callers that ignore xforms.
@@ -993,55 +1050,55 @@ class SequencePlayer(QWindow):
 
     # ---- sources
 
-    def _close_decoder(self, key):
-        # Drop one per-clip decoder (caller holds _GEN_LOCK / GUI gen lock)
+    def _close_decoder(self, key, why="closed"):
+        # Drop one decoder (caller holds _GEN_LOCK / GUI gen lock); a line
+        # on the console names the file, instance and reason
         dec = self.decoders.pop(key, None)
         self.dec_next.pop(key, None)
         self.dec_used.pop(key, None)
         self.dec_last.pop(key, None)
         if dec is not None:
-            # print(f"DECODER close {key}")
+            print("DECODER close: %s #%d (%s; %d open)" % (
+                key[1], int(key[0] or 0), why, len(self.decoders)))
             del dec
 
     def _close_all_decoders(self):
         for key in list(self.decoders.keys()):
-            self._close_decoder(key)
+            self._close_decoder(key, "close all")
         self.dec_next.clear()
         self.dec_used.clear()
         self.dec_last.clear()
 
     def _prune_decoders(self, frame, snapshot):
-        # Close decoders of clips that are gone or whose footage path changed
-        # (timeline reload), and idle ones far from the playhead. Then cap the
-        # count (NVDEC sessions) by closing the least recently used.
+        # Close decoders whose key (instance, path) the snapshot no longer
+        # has (clip removed, file or proxy changed). A live key stays open
+        # however far the playhead moves (a seek in an open decoder costs
+        # far less than an open). Then cap the count at
+        # decoder_capacity (DEC_MAX, lower when free VRAM is short) by
+        # closing the least recently used.
         if not self.decoders:
             return
-        live = set()
-        proxies = snapshot[6] if len(snapshot) >= 7 else {}
         try:
-            for clips in snapshot[1].values():
-                for clip in clips:
-                    path = self._footage_path(clip[1])
-                    if clip[0] in proxies:
-                        path = proxies[clip[0]][0]
-                    if path:
-                        live.add((clip[0], path))
+            live = set(self._dec_instances(snapshot).values())
         except Exception:
             return
         for key in list(self.decoders.keys()):
-            used = self.dec_used.get(key)
-            far = used is not None and abs(int(frame) - int(used)) > DEC_IDLE_FRAMES
-            if key not in live or far:
-                self._close_decoder(key)
-        if len(self.decoders) > DEC_MAX:
+            if key not in live:
+                self._close_decoder(key, "not in the sequence")
+        cap = DEC_MAX
+        if len(self.decoders) > 1:
+            from sequence_player_preview import decoder_capacity
+            cap = decoder_capacity(self, live)
+        if len(self.decoders) > cap:
             order = sorted(self.decoders.keys(),
                            key=lambda k: abs(int(frame) - int(self.dec_used.get(k, -10 ** 9))),
                            reverse=True)
-            for key in order[:len(self.decoders) - DEC_MAX]:
-                self._close_decoder(key)
+            for key in order[:len(self.decoders) - cap]:
+                self._close_decoder(key, "over capacity %d" % cap)
 
     def _decoder(self, key, frame=None):
-        # Lazy: created only when a layer of that clip is decoded
+        # Lazy: created only when a layer of that file (instance) is
+        # decoded. key: (instance, path)
         path = key[1]
         if frame is not None:
             self.dec_used[key] = int(frame)
@@ -1060,7 +1117,9 @@ class SequencePlayer(QWindow):
             self.decoders[key] = dec
             # BUILD 247: open time on the console (preview_log)
             preview_log.decoder_opened(path, _time.perf_counter() - t_open)
-            # print(f"DECODER open {key} total={len(self.decoders)}")
+            print("DECODER open: %s #%d (%.0f ms; %d open)" % (
+                path, int(key[0] or 0), (_time.perf_counter() - t_open) * 1000.0,
+                len(self.decoders)))
             if getattr(self, "_refresh_hold", 0):
                 # BUILD 182: explicit refresh: hard VRAM exit check
                 # BUILD 183: full path (footage or proxy) logged at open
@@ -1637,17 +1696,16 @@ class SequencePlayer(QWindow):
         layer_list = self._layer_items(frame, snapshot)
         if clips is not None:
             layer_list = [l for l in layer_list if l[6][0] in clips]
-        # Prune idle decoders only outside a batch pass. In a batch,
-        # _prefetch already pruned at the batch's first frame and set each
-        # decoder's last use to the batch's LAST frame; pruning here at an
-        # early frame of a batch longer than DEC_IDLE_FRAMES would close a
-        # decoder (freeing every frame it just returned) before those
-        # frames are blended: CUDA error 700, which is sticky.
+        # Prune decoders only outside a batch pass. In a batch, _prefetch
+        # already pruned at the batch's first frame and set each decoder's
+        # last use to the batch's LAST frame; pruning here mid-batch could
+        # close a decoder (freeing every frame it just returned) before
+        # those frames are blended: CUDA error 700, which is sticky.
         if prefetched is None:
             self._prune_decoders(frame, snapshot)
         for layer in layer_list:
             kind, path, src_frame = layer[0], layer[1], layer[2]
-            dkey = layer[6] if len(layer) > 6 else (None, path)
+            dkey = layer[16] if len(layer) > 16 else (0, path)
             scale = layer[3] if len(layer) > 3 else None
             pos_dx = layer[4] if len(layer) > 4 else None
             pos_dy = layer[5] if len(layer) > 5 else None

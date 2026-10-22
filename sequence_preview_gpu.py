@@ -143,7 +143,8 @@ def _borrow():
     P = sp.SequencePlayer
     for name in ("_footage_path", "_layer_items", "_layers", "_close_decoder",
                  "_close_all_decoders", "_prune_decoders", "_decoder", "_image",
-                 "_blend", "_sync", "_build_dst"):
+                 "_blend", "_sync", "_build_dst", "_clip_path",
+                 "_dec_instances"):
         setattr(HeadlessComposer, name, P.__dict__[name])
     for name in ("frame_jpeg", "frames_jpeg_batch", "_prefetch", "_gen_buffers",
                  "_frames_locked", "_frame_locked"):

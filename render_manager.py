@@ -782,6 +782,13 @@ def _make_window_class():
                 snapshot = timeline_snapshot(
                     tl, use_proxies=False, render_deint=self.deint_check.isChecked())
                 try:
+                    # the distinct decoder keys (file + instance) the
+                    # render decodes, on the console
+                    from sequence_player_preview import decoder_keys_text
+                    print("RENDER decoders: " + decoder_keys_text(player, snapshot))
+                except Exception as e:
+                    print("RENDER decoders: not listed (%s)" % e)
+                try:
                     from sequence_preview_worker import _setting_int
                     chunk = _setting_int("previewGpuBatchFrames", 8, 1, 30)
                 except Exception:
