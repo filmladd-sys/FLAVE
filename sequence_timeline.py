@@ -1094,8 +1094,12 @@ class SequenceTimeline(QMainWindow):
         return pix
 
     def _clear_icon_misses(self):
-        # Forget remembered icon misses so the next paint looks again
+        # Forget remembered icon misses so the next paint looks again, and
+        # reset the icon queue (pending requests and failed keys)
         self._icon_miss.clear()
+        q = getattr(self, "_icon_queue", None)
+        if q is not None:
+            q.reset()
 
     def go_home(self):
         # Fully left: frame 0 after the left spacer

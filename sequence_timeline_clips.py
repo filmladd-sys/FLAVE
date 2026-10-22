@@ -190,23 +190,36 @@ class ClipDelegate(QStyledItemDelegate):
                 # (frame rate conformed); stills use 0
                 icon_frame = (icon_source_frame(tl, footage_id, in_frame)
                               if track_type == "video" else 0)
-                # No grabs mid-drag; generate on release. Narrow clips
-                # (under CLIP_DETAIL_MIN_W) neither fetch nor make icons.
+                # Paint reads stored icons only; a missing one is asked of
+                # the icon queue (sequence_timeline_iconq), which makes it
+                # on a timer and repaints the clip. No requests mid-drag.
+                # Narrow clips (under CLIP_DETAIL_MIN_W) neither fetch nor
+                # ask for icons.
+                from sequence_timeline_iconq import request_icon, icon_failed
+                queue_ok = tl._edge_drag is None
                 pix = None
                 if detail:
                     pix = tl.icon_pixmap(footage_id, ch, icon_frame,
-                                         generate=tl._edge_drag is None, clip_id=clip_id)
+                                         generate=False, clip_id=clip_id)
+                    if (pix is None or pix.isNull()) and queue_ok:
+                        request_icon(tl, footage_id, icon_frame, ch, clip, track_id)
                 has_in = pix is not None and not pix.isNull()
                 in_full_w = pix.width() if has_in else 0
-                # Out icon: video reads storage only (never generated in paint),
-                # and only when in and out icons both fit (the out icon is the
-                # same footage at the same height, so the same width as the in
-                # icon); stills reuse the in icon; missing draws black
+                # Out icon: video, only when in and out icons both fit (the
+                # out icon is the same footage at the same height, so the
+                # same width as the in icon); stills reuse the in icon
+                out_failed = False
                 if track_type == "video":
                     out_pix = None
                     if detail and 2 * (in_full_w if has_in else ch) <= w:
                         out_pix = video_out_pixmap(tl, footage_id, ch,
                                                    in_frame, length_frames, clip_id)
+                        if out_pix is None or out_pix.isNull():
+                            out_src = icon_source_frame(
+                                tl, footage_id, out_frame_for(in_frame, length_frames))
+                            out_failed = icon_failed(tl, footage_id, out_src, ch)
+                            if queue_ok and not out_failed:
+                                request_icon(tl, footage_id, out_src, ch, clip, track_id)
                 else:
                     out_pix = pix
                 has_out = out_pix is not None and not out_pix.isNull()
@@ -233,10 +246,10 @@ class ClipDelegate(QStyledItemDelegate):
                     if has_out:
                         painter.drawPixmap(out_x, ctop, out_pix,
                                            out_pix.width() - out_w, 0, out_w, out_pix.height())
-                    else:
-                        # Black only for a real missing frame: there is room,
-                        # but the out frame is past the footage end or its
-                        # icon was requested and does not exist
+                    elif out_failed:
+                        # Black only for a real missing frame: the icon queue
+                        # could not make it (for example past the footage
+                        # end); while it is queued the slot shows the clip
                         painter.fillRect(QRect(out_x, ctop, out_w, ch),
                                          QColor(0, 0, 0))
                     text_rect.setRight(out_x - 1)
