@@ -1319,6 +1319,11 @@ def _clip_context_menu(self, clip, pos):
         gen_caps_action = menu.addAction("Generate Captions")
         menu.addSeparator()
     slice_action = menu.addAction("Slice")
+    # BUILD 283: Scene Detect (Slice) on video-track clips with footage
+    # (sequence_timeline_scenes; slices this clip and its link partners)
+    scene_action = None
+    if self._track_type(self._clip_track_id(clip)) == "video" and not is_seq_clip:
+        scene_action = menu.addAction("Scene Detect (Slice)")
     marker_menu = menu.addMenu("Marker")
     marker_click_action = marker_menu.addAction("Add To Mouse Click")
     marker_tick_action = marker_menu.addAction("Add to Time Tick")
@@ -1364,6 +1369,10 @@ def _clip_context_menu(self, clip, pos):
     if gen_caps_action is not None and action == gen_caps_action:
         from sequence_timeline_captions import generate_captions
         generate_captions(self, clip)
+        return
+    if scene_action is not None and action == scene_action:
+        from sequence_timeline_scenes import scene_detect
+        scene_detect(self, clip)
         return
     if action is None:
         return
