@@ -49,6 +49,11 @@ def import_footage(project_db, media_path):
         except Exception:
             pass
 
+    # BUILD 272: frame rate of v:0 into footage.fps (video only; images
+    # and audio stay NULL)
+    if ext in _VISUAL_EXTS and ext not in IMAGE_EXTS:
+        store_footage_fps(project_db, new_id, media_path)
+
     # BUILD 119: MKV field order (progressive / interlaced / telecine /
     # unknown) into footage.field_order. Other files stay NULL. Older
     # footage tables without the column: skipped.
@@ -146,6 +151,36 @@ def _rate(text):
         return float(text)
     except (TypeError, ValueError):
         return 0.0
+
+
+IMAGE_EXTS = {"png", "jpg", "jpeg", "bmp", "gif", "webp"}
+
+
+def probe_fps(path):
+    # BUILD 272: frames per second of stream V:0 (avg_frame_rate, the rate
+    # the frames actually play at; r_frame_rate when that is missing), or
+    # None when ffprobe gives neither
+    _fo, r_fps, avg_fps = ffprobe_field_info(path)
+    fps = avg_fps or r_fps
+    return float(fps) if fps and fps > 0 else None
+
+
+def store_footage_fps(project_db, footage_id, path):
+    # Probe path and write footage.fps; returns the fps or None
+    try:
+        fps = probe_fps(path) if os.path.isfile(path or "") else None
+        if fps is None:
+            return None
+        conn = sqlite3.connect(project_db)
+        try:
+            conn.execute("UPDATE footage SET fps = ? WHERE id = ?",
+                         (fps, int(footage_id)))
+            conn.commit()
+        finally:
+            conn.close()
+        return fps
+    except Exception:
+        return None
 
 
 def ffprobe_field_info(path):

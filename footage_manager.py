@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QPoint, QMimeData
 from PySide6.QtGui import QAction, QDrag, QCursor
 
+FPS_COL = 10   # BUILD 272: logical column of FPS (shown after Size)
+
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
 
@@ -195,12 +197,13 @@ class FootageManager(QMainWindow):
 
         self.table = FootageTable(self)
         # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Proxy Default, 4 Type,
-        # 5 Size, 6 Length, 7 Height, 8 Width, 9 Codec (appended so the
-        # index-based handlers above are unchanged)
-        self.table.setColumnCount(10)
+        # 5 Size, 6 Length, 7 Height, 8 Width, 9 Codec, 10 FPS (appended so
+        # the index-based handlers above are unchanged; FPS is shown right
+        # after Size by moving its header section, BUILD 272)
+        self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels(
             ["Icon", "Name", "#Proxies", "Proxy Default", "Type", "Size", "Length",
-             "Height", "Width", "Codec"])
+             "Height", "Width", "Codec", "FPS"])
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -213,6 +216,7 @@ class FootageManager(QMainWindow):
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setMinimumSectionSize(40)
+        header.moveSection(header.visualIndex(FPS_COL), header.visualIndex(5) + 1)
 
         container = QWidget()
         container_layout = QVBoxLayout(container)
@@ -342,17 +346,34 @@ class FootageManager(QMainWindow):
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
 
     def _media_info(self):
-        # {footage_id: (height, width, codec)}; older DBs without codec: {}
+        # {footage_id: (height, width, codec, fps)}; older DBs without
+        # codec: {}. BUILD 272: video footage imported before fps was stored
+        # is probed once here (ffprobe) and its fps saved.
         try:
             conn = sqlite3.connect(self.project_db)
             try:
-                rows = conn.execute(
-                    "SELECT id, height, width, codec FROM footage").fetchall()
+                try:
+                    rows = conn.execute(
+                        "SELECT id, height, width, codec, fps, file_type, "
+                        "original_path FROM footage").fetchall()
+                except sqlite3.OperationalError:
+                    # footage table without fps: no FPS column values
+                    rows = [r + (None, "", "") for r in conn.execute(
+                        "SELECT id, height, width, codec FROM footage")]
             finally:
                 conn.close()
         except Exception:
             return {}
-        return {int(r[0]): r[1:] for r in rows}
+        from footage_importer import IMAGE_EXTS, store_footage_fps
+        info = {}
+        for fid, h, w, codec, fps, ftype, path in rows:
+            if (fps is None and h is not None and path
+                    and (ftype or "").lower() not in IMAGE_EXTS):
+                fps = store_footage_fps(self.project_db, fid, path)
+            if (ftype or "").lower() in IMAGE_EXTS:
+                fps = None
+            info[int(fid)] = (h, w, codec, fps)
+        return info
 
     def _set_media_info(self, row, footage_id, items, info):
         # Height / Width / Codec (columns 7-9); empty for audio and NULLs.
@@ -364,6 +385,13 @@ class FootageManager(QMainWindow):
             item = QTableWidgetItem("" if v is None else str(v))
             item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 7 + k, item)
+        # BUILD 272: FPS, up to 3 decimals without trailing zeros (29.97,
+        # 23.976, 30); empty for images, audio and unknown rates
+        fps = vals[3] if vals is not None and len(vals) > 3 else None
+        text = ("%.3f" % float(fps)).rstrip("0").rstrip(".") if fps else ""
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, FPS_COL, item)
 
     def _proxy_default_item(self, items):
         # Video / image rows (the #Proxies cell carries the footage id):
