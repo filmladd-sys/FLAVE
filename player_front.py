@@ -10,13 +10,24 @@
 # SetWindowPos(HWND_TOP, SWP_NOACTIVATE): keyboard focus stays where it
 # is, the native window and its GL context are untouched, and other
 # applications can still cover FLAVE (no stay-on-top flag). The other
-# players keep normal stacking. Not raised: while a modal dialog or popup
-# menu is up, when the activated window is a dialog, or when the player
-# is hidden, minimized or fullscreen. After a raise, visible non-modal
-# dialogs (Find in Captions, progress windows) are raised again so they
-# stay above the player. ASCII only.
+# players keep normal stacking. Stacking among FLAVE windows: the
+# selected player, then the Find in Captions window(s), then everything
+# else: Find is raised first, then the player (all without activation,
+# so typing in Find keeps its focus; clicking Find puts the player back
+# above it). Not raised: while a modal dialog or popup menu is up, when
+# the activated window is another dialog, or when the player is hidden,
+# minimized or fullscreen. After a raise, other visible non-modal
+# dialogs (progress windows) are raised again so they stay above the
+# player. ASCII only.
 
 _STATE = {"sid": None, "installed": False}
+
+# Dialog class kept directly under the player (sequence_timeline_find)
+FIND_DIALOG_CLASS = "CaptionFindDialog"
+
+
+def _is_find(w):
+    return type(w).__name__ == FIND_DIALOG_CLASS
 
 
 def selected_sequence():
@@ -87,18 +98,32 @@ def raise_selected():
     focus = QGuiApplication.focusWindow()
     if focus is player:
         return
-    if isinstance(_widget_of(focus), QDialog):
+    fw = _widget_of(focus)
+    if isinstance(fw, QDialog) and not _is_find(fw):
         return
+    dialogs = []
+    for w in QApplication.topLevelWidgets():
+        try:
+            if isinstance(w, QDialog) and w.isVisible() and not w.isMinimized():
+                dialogs.append(w)
+        except RuntimeError:
+            continue
+    for w in dialogs:
+        if _is_find(w):
+            try:
+                w.raise_()
+            except RuntimeError:
+                pass
     try:
         player.raise_()
     except RuntimeError:
         return
-    for w in QApplication.topLevelWidgets():
-        try:
-            if isinstance(w, QDialog) and w.isVisible() and not w.isMinimized():
+    for w in dialogs:
+        if not _is_find(w):
+            try:
                 w.raise_()
-        except RuntimeError:
-            continue
+            except RuntimeError:
+                pass
 
 
 def _on_focus_window(window):
