@@ -637,6 +637,12 @@ def _on_stage(self, cid, name, a, b):
         return
     dlg = job["dlg"]
     clip = job["info"]["basename"] or "clip"
+    if name.startswith("device:"):
+        # BUILD 275: the device text ("CUDA float16", "CPU int8, N threads",
+        # with the CUDA failure note on a fallback) for the labels below
+        job["device"] = name[len("device:"):]
+        return
+    dev = job.get("device") or ""
     if name == "download":
         job["stage"] = "download"
         dlg.setRange(0, 0)
@@ -650,16 +656,19 @@ def _on_stage(self, cid, name, a, b):
     elif name == "loading":
         job["stage"] = "loading"
         dlg.setRange(0, 0)
-        dlg.setLabelText("Loading Whisper model...")
-        self.status_bar.showMessage("Loading Whisper model...")
+        text = "Loading Whisper model (%s)..." % dev if dev else "Loading Whisper model..."
+        dlg.setLabelText(text)
+        self.status_bar.showMessage(text)
     elif name in ("transcribing", "progress"):
         if job["stage"] != "transcribing":
             job["stage"] = "transcribing"
             dlg.setRange(0, 1000)
-            self.status_bar.showMessage("Transcribing %s..." % clip)
+            self.status_bar.showMessage("Transcribing %s (%s)..." % (clip, dev)
+                                        if dev else "Transcribing %s..." % clip)
         total = b if b > 0 else job["info"]["length_frames"] / float(job["info"]["fps"] or 30.0)
         dlg.setValue(int(1000 * min(1.0, a / total)) if total > 0 else 0)
-        dlg.setLabelText("Transcribing: %s of %s" % (_mmss(a), _mmss(total)))
+        dlg.setLabelText("Transcribing%s: %s of %s" % (
+            (" (%s)" % dev) if dev else "", _mmss(a), _mmss(total)))
 
 
 def _cancel_generate(self, cid):
@@ -733,7 +742,10 @@ def _finish_generate(self, clip_id, result, error):
     name = next_default_name("caption", sequence_track_names(
         project_db, self.sequence_id))
     from undo import push_undo
+    import time
+    t_db = time.monotonic()
     push_undo(project_db, "Generate captions")
+    t_undo = time.monotonic() - t_db
     try:
         conn = sqlite3.connect(project_db)
         try:
@@ -771,8 +783,12 @@ def _finish_generate(self, clip_id, result, error):
             conn.close()
     except Exception as e:
         _close_progress(job)
+        cg._log("DB write failed after %.2f s: %s: %s" % (
+            time.monotonic() - t_db, type(e).__name__, e))
         QMessageBox.warning(self, title, "Could not add the captions: %s" % e)
         return
+    cg._log("DB write: %d captions in %.2f s (undo snapshot %.2f s)" % (
+        len(caps), time.monotonic() - t_db, t_undo))
     _close_progress(job)
     self._after_clip_change("Captions added: %d (%s, %s)" % (
         len(caps), name, result.get("device") or ""))

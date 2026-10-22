@@ -13,10 +13,17 @@
 # Grouping: a new caption starts after a pause of PAUSE_SPLIT_S or more,
 # after a word ending a sentence, or when the next word would pass
 # MAX_WORDS words or MAX_SECONDS. ASCII only.
+#
+# Console log (BUILD 275): lines prefixed "[captions]" report the library
+# versions, CUDA device count, the device / compute type tried, the full
+# error and traceback when CUDA fails, model load time, audio source and
+# load time, progress at most every PROGRESS_LOG_S seconds and a summary.
 
 import os
 import subprocess
 import sys
+import time
+import traceback
 
 WHISPER_MODEL = "small"           # multilingual; ~460 MB download on first use
 WHISPER_BEAM_SIZE = 5
@@ -25,6 +32,7 @@ MAX_WORDS = 7                     # words per caption
 MAX_SECONDS = 3.0                 # caption duration (first word start .. last end)
 SENTENCE_END = (".", "?", "!")    # a word ending with one of these ends a caption
 SAMPLE_RATE = 16000               # faster-whisper input rate
+PROGRESS_LOG_S = 30.0             # console progress line interval (seconds)
 
 # Whisper 2-letter language -> the caption track language (ISO 639-2)
 LANGUAGE_639_2 = {"en": "eng", "es": "spa", "fr": "fra", "de": "deu",
@@ -36,6 +44,65 @@ INSTALL_HINT = "pip install faster-whisper"
 # BUILD 231: approximate download size per model, for the download prompt
 MODEL_SIZES = {"tiny": "75 MB", "base": "145 MB", "small": "460 MB",
                "medium": "1.5 GB", "large-v3": "3 GB", "large-v3-turbo": "1.6 GB"}
+
+
+CUDA_HINT = ("hint: on Windows this is most often missing cuBLAS / cuDNN DLLs "
+             "for CTranslate2 (pip install nvidia-cublas-cu12 nvidia-cudnn-cu12, "
+             "or put the CUDA 12 cuBLAS and cuDNN 9 DLLs on PATH)")
+
+
+def _log(msg):
+    # One console line with the [captions] prefix; never raises (no console
+    # under pythonw)
+    try:
+        print("[captions] " + msg, flush=True)
+    except Exception:
+        pass
+
+
+def _log_exception(what, exc):
+    # Full exception type, message and traceback, one console line each
+    _log("%s: %s: %s" % (what, type(exc).__name__, exc))
+    try:
+        for chunk in traceback.format_exception(type(exc), exc, exc.__traceback__):
+            for line in chunk.rstrip().splitlines():
+                _log("  " + line)
+    except Exception:
+        pass
+
+
+def cpu_threads():
+    # Threads for CPU transcription: all logical cores (4 when unknown)
+    return os.cpu_count() or 4
+
+
+def device_text(device):
+    # Progress label / console text of a device: "CUDA float16" or
+    # "CPU int8, N threads"
+    if device == "cuda":
+        return "CUDA float16"
+    return "CPU int8, %d threads" % cpu_threads()
+
+
+def log_environment():
+    # faster-whisper / ctranslate2 versions and the CUDA device count
+    # CTranslate2 sees (0 means it will not run on the GPU)
+    try:
+        import faster_whisper
+        fw = getattr(faster_whisper, "__version__", "unknown")
+    except Exception as e:
+        fw = "not importable (%s)" % e
+    try:
+        import ctranslate2
+        ct = getattr(ctranslate2, "__version__", "unknown")
+        try:
+            count = str(ctranslate2.get_cuda_device_count())
+        except Exception as e:
+            count = "unavailable (%s: %s)" % (type(e).__name__, e)
+    except Exception as e:
+        ct, count = "not importable (%s)" % e, "unavailable"
+    _log("faster-whisper %s, ctranslate2 %s, CUDA devices: %s, CPU cores: %s"
+         % (fw, ct, count, os.cpu_count()))
 
 
 class CaptionGenError(Exception):
@@ -312,42 +379,82 @@ def _download_files(repo, files, state, cancel, hook, hf_hub_download):
 
 def _load_model(device, allow_download=False):
     # One WhisperModel per device, kept for the session. cuda: float16;
-    # cpu: int8. allow_download False: local files only (BUILD 231: a
-    # download needs the user's Yes in generate_captions first).
+    # cpu: int8 on cpu_threads() threads. allow_download False: local files
+    # only (BUILD 231: a download needs the user's Yes in generate_captions
+    # first).
     from faster_whisper import WhisperModel
     m = _models.get(device)
     if m is None:
         ctype = "float16" if device == "cuda" else "int8"
+        kw = {"cpu_threads": cpu_threads()} if device == "cpu" else {}
+        _log('loading model "%s" on %s' % (WHISPER_MODEL, device_text(device)))
+        t0 = time.monotonic()
         m = WhisperModel(WHISPER_MODEL, device=device, compute_type=ctype,
-                         local_files_only=not allow_download)
+                         local_files_only=not allow_download, **kw)
+        _log("model loaded on %s in %.1f s" % (device, time.monotonic() - t0))
         _models[device] = m
+    else:
+        _log('model "%s" on %s already loaded' % (WHISPER_MODEL, device_text(device)))
     return m
 
 
-def _run_whisper(model, audio, cancel, progress=None):
-    # progress(seconds_done, seconds_total) after each segment
+def _run_whisper(model, audio, cancel, progress=None, device="", state=None):
+    # progress(seconds_done, seconds_total) after each segment. state
+    # (dict): pos (audio seconds reached) and segments, kept up to date so
+    # a failure can report how far it got. Console progress at most every
+    # PROGRESS_LOG_S seconds.
+    state = {} if state is None else state
+    state["pos"], state["segments"] = 0.0, 0
+    t0 = time.monotonic()
     segments, info = model.transcribe(audio, beam_size=WHISPER_BEAM_SIZE,
                                       word_timestamps=True, vad_filter=True)
     total = len(audio) / float(SAMPLE_RATE)
+    after_vad = getattr(info, "duration_after_vad", None)
+    _log("transcribing on %s: %s of audio%s, language %s" % (
+        device_text(device), _hms(total),
+        (" (%s of speech after VAD)" % _hms(after_vad)) if after_vad is not None else "",
+        getattr(info, "language", "") or "?"))
     words = []
+    last_log = t0
     for seg in segments:      # lazy: decoding happens while iterating
         if cancel is not None and cancel.is_set():
             raise CaptionGenError("cancelled")
         for w in (seg.words or []):
             words.append((float(w.start), float(w.end), w.word))
+        pos = min(total, float(seg.end))
+        state["pos"] = pos
+        state["segments"] += 1
         if progress is not None:
-            progress(min(total, float(seg.end)), total)
+            progress(pos, total)
+        now = time.monotonic()
+        if now - last_log >= PROGRESS_LOG_S:
+            last_log = now
+            el = now - t0
+            _log("progress %s: %s of %s audio, %s elapsed, %.1fx realtime, "
+                 "%d segments" % (device, _hms(pos), _hms(total), _hms(el),
+                                  pos / el if el > 0 else 0.0, state["segments"]))
     if cancel is not None and cancel.is_set():
         raise CaptionGenError("cancelled")
+    state["seconds"] = time.monotonic() - t0
     return words, getattr(info, "language", "") or ""
 
 
-def transcribe(audio, cancel=None, allow_download=False, progress=None, stage=None):
+def _hms(seconds):
+    s = max(0, int(seconds or 0))
+    return "%d:%02d:%02d" % (s // 3600, s // 60 % 60, s % 60)
+
+
+def transcribe(audio, cancel=None, allow_download=False, progress=None, stage=None,
+               stats=None):
     # (words [(start_s, end_s, text)], language 2-letter, device used).
-    # CUDA first (float16); any CUDA / cuDNN failure falls back to CPU int8.
-    # Without allow_download a model missing from the cache is an error
-    # (nothing is downloaded). stage("loading") / stage("transcribing")
-    # before each step; progress as in _run_whisper.
+    # CUDA first (float16); any CUDA / cuDNN failure falls back to CPU int8
+    # (logged with its traceback). Without allow_download a model missing
+    # from the cache is an error (nothing is downloaded). Before each step:
+    # stage("device:<text>") (the device text for the progress label; on
+    # the CPU fallback it ends with "; CUDA failed", or "; restarted after
+    # CUDA error" when CUDA failed after segments were already decoded), stage("loading"), stage("transcribing");
+    # progress as in _run_whisper. stats (dict) gets segments and
+    # transcribe_s.
     try:
         import faster_whisper  # noqa: F401
     except ImportError:
@@ -355,29 +462,57 @@ def transcribe(audio, cancel=None, allow_download=False, progress=None, stage=No
     if not allow_download and not model_present():
         raise CaptionGenError('The Whisper "%s" model is not downloaded.' % WHISPER_MODEL)
     stage = stage or (lambda name: None)
+    stats = {} if stats is None else stats
+    log_environment()
+    state = {}
+    step = "model load"
     try:
+        stage("device:" + device_text("cuda"))
         stage("loading")
         m = _load_model("cuda", allow_download)
+        step = "transcription"
         stage("transcribing")
-        words, lang = _run_whisper(m, audio, cancel, progress)
+        words, lang = _run_whisper(m, audio, cancel, progress, "cuda", state)
+        stats.update(segments=state.get("segments", 0),
+                     transcribe_s=state.get("seconds", 0.0))
         return words, lang, "cuda"
     except CaptionGenError:
         raise
-    except Exception:
+    except Exception as e:
         _models.pop("cuda", None)
+        _log_exception("CUDA %s failed" % step, e)
+        _log(CUDA_HINT)
+    restarted = step == "transcription" and (state.get("segments", 0) > 0
+                                             or state.get("pos", 0.0) > 0)
+    if step == "transcription":
+        _log("!!! CUDA FAILED DURING TRANSCRIPTION at %s (%d segments); "
+             "RESTARTING FROM THE BEGINNING ON %s !!!" % (
+                 _hms(state.get("pos", 0.0)), state.get("segments", 0),
+                 device_text("cpu")))
+    else:
+        _log("falling back to %s" % device_text("cpu"))
+    stage("device:" + device_text("cpu")
+          + ("; restarted after CUDA error" if restarted else "; CUDA failed"))
     stage("loading")
     m = _load_model("cpu", allow_download)
     stage("transcribing")
-    words, lang = _run_whisper(m, audio, cancel, progress)
+    words, lang = _run_whisper(m, audio, cancel, progress, "cpu", state)
+    stats.update(segments=state.get("segments", 0),
+                 transcribe_s=state.get("seconds", 0.0), restarted=restarted)
     return words, lang, "cpu"
 
 
 def clip_audio(info, cancel=None):
     # info: project_db, sequence_id, basename, source_path, in_frame,
     # length_frames, fps. float32 16 kHz mono or raises CaptionGenError.
+    t0 = time.monotonic()
     audio = pcm_from_audiotmp(info["project_db"], info["basename"],
                               info["in_frame"], info["length_frames"], info["fps"])
+    source = "AudioTmp cache (48 kHz -> 16 kHz)"
     if audio is None:
+        source = "ffmpeg extract (16 kHz)"
+        _log("%s not in the AudioTmp cache; extracting with ffmpeg"
+             % (info["basename"] or "source"))
         from sequence_preview import temp_file_path
         wav = temp_file_path(info["project_db"], "CaptionAudio", "wav",
                              info["sequence_id"])
@@ -385,7 +520,11 @@ def clip_audio(info, cancel=None):
         audio = pcm_from_ffmpeg(info["source_path"], info["in_frame"] / fps,
                                 info["length_frames"] / fps, wav, cancel)
     if audio is None or len(audio) == 0:
+        _log("no audio from %s after %.1f s" % (source, time.monotonic() - t0))
         raise CaptionGenError("No audio found for this clip's source.")
+    _log("audio: %s, %d samples (%s) loaded in %.1f s" % (
+        source, len(audio), _hms(len(audio) / float(SAMPLE_RATE)),
+        time.monotonic() - t0))
     return audio
 
 
@@ -395,15 +534,29 @@ def generate(info, cancel=None, transcribe_fn=None, progress=None, stage=None):
     # (times from the clip's source in). info["allow_download"]: the user
     # said Yes to the model download. transcribe_fn(audio, cancel, progress)
     # replaces transcribe (tests). progress / stage: see transcribe.
+    t0 = time.monotonic()
+    _log("generate: %s, in %d, %d frames at %.3f fps" % (
+        info.get("basename") or "clip", int(info["in_frame"]),
+        int(info["length_frames"]), float(info["fps"] or 30.0)))
     audio = clip_audio(info, cancel)
+    stats = {}
     if transcribe_fn is not None:
         words, lang, device = transcribe_fn(audio, cancel, progress)
     else:
         words, lang, device = transcribe(audio, cancel,
                                          bool(info.get("allow_download")),
-                                         progress, stage)
+                                         progress, stage, stats)
     if cancel is not None and cancel.is_set():
+        _log("cancelled after %s" % _hms(time.monotonic() - t0))
         raise CaptionGenError("cancelled")
+    wall = time.monotonic() - t0
+    dur = len(audio) / float(SAMPLE_RATE)
+    _log("done: %s wall (%s transcribing), %s audio, %.1fx realtime, "
+         "%d segments, %d words, device %s%s" % (
+             _hms(wall), _hms(stats.get("transcribe_s", 0.0)), _hms(dur),
+             dur / wall if wall > 0 else 0.0, stats.get("segments", 0),
+             len(words), device_text(device) if device in ("cuda", "cpu") else device,
+             " (restarted after CUDA error)" if stats.get("restarted") else ""))
     return {"groups": group_words(words),
             "language": LANGUAGE_639_2.get((lang or "").lower(), lang or "eng"),
             "device": device, "words": len(words)}
