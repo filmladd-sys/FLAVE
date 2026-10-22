@@ -413,6 +413,11 @@ class SequenceTimeline(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        # Right-click on the status bar: Copy puts the current message on
+        # the clipboard (read at the click, before it can time out)
+        self.status_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.status_bar.customContextMenuRequested.connect(
+            self._status_bar_menu)
         # BUILD 129: 'Generating preview NN%' in a permanent label at the
         # right of the status bar (showMessage, the play clock / frame text,
         # is untouched). Polled on the GUI thread at 4 per second.
@@ -749,6 +754,14 @@ class SequenceTimeline(QMainWindow):
             return
         if action in acts:
             acts[action]()
+
+    def _status_bar_menu(self, pos):
+        text = self.status_bar.currentMessage()
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy")
+        copy_action.setEnabled(bool(text))
+        if menu.exec(self.status_bar.mapToGlobal(pos)) == copy_action:
+            QApplication.clipboard().setText(text)
 
     def _track_context_menu(self, pos):
         # Key boxes first so right-click does not open the clip menu

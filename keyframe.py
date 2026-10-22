@@ -1423,49 +1423,65 @@ def delete_keys_beyond_horizon(timeline, clips):
     timeline._after_clip_change("Deleted %d key(s) beyond the clip range" % count)
 
 
-# BUILD 263: Key > Center Key Beyond Event Horizon, shown when a keyframe
-# clip in the menu's scope (the right-clicked clip, plus the other selected
-# keyframe clips when it is selected, as for Delete Keys Beyond Event
-# Horizon) has exactly one key outside [in, out). A
-# clip holds one type (BUILD 147), so its keys are the rows of one key
-# table (keyframes, or keyframe_border for a border clip); every key row
-# of the clip counts. The key moves to the middle frame
-# in + (out - in) // 2 (value unchanged). When another key of the clip is
-# already there, the nearest free frame inside [in, out) is used, the
-# earlier frame first on a tie; with no free frame nothing moves.
+# BUILD 263 / 266: Key > Center Key Beyond Event Horizon, shown when a
+# keyframe clip in the menu's scope (the right-clicked clip, plus the other
+# selected keyframe clips when it is selected, as for Delete Keys Beyond
+# Event Horizon) has a key outside [in, out). A clip holds one type
+# (BUILD 147), so its keys are the rows of one key table (keyframes, or
+# keyframe_border for a border clip). Of the keys outside the range, the one
+# nearest the clip (frames from the in point, or from the last frame
+# out - 1; the earlier key on a tie) moves to the middle frame
+# in + (out - in) // 2 with its value unchanged, and the other keys outside
+# the range are deleted (a slice copies every key to both pieces, so a
+# piece can hold several). When a key inside the range is already on the
+# middle frame, the nearest free frame inside [in, out) is used, the
+# earlier frame first on a tie; with no free frame nothing changes.
 
 def center_frame_for_key(clip):
-    # (key, frame) for the one key beyond the horizon, frame None when the
-    # clip has no free frame; None when the clip does not have exactly one
+    # (key, frame, others) for the clip: key is the hidden key nearest the
+    # clip, frame its new frame (None when the clip has no free frame),
+    # others the remaining hidden keys; None when no key is hidden
     beyond = keys_beyond_horizon(clip)
-    if len(beyond) != 1:
+    if not beyond:
         return None
-    key = beyond[0]
     in_f = max(0, int(clip[2]))
     out_f = in_f + max(1, int(clip[3]))
-    taken = set(int(k[1] if len(k) >= 3 else k[0]) for k in clip[9] if k is not key)
+
+    def key_frame(k):
+        return int(k[1] if len(k) >= 3 else k[0])
+
+    def distance(k):
+        f = key_frame(k)
+        return (in_f - f) if f < in_f else (f - (out_f - 1))
+
+    key = min(beyond, key=lambda k: (distance(k), key_frame(k)))
+    others = [k for k in beyond if k is not key]
+    hidden = set(id(k) for k in beyond)
+    taken = set(key_frame(k) for k in clip[9] if id(k) not in hidden)
     mid = in_f + (out_f - in_f) // 2
     for d in range(0, out_f - in_f):
         for f in (mid - d, mid + d):
             if in_f <= f < out_f and f not in taken:
-                return key, f
-    return key, None
+                return key, f, others
+    return key, None, others
 
 
 def center_key_beyond_horizon(timeline, clips):
-    # For every clip in clips with exactly one key beyond the horizon, move
-    # that key to the middle (one undo step for all of them); the refresh's
-    # snapshot diff marks the frames that change
+    # For every clip in clips with a hidden key, move the nearest one to the
+    # middle and delete the other hidden keys (one undo step for all of
+    # them); the refresh's snapshot diff marks the frames that change
     moves = []
+    drops = []
     for clip in clips:
         got = center_frame_for_key(clip)
         if got is None:
             continue
-        key, frame = got
+        key, frame, others = got
         if frame is None or len(key) < 3:
             continue
-        moves.append((key[0], frame, key_table_for_type(
-            clip[10] if len(clip) > 10 else "")))
+        table = key_table_for_type(clip[10] if len(clip) > 10 else "")
+        moves.append((key[0], frame, table))
+        drops += [(k[0], table) for k in others if len(k) >= 3]
     if not moves:
         timeline.status_bar.showMessage(
             "Center Key: no free frame inside the clip", 3000)
@@ -1480,15 +1496,18 @@ def center_key_beyond_horizon(timeline, clips):
         cur = conn.cursor()
         for key_id, frame, table in moves:
             persist_keyframe_frame(cur, key_id, frame, table)
+        for key_id, table in drops:
+            cur.execute("DELETE FROM %s WHERE id = ?" % table, (int(key_id),))
         conn.commit()
         conn.close()
     except Exception as e:
         QMessageBox.warning(timeline, "Center Key", "Could not save: %s" % e)
         return
-    if len(moves) == 1:
-        timeline._after_clip_change("Centered key at frame %d" % moves[0][1])
-    else:
-        timeline._after_clip_change("Centered %d keys" % len(moves))
+    msg = ("Centered key at frame %d" % moves[0][1] if len(moves) == 1
+           else "Centered %d keys" % len(moves))
+    if drops:
+        msg += ", deleted %d other key(s) beyond the clip range" % len(drops)
+    timeline._after_clip_change(msg)
 
 
 def key_context_menu(timeline, key_hit, pos):
