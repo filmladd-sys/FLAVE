@@ -47,33 +47,119 @@ CLEAN_SQL = ("NOT EXISTS (SELECT 1 FROM DirtyImage d "
              "WHERE d.frame = preview.frame)")
 
 
-def _connect(project_path, sequence_id):
-    # Open WAL; create the tables if the file or a table is missing
-    conn = sqlite3.connect(preview_db_path(project_path, sequence_id))
-    conn.execute("PRAGMA journal_mode=WAL")
-    # BUILD 253: a commit does not wait for a disk flush (WAL stays
-    # consistent; a crash can only lose the last commits, and those frames
-    # are simply not clean and get rebuilt). Per connection.
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS preview (
-            frame INTEGER PRIMARY KEY,
-            jpeg BLOB
-        )
-    """)
-    has_dirty_table = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-        "AND name = 'DirtyImage'").fetchone() is not None
-    if not has_dirty_table:
-        conn.execute("CREATE TABLE IF NOT EXISTS DirtyImage "
-                     "(frame INTEGER PRIMARY KEY)")
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(preview)")]
-        if "dirty" in cols:
-            # Older file: its dirty marks move to DirtyImage once
-            conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) "
-                         "SELECT frame FROM preview WHERE dirty != 0")
-        conn.commit()
+# Journal (BUILD 257): the preview file is a rebuildable cache, so it is
+# written for the fewest bytes, not for crash safety. journal_mode=MEMORY
+# keeps the rollback journal in RAM (a failed transaction still rolls
+# back) and every JPEG page goes to the file once, at commit. WAL wrote
+# each page twice (the -wal log, then the checkpoint into the file), and a
+# DELETE / TRUNCATE journal copies the old pages of every overwritten frame
+# to disk first. synchronous=OFF: no flush waits (the OS writes the pages
+# out). The cost: a crash or power loss in the middle of a commit can leave
+# a damaged file; _connect then discards it and every frame is rebuilt.
+# Without WAL a commit briefly locks readers out; every connection waits
+# up to its busy timeout (short on the GUI thread) and treats a timeout as
+# "not available now". A commit only locks at its end: the writer's page
+# cache (cache_size) is large enough that a card pass's frames do not
+# spill to the file early. The default 4096-byte page is kept: a larger
+# page wastes more of each JPEG's last page than it saves in page links.
+PREVIEW_BUSY_SEC = 10.0         # worker / writer / player reader threads
+PREVIEW_GUI_BUSY_SEC = 1.0      # GUI thread: a short wait, then a miss
+PREVIEW_CACHE_KB = 131072       # page cache per connection, at most (KiB)
+
+
+def _busy_sec():
+    # Busy timeout for a connection opened on the calling thread
+    if threading.current_thread() is threading.main_thread():
+        return PREVIEW_GUI_BUSY_SEC
+    return PREVIEW_BUSY_SEC
+
+
+def _is_damaged(e):
+    # sqlite3 error that means the file itself is unreadable (not a
+    # database, malformed), as opposed to busy / locked / cannot open
+    return (isinstance(e, sqlite3.DatabaseError)
+            and not isinstance(e, sqlite3.OperationalError))
+
+
+def _discard(project_path, sequence_id, why):
+    # Delete a damaged preview file (and its -wal / -shm / -journal) so the
+    # next open starts an empty one: every frame is then missing (not
+    # clean) and is rebuilt. Raises sqlite3.DatabaseError when the file
+    # cannot be removed now (still open elsewhere); callers treat that as
+    # "no preview" and the next open tries again.
+    path = preview_db_path(project_path, sequence_id)
+    print("Preview file %s unreadable (%s); discarding it, every frame "
+          "will be rebuilt" % (path, why))
+    for ext in ("", "-wal", "-shm", "-journal"):
+        try:
+            if os.path.exists(path + ext):
+                os.remove(path + ext)
+        except OSError as e:
+            raise sqlite3.DatabaseError("cannot discard %s: %s" % (path + ext, e))
+    key = (os.path.abspath(project_path), int(sequence_id))
+    with _CLEAN_LOCK:
+        s = _CLEAN.get(key)
+        if s is not None:
+            s.clear()
+    _IMAGE_SIZE.pop(key, None)
+
+
+def _open(path, timeout):
+    # One connection: journal mode, pragmas, tables (see _connect)
+    conn = sqlite3.connect(path, timeout=timeout)
+    try:
+        # A file still in WAL (written before BUILD 257) leaves WAL here:
+        # SQLite checkpoints the -wal into the file and deletes it. That
+        # needs no other connection on the file, so it is tried without
+        # waiting; when busy, this connection simply works in WAL and a
+        # later open switches. On a file already out of WAL the mode is per
+        # connection, so every writer sets it.
+        conn.execute("PRAGMA busy_timeout=0")
+        try:
+            conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        except sqlite3.OperationalError:
+            pass
+        conn.execute("PRAGMA busy_timeout=%d" % int(timeout * 1000))
+        conn.execute("PRAGMA synchronous=OFF")
+        conn.execute("PRAGMA cache_size=-%d" % PREVIEW_CACHE_KB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS preview (
+                frame INTEGER PRIMARY KEY,
+                jpeg BLOB
+            )
+        """)
+        has_dirty_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'DirtyImage'").fetchone() is not None
+        if not has_dirty_table:
+            conn.execute("CREATE TABLE IF NOT EXISTS DirtyImage "
+                         "(frame INTEGER PRIMARY KEY)")
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(preview)")]
+            if "dirty" in cols:
+                # Older file: its dirty marks move to DirtyImage once
+                conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) "
+                             "SELECT frame FROM preview WHERE dirty != 0")
+            conn.commit()
+    except Exception:
+        conn.close()
+        raise
     return conn
+
+
+def _connect(project_path, sequence_id, timeout=None):
+    # Open the preview file (created if missing) with the tables in place.
+    # timeout: busy wait in seconds (default by thread, see _busy_sec). A
+    # damaged file is discarded and a new one opened; busy / locked errors
+    # go to the caller.
+    path = preview_db_path(project_path, sequence_id)
+    timeout = _busy_sec() if timeout is None else timeout
+    try:
+        return _open(path, timeout)
+    except sqlite3.DatabaseError as e:
+        if not _is_damaged(e):
+            raise
+        _discard(project_path, sequence_id, e)
+        return _open(path, timeout)
 
 
 # Preview Size (Project Settings > Project): the preview JPEGs are stored
@@ -266,7 +352,12 @@ def clean_set(project_path, sequence_id):
     with _CLEAN_LOCK:
         s = _CLEAN.get(key)
     if s is None:
-        s = set(FrameCleanRange(project_path, sequence_id, 0, 2 ** 62))
+        try:
+            s = set(_clean_rows(project_path, sequence_id, 0, 2 ** 62))
+        except sqlite3.OperationalError:
+            # Busy (a commit in progress) past the timeout: nothing is
+            # cached, the next call reads again
+            return set()
         with _CLEAN_LOCK:
             s = _CLEAN.setdefault(key, s)
     return s
@@ -477,12 +568,24 @@ def _dirty_since(key, seq, frame):
     return False
 
 
+class PreviewBusy(Exception):
+    # The preview file is locked by a commit (FrameRetrieve)
+    pass
+
+
 def FrameRetrieve(project_path, sequence_id, frame_num):
-    # JPEG bytes if the row exists and is clean, else None
-    conn = _connect(project_path, sequence_id)
+    # JPEG bytes if the row exists and is clean, else None. Raises
+    # PreviewBusy when the file stays locked by a commit past the busy
+    # timeout (the caller keeps its picture and asks again later).
+    try:
+        conn = _connect(project_path, sequence_id)
+    except sqlite3.OperationalError as e:
+        raise PreviewBusy(str(e))
     try:
         row = conn.execute("SELECT jpeg FROM preview WHERE frame = ? AND "
                            + CLEAN_SQL, (int(frame_num),)).fetchone()
+    except sqlite3.OperationalError as e:
+        raise PreviewBusy(str(e))
     finally:
         conn.close()
     if row is None or row[0] is None:
@@ -510,16 +613,20 @@ def FrameSave(project_path, sequence_id, frame_num, jpeg_blob, dirty):
             s.add(int(frame_num))
 
 
-def FrameCleanRange(project_path, sequence_id, first, last):
+def _clean_rows(project_path, sequence_id, first, last):
     # Sorted list of clean frames in first..last, one query. A missing
     # preview file means no clean frames (not created). An existing file is
     # opened with _connect, so an older file gets its DirtyImage table here
-    # (clean_set reads this first, before any other reader).
+    # (clean_set reads this first, before any other reader). A damaged
+    # file is discarded (no clean frames); busy raises
+    # sqlite3.OperationalError.
     path = preview_db_path(project_path, sequence_id)
     if not os.path.isfile(path):
         return []
     try:
         conn = _connect(project_path, sequence_id)
+    except sqlite3.OperationalError:
+        raise
     except sqlite3.Error:
         return []
     try:
@@ -527,11 +634,31 @@ def FrameCleanRange(project_path, sequence_id, first, last):
             "SELECT frame FROM preview WHERE frame BETWEEN ? AND ? "
             "AND jpeg IS NOT NULL AND " + CLEAN_SQL + " ORDER BY frame",
             (int(first), int(last))).fetchall()
-    except sqlite3.Error:
+    except sqlite3.OperationalError:
+        conn.close()
+        raise
+    except sqlite3.Error as e:
+        conn.close()
+        conn = None
+        if _is_damaged(e):
+            try:
+                _discard(project_path, sequence_id, e)
+            except sqlite3.Error:
+                pass
         return []
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     return [r[0] for r in rows]
+
+
+def FrameCleanRange(project_path, sequence_id, first, last):
+    # Sorted list of clean frames in first..last ([] when the file is
+    # missing, damaged or busy past the timeout)
+    try:
+        return _clean_rows(project_path, sequence_id, first, last)
+    except sqlite3.Error:
+        return []
 
 
 # Card-pass writes handed to the writer thread that may wait before the
@@ -624,6 +751,18 @@ class PreviewBatch(object):
                             conn.rollback()
                     except Exception:
                         pass
+                    if _is_damaged(e) and conn is not None:
+                        # damaged file: closed and discarded; the next job
+                        # opens a new one
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        conn = None
+                        try:
+                            _discard(self.project_path, self.sequence_id, e)
+                        except sqlite3.Error as e2:
+                            print(f"Preview discard failed: {e2}")
                 finally:
                     self._jobs.task_done()
         finally:

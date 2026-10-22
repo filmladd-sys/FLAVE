@@ -104,7 +104,10 @@ class PreviewReader(object):
                                self.player.sequence_id)
         if not os.path.isfile(path):
             return
-        self.conn = sqlite3.connect(path)
+        # BUILD 257: reader thread; waits out a commit's lock (no WAL), a
+        # timeout is a skipped batch (see _run)
+        from sequence_preview import PREVIEW_BUSY_SEC
+        self.conn = sqlite3.connect(path, timeout=PREVIEW_BUSY_SEC)
         self.conn.execute("PRAGMA query_only = ON")
         self.playhead = int(frame)
         self.stop.clear()
@@ -1199,14 +1202,21 @@ class SequencePlayer(QWindow):
         path = preview_db_path(self.timeline._project_db(), self.sequence_id)
         if not os.path.isfile(path):
             return 0
-        if self._play_conn is None:
-            self._play_conn = sqlite3.connect(path)
-            self._play_conn.execute("PRAGMA query_only = ON")
-        # t0 = time.perf_counter()
-        rows = self._play_conn.execute(
-            "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
-            "AND jpeg IS NOT NULL AND " + CLEAN_SQL + " ORDER BY frame",
-            (int(start), int(start) + int(n) - 1)).fetchall()
+        # BUILD 257: GUI thread; the preview file has no WAL, so a commit
+        # can lock it briefly: a short busy wait, then nothing this time
+        from sequence_preview import PREVIEW_GUI_BUSY_SEC
+        try:
+            if self._play_conn is None:
+                self._play_conn = sqlite3.connect(path, timeout=PREVIEW_GUI_BUSY_SEC)
+                self._play_conn.execute("PRAGMA query_only = ON")
+            # t0 = time.perf_counter()
+            rows = self._play_conn.execute(
+                "SELECT frame, jpeg FROM preview WHERE frame BETWEEN ? AND ? "
+                "AND jpeg IS NOT NULL AND " + CLEAN_SQL + " ORDER BY frame",
+                (int(start), int(start) + int(n) - 1)).fetchall()
+        except sqlite3.Error as e:
+            print(f"Play fill read failed: {e}")
+            return 0
         # t_sql = (time.perf_counter() - t0) * 1000.0
         items = [(int(frame), bytes(blob)) for frame, blob in rows if blob]
         # t1 = time.perf_counter()
@@ -1361,6 +1371,7 @@ class SequencePlayer(QWindow):
             return
         jpeg = item[1] if item is not None else None
         if jpeg is None:
+            from sequence_preview import PreviewBusy
             try:
                 from sequence_preview import FrameRetrieve, clean_set
                 # BUILD 153: a frame an edit just marked dirty is a miss
@@ -1373,6 +1384,15 @@ class SequencePlayer(QWindow):
                                      self.sequence_id, frame)
             except LookupError:
                 jpeg = None
+            except PreviewBusy:
+                # BUILD 257: a preview commit holds the file (no WAL): keep
+                # the picture and read again shortly; the worker is not
+                # asked (the frame is there)
+                self._present(dark, self.shown_frame is not None)
+                if not getattr(self, "_busy_retry", False):
+                    self._busy_retry = True
+                    QTimer.singleShot(100, self._busy_retry_frame)
+                return
             except Exception as e:
                 print(f"Sequence Player preview read failed: {e}")
                 jpeg = None
@@ -1394,6 +1414,12 @@ class SequencePlayer(QWindow):
                 print(f"Sequence Player preview ask failed: {e}")
         self._present(dark, self.shown_frame is not None)
         self._arm_retry()
+
+    def _busy_retry_frame(self):
+        # BUILD 257: the read after a busy preview file
+        self._busy_retry = False
+        if not self.closed:
+            self.request_frame(force=True)
 
     def redraw_edited(self, frame, snapshot):
         # BUILD 153: an edit dirtied the shown frame: compose it now from
