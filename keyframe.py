@@ -652,7 +652,7 @@ def paint_title_bar(painter, title_rect, title, visible_rect=None):
 
 def paint_keyframe_clip(painter, clip_rect, title, keys=None,
                         clip_start=0, ppf=1.0, stored_type="", linked=True,
-                        visible_rect=None):
+                        visible_rect=None, selected_key_id=None):
     # Caption-like body fill, plus a 15 px title bar. Keys: full-height white
     # vertical line, then a sized white square with black border and light
     # grey value text, clipped to the clip rect.
@@ -686,11 +686,18 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
             frame, value = item[0], item[1]
         text, sq, x, body_top = key_mark_layout(
             clip_rect, frame, value, clip_start, ppf, stored_type, fm)
-        painter.setPen(QPen(QColor(255, 255, 255)))
+        # BUILD 271: the key whose right-click menu is open is selected:
+        # black line and a 2 px black outline instead of white
+        selected = (selected_key_id is not None and len(item) >= 3
+                    and int(item[0]) == int(selected_key_id))
+        line = QColor(0, 0, 0) if selected else QColor(255, 255, 255)
+        painter.setPen(QPen(line))
         painter.drawLine(x, body_top, x, clip_rect.top() + clip_rect.height() - 1)
         painter.fillRect(sq, QColor(255, 255, 255))
         painter.setPen(QPen(QColor(0, 0, 0)))
         painter.drawRect(sq.adjusted(0, 0, -1, -1))
+        if selected:
+            painter.drawRect(sq.adjusted(1, 1, -2, -2))
         painter.setPen(QPen(QColor(180, 180, 180)))
         painter.drawText(sq, Qt.AlignCenter, text)
     painter.restore()
@@ -1617,16 +1624,71 @@ def paste_key(timeline, clip, frame):
     timeline._after_clip_change("Pasted key at frame %d" % int(frame))
 
 
+def center_key(timeline, key_hit):
+    # BUILD 271: move this key to its clip's middle frame in + (out - in) // 2
+    # (value unchanged); when another key is there, the nearest free frame
+    # inside [in, out), the earlier frame first on a tie
+    clip = key_hit["clip"]
+    in_f = max(0, int(clip[2]))
+    out_f = in_f + max(1, int(clip[3]))
+    keys = clip[9] if len(clip) > 9 and clip[9] else []
+    taken = set(int(k[1]) for k in keys
+                if len(k) >= 3 and int(k[0]) != int(key_hit["key_id"]))
+    mid = in_f + (out_f - in_f) // 2
+    frame = None
+    for d in range(0, out_f - in_f):
+        for f in (mid - d, mid + d):
+            if frame is None and in_f <= f < out_f and f not in taken:
+                frame = f
+        if frame is not None:
+            break
+    if frame is None:
+        timeline.status_bar.showMessage(
+            "Center: no free frame inside the clip", 3000)
+        return
+    if frame == int(key_hit["frame"]):
+        timeline.status_bar.showMessage("Key is already centered", 3000)
+        return
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    from undo import push_undo
+    push_undo(project_db, "Center key")
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        persist_keyframe_frame(cur, key_hit["key_id"], frame, key_table_for_type(
+            clip[10] if len(clip) > 10 else ""))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Center Key", "Could not save: %s" % e)
+        return
+    mark_keyframe_clip_preview_dirty(timeline, clip)
+    timeline._after_clip_change("Centered key at frame %d" % frame)
+
+
 def key_context_menu(timeline, key_hit, pos):
-    # Right-click on a key box: Edit / Copy / Delete Keyframe
+    # Right-click on a key box: Edit / Copy / Center / Delete. While the
+    # menu is open the key box is drawn as selected (BUILD 271:
+    # timeline._menu_key_id, black outline, see paint_keyframe_clip).
     from PySide6.QtWidgets import QMenu
     menu = QMenu(timeline)
-    edit_action = menu.addAction("Edit Keyframe")
-    copy_action = menu.addAction("Copy Keyframe")     # BUILD 270
-    delete_action = menu.addAction("Delete Keyframe")
-    action = menu.exec(timeline.table.viewport().mapToGlobal(pos))
+    edit_action = menu.addAction("Edit")
+    copy_action = menu.addAction("Copy")     # BUILD 270
+    center_action = menu.addAction("Center")     # BUILD 271
+    delete_action = menu.addAction("Delete")
+    timeline._menu_key_id = int(key_hit["key_id"])
+    timeline.table.viewport().update()
+    try:
+        action = menu.exec(timeline.table.viewport().mapToGlobal(pos))
+    finally:
+        timeline._menu_key_id = None
+        timeline.table.viewport().update()
     if action == copy_action:
         copy_key(timeline, key_hit)
+    elif action == center_action:
+        center_key(timeline, key_hit)
     elif action == edit_action:
         edit_key(timeline, key_hit["clip"], key_hit["key_id"],
                  key_hit["frame"], key_hit["value"])

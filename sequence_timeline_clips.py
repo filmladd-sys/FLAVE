@@ -98,7 +98,8 @@ class ClipDelegate(QStyledItemDelegate):
                     painter, clip_rect, filename or "", keys=keys,
                     clip_start=start_frame, ppf=ppf, stored_type=ktype,
                     linked=(len(clip) > 8 and clip[8] is not None),
-                    visible_rect=rect)
+                    visible_rect=rect,
+                    selected_key_id=getattr(tl, "_menu_key_id", None))
                 if clip_id in tl._selected_clip_ids:
                     painter.setPen(QColor(255, 255, 160))
                 else:
