@@ -36,6 +36,8 @@ def preview_db_path(project_path, sequence_id):
 # Preview file layout (BUILD 251):
 #   preview (frame INTEGER PRIMARY KEY, jpeg BLOB): one JPEG per frame
 #   DirtyImage (frame INTEGER PRIMARY KEY): frames whose JPEG is stale
+#   PreviewInfo (key TEXT PRIMARY KEY, value TEXT): "ImageSize" (BUILD 255,
+#     see sync_image_size)
 # A frame is clean when its preview row has a JPEG and it is not in
 # DirtyImage. The dirty list is its own small table so marking frames dirty
 # never rewrites the rows that hold the JPEGs. (A future DirtyAudio table
@@ -74,6 +76,113 @@ def _connect(project_path, sequence_id):
     return conn
 
 
+# Preview Size (Project Settings > Project): the preview JPEGs are stored
+# at this percent of the sequence size, so a project can trade picture
+# detail for smaller files and faster preview writes. Kept in the project
+# db settings table; a missing or bad value is 100 (full size).
+PREVIEW_SIZE_KEY = "PreviewSize"
+PREVIEW_SIZE_CHOICES = (100, 75, 50, 25)
+_PREVIEW_PCT = {}       # project path (normcase abspath) -> percent, read
+                        # once, kept current
+
+
+def _clean_percent(value):
+    # One of PREVIEW_SIZE_CHOICES, else 100
+    try:
+        pct = int(str(value).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return 100
+    return pct if pct in PREVIEW_SIZE_CHOICES else 100
+
+
+def preview_size_percent(project_path):
+    # The project's Preview Size percent (cached per project; the Project
+    # Settings save updates the cache through set_preview_size_percent)
+    if not project_path:
+        return 100
+    key = os.path.normcase(os.path.abspath(project_path))
+    pct = _PREVIEW_PCT.get(key)
+    if pct is None:
+        value = None
+        try:
+            conn = sqlite3.connect(project_path)
+            try:
+                row = conn.execute("SELECT value FROM settings WHERE key = ?",
+                                   (PREVIEW_SIZE_KEY,)).fetchone()
+                value = row[0] if row else None
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            value = None
+        pct = _clean_percent(value) if value is not None else 100
+        _PREVIEW_PCT[key] = pct
+    return pct
+
+
+def set_preview_size_percent(project_path, pct):
+    # Store the Preview Size percent in the project db, then the cache.
+    # Returns the percent stored.
+    pct = _clean_percent(pct)
+    conn = sqlite3.connect(project_path)
+    try:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                     (PREVIEW_SIZE_KEY, str(pct)))
+        conn.commit()
+    finally:
+        conn.close()
+    _PREVIEW_PCT[os.path.normcase(os.path.abspath(project_path))] = pct
+    return pct
+
+
+def preview_frame_size(seq_w, seq_h, pct):
+    # Stored preview frame size for a sequence of seq_w x seq_h at pct
+    # percent: the sequence size itself at 100, else each side scaled and
+    # rounded to an even number (at least 2, never above the sequence)
+    seq_w, seq_h = int(seq_w), int(seq_h)
+    pct = _clean_percent(pct)
+    if pct >= 100:
+        return seq_w, seq_h
+
+    def side(v):
+        return max(2, min(v, int(round(v * pct / 200.0)) * 2))
+    return side(seq_w), side(seq_h)
+
+
+def jpeg_size(data):
+    # (width, height) from a JPEG's frame header (SOFn marker), or None
+    # when the bytes are not a readable JPEG header
+    try:
+        b = bytes(data[:65536])
+        if b[:2] != b"\xff\xd8":
+            return None
+        i = 2
+        n = len(b)
+        while i + 4 <= n:
+            if b[i] != 0xFF:
+                return None
+            marker = b[i + 1]
+            if marker == 0xFF:          # fill byte
+                i += 1
+                continue
+            if marker in (0x01,) or 0xD0 <= marker <= 0xD7:
+                i += 2                  # standalone marker, no length
+                continue
+            seg = (b[i + 2] << 8) | b[i + 3]
+            if (0xC0 <= marker <= 0xCF
+                    and marker not in (0xC4, 0xC8, 0xCC)):
+                if i + 9 > n:
+                    return None
+                h = (b[i + 5] << 8) | b[i + 6]
+                w = (b[i + 7] << 8) | b[i + 8]
+                return (w, h) if w and h else None
+            if marker in (0xD9, 0xDA) or seg < 2:
+                return None             # end or scan before any frame header
+            i += 2 + seg
+    except Exception:
+        return None
+    return None
+
+
 def _mark_dirty_sql(conn, first, last):
     # Every frame with a preview row in first..last joins DirtyImage (a
     # frame with no row is not clean anyway). Returns the rows added.
@@ -88,6 +197,60 @@ def _save_clean_sql(conn, frame, jpeg):
     conn.execute("INSERT OR REPLACE INTO preview (frame, jpeg) VALUES (?, ?)",
                  (int(frame), jpeg))
     conn.execute("DELETE FROM DirtyImage WHERE frame = ?", (int(frame),))
+
+
+# PreviewInfo (key TEXT PRIMARY KEY, value TEXT) in the preview file:
+# "ImageSize" = "WxH", the size the stored JPEGs were built at. Files
+# without it were written before Preview Size existed, at the full
+# sequence size.
+_IMAGE_SIZE = {}        # (project abspath, sequence_id) -> (w, h) on disk
+
+
+def sync_image_size(project_path, sequence_id, size, legacy_size):
+    # Preview worker thread, at the start of each pass (no write of this
+    # sequence in flight). size: the (w, h) frames are built at now;
+    # legacy_size: what a file with no ImageSize holds (the full sequence
+    # size). When the file holds another size, every stored frame joins
+    # DirtyImage and leaves the clean set, ImageSize becomes size, and
+    # True is returned (the frames are then rebuilt like any dirty frame;
+    # until then a player still shows the old ones, scaled to fit).
+    key = (os.path.abspath(project_path), int(sequence_id))
+    size = (int(size[0]), int(size[1]))
+    if _IMAGE_SIZE.get(key) == size:
+        return False
+    conn = _connect(project_path, sequence_id)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS PreviewInfo "
+                     "(key TEXT PRIMARY KEY, value TEXT)")
+        row = conn.execute("SELECT value FROM PreviewInfo "
+                           "WHERE key = 'ImageSize'").fetchone()
+        stored = (int(legacy_size[0]), int(legacy_size[1]))
+        if row and row[0]:
+            try:
+                w, h = str(row[0]).lower().split("x")
+                stored = (int(w), int(h))
+            except ValueError:
+                stored = None
+        changed = stored != size
+        if changed:
+            _mark_dirty_sql(conn, 0, 2 ** 62)
+        if changed or not row:
+            conn.execute("INSERT OR REPLACE INTO PreviewInfo (key, value) "
+                         "VALUES ('ImageSize', ?)", ("%dx%d" % size,))
+        conn.commit()
+    finally:
+        conn.close()
+    if changed:
+        s = clean_set(project_path, sequence_id)
+        with _CLEAN_LOCK:
+            s.clear()
+            # logged like an edit's mark, so nothing built before it can
+            # come back clean
+            _DIRTY_SEQ[0] += 1
+            _DIRTY_LOG.append((_DIRTY_SEQ[0], key, 0, 2 ** 62))
+            del _DIRTY_LOG[:-256]
+    _IMAGE_SIZE[key] = size
+    return changed
 
 
 # In-memory clean frames per preview file, so the ruler paint never opens

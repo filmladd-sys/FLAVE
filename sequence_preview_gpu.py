@@ -129,6 +129,9 @@ class HeadlessComposer(object):
                 if b.value:
                     cudart.cudaFree(b)
             self.gen_bufs = []
+            # Preview Size buffers (sequence_player_preview.encode_preview)
+            from sequence_player_preview import _free_scaled
+            _free_scaled(self)
         except Exception as e:
             print("Preview headless GPU release failed: %s" % e)
 

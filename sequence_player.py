@@ -49,6 +49,7 @@ from sequence_player_preview import (
     frame_jpeg, frames_jpeg_batch, _prefetch, _gen_buffers,
     _frames_locked, _frame_locked,
     FrameGenerate, FrameGenerateBatch, preview_jpeg_quality,
+    decode_play_jpegs, _free_scaled, _free_play_scratch,
 )
 
 # The player is waiting on a preview frame. The worker skips its idle yield
@@ -669,6 +670,8 @@ class SequencePlayer(QWindow):
                     cudart.cudaFree(buf)
             self._play_bufs = []
             self._play_free = []
+            _free_play_scratch(self)
+            _free_scaled(self)
             if self.img_res.value:
                 cudart.cudaGraphicsUnregisterResource(self.img_res)
             if self.res.value:
@@ -1112,7 +1115,9 @@ class SequencePlayer(QWindow):
             if not kept:
                 return []
             try:
-                dec.decode_many([jpeg for _f, jpeg in kept], bufs, self.row)
+                # BUILD 255: a JPEG of another size (Preview Size) is
+                # scaled to the sequence size on the card as it decodes
+                decode_play_jpegs(self, dec, [jpeg for _f, jpeg in kept], bufs)
             except Exception as e:
                 print(f"nvJPEG decode failed: {e}")
                 for buf in bufs:

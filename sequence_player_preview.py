@@ -21,7 +21,7 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QBuffer, QIODevice
+from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
 
 from sequence_timeline_sql import _get_global_setting
@@ -51,7 +51,7 @@ def frame_jpeg(self, frame, quality=90, snapshot=None, worker=False):
         return data
     # Qt fallback: encode the host RGB copy outside the lock
     try:
-        img = QImage(data, self.seq_w, self.seq_h, self.row, QImage.Format_RGB888)
+        img = _qt_preview_image(self, data)
         buf = QBuffer()
         buf.open(QIODevice.WriteOnly)
         if not img.save(buf, "JPG", quality):
@@ -80,7 +80,7 @@ def frames_jpeg_batch(self, frames, quality, snapshot):
             out.append(data)
             continue
         try:
-            img = QImage(data, self.seq_w, self.seq_h, self.row, QImage.Format_RGB888)
+            img = _qt_preview_image(self, data)
             buf = QBuffer()
             buf.open(QIODevice.WriteOnly)
             out.append(bytes(buf.data()) if img.save(buf, "JPG", quality) else None)
@@ -88,6 +88,169 @@ def frames_jpeg_batch(self, frames, quality, snapshot):
             print(f"Sequence Player frame_jpeg failed: {e}")
             out.append(None)
     return out
+
+def _qt_preview_image(self, data):
+    # Qt fallback (no nvJPEG): the host RGB composite as a QImage at the
+    # project's Preview Size (smooth scale when that is not 100%)
+    img = QImage(data, self.seq_w, self.seq_h, self.row, QImage.Format_RGB888)
+    pw, ph = _preview_dims(self)
+    if (pw, ph) != (self.seq_w, self.seq_h):
+        img = img.scaled(pw, ph, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    return img
+
+
+# ---------------------------------------------------------------------
+# Preview Size (BUILD 255, Project Settings > Project). Frames are always
+# composited at the full sequence size (every layer's scale, position,
+# crop, rotate and outline exactly as at 100%). Below 100% each composite
+# is then scaled down on the card (resample_rgb) into a small buffer and
+# nvJPEG encodes that, so only the smaller JPEG leaves the card and goes
+# to disk. The player scales any stored size back to the sequence size
+# (decode_play_jpegs for playback, QImage.scaled for a still frame).
+
+def _preview_dims(self):
+    # (w, h) the preview JPEGs are stored at for this composer's project
+    from sequence_preview import preview_size_percent, preview_frame_size
+    try:
+        pct = preview_size_percent(self.timeline._project_db())
+    except Exception:
+        pct = 100
+    return preview_frame_size(self.seq_w, self.seq_h, pct)
+
+
+def resample_rgb(self, src, sw, sh, sstride, dst, dw, dh):
+    # Scale an RGB device image (sw x sh, row stride sstride) into dst (dw x
+    # dh, rows dw * 3 bytes) on self.stream, nearest pixel, no sync. Runs
+    # the blend kernel as a plain copy: 3 bytes per pixel (opaque),
+    # opacity 1, no crop, color, rotate or outline, so every dst pixel is
+    # exactly one source pixel (the blend with alpha 255 keeps none of
+    # dst). Sampling is at pixel centers: ox / oy center the source the
+    # same way _blend does, inv_scale = sw / dw per axis.
+    nvcuda = _libs()[1]
+    c = ctypes
+    ptrs = [c.c_uint64(int(src.value)), c.c_uint64(int(dst.value))]
+    ptrs += [c.c_uint32(int(v)) for v in (sw, sh, sstride, 3, dw, dh)]
+    ptrs += [c.c_int32((int(sw) - int(dw)) // 2), c.c_int32((int(sh) - int(dh)) // 2),
+             c.c_float(float(sw) / float(dw)), c.c_int32(0), c.c_int32(0),
+             c.c_float(float(sh) / float(dh)), c.c_float(1.0),
+             c.c_float(0.0), c.c_float(0.0), c.c_uint32(0),
+             c.c_float(1.0), c.c_float(0.0), c.c_float(1.0),
+             c.c_float(1.0), c.c_float(0.0), c.c_float(0.0), c.c_uint32(0)]
+    args = (c.c_void_p * len(ptrs))(
+        *[c.cast(c.pointer(v), c.c_void_p) for v in ptrs])
+    grid = (int(dw) * int(dh) + 255) // 256
+    _check(nvcuda.cuLaunchKernel(self.kernel, grid, 1, 1, 256, 1, 1, 0,
+                                 self.stream, args, None), "resample")
+
+
+def _scaled_buffers(self, n, pw, ph):
+    # n Preview Size RGB device buffers (pw x ph, rows pw * 3), kept and
+    # grown up to the largest n asked (at most STATES_MAX: encode_preview
+    # works group by group); all freed when the size changes. Lock held.
+    if getattr(self, "_scaled_dims", None) != (pw, ph):
+        _free_scaled(self)
+        self._scaled_dims = (pw, ph)
+    cudart = _libs()[0]
+    while len(self._scaled) < n:
+        ptr = ctypes.c_void_p()
+        _check(cudart.cudaMalloc(ctypes.byref(ptr), pw * 3 * ph),
+               "preview size buffer malloc")
+        self._scaled.append(ptr)
+    return self._scaled[:n]
+
+
+def _free_scaled(self):
+    # Free the Preview Size buffers (composer / player release, size change)
+    cudart = _libs()[0]
+    for b in getattr(self, "_scaled", None) or []:
+        if b.value:
+            cudart.cudaFree(b)
+    self._scaled = []
+    self._scaled_dims = None
+
+
+def encode_preview(self, bufs, quality):
+    # nvJPEG bytes of full-size composites bufs, at the project's Preview
+    # Size. At 100% this is encode_many on the composites; below it, groups
+    # of STATES_MAX are scaled into the small buffers and encoded from
+    # there (encode_many syncs the stream, so the next group can reuse
+    # them). Lock held, self.nvj created.
+    pw, ph = _preview_dims(self)
+    if (pw, ph) == (self.seq_w, self.seq_h):
+        return self.nvj.encode_many(bufs, self.seq_w, self.seq_h, self.row, quality)
+    out = []
+    step = _NvJpegEncoder.STATES_MAX
+    for g0 in range(0, len(bufs), step):
+        group = bufs[g0:g0 + step]
+        small = _scaled_buffers(self, len(group), pw, ph)
+        for b, d in zip(group, small):
+            resample_rgb(self, b, self.seq_w, self.seq_h, self.row, d, pw, ph)
+        out.extend(self.nvj.encode_many(small, pw, ph, pw * 3, quality))
+    return out
+
+
+# Play scratch: device buffers a non-sequence-size JPEG decodes into before
+# decode_play_jpegs scales it into its play buffer (reader thread, under
+# the player's _play_lock)
+PLAY_SCRATCH_GROUP = 16
+
+
+def _play_scratch(self, n, nbytes):
+    # n scratch buffers of at least nbytes each (kept, regrown when larger)
+    cudart = _libs()[0]
+    if getattr(self, "_play_scratch_bytes", 0) < nbytes:
+        _free_play_scratch(self)
+        self._play_scratch_bytes = int(nbytes)
+    while len(self._play_scratch) < n:
+        ptr = ctypes.c_void_p()
+        _check(cudart.cudaMalloc(ctypes.byref(ptr), self._play_scratch_bytes),
+               "play scratch malloc")
+        self._play_scratch.append(ptr)
+    return self._play_scratch[:n]
+
+
+def _free_play_scratch(self):
+    # Free the play scratch buffers (player release, regrow)
+    cudart = _libs()[0]
+    for b in getattr(self, "_play_scratch", None) or []:
+        if b.value:
+            cudart.cudaFree(b)
+    self._play_scratch = []
+    self._play_scratch_bytes = 0
+
+
+def decode_play_jpegs(self, dec, jpegs, bufs):
+    # Player reader thread, _play_lock held: each JPEG into its
+    # sequence-size play buffer (rows self.row). Sequence-size JPEGs (and
+    # any whose header cannot be read) decode straight in, one batch.
+    # Any other size (a Preview Size below 100%, or frames stored before a
+    # size change) decodes into scratch buffers, groups of
+    # PLAY_SCRATCH_GROUP, and is scaled to the sequence size on the card
+    # (resample_rgb), so the texture, its copy and the present always get
+    # a sequence-size frame.
+    from sequence_preview import jpeg_size
+    full = (self.seq_w, self.seq_h)
+    direct, other = [], []
+    for jpeg, buf in zip(jpegs, bufs):
+        size = jpeg_size(jpeg)
+        if size is None or size == full:
+            direct.append((jpeg, buf))
+        else:
+            other.append((jpeg, buf, size))
+    if direct:
+        dec.decode_many([j for j, _b in direct], [b for _j, b in direct], self.row)
+    cudart = _libs()[0]
+    for g0 in range(0, len(other), PLAY_SCRATCH_GROUP):
+        group = other[g0:g0 + PLAY_SCRATCH_GROUP]
+        pitch = max(s[0] for _j, _b, s in group) * 3
+        rows = max(s[1] for _j, _b, s in group)
+        scratch = _play_scratch(self, len(group), pitch * rows)
+        dec.decode_many([j for j, _b, _s in group], scratch, pitch)
+        for (_j, buf, (w, h)), src in zip(group, scratch):
+            resample_rgb(self, src, w, h, pitch, buf, self.seq_w, self.seq_h)
+        _check(cudart.cudaStreamSynchronize(self.stream), "play resample sync")
+    return True
+
 
 def _prefetch(self, frames, snapshot, clips=None):
     # {((clip_id, path), src_frame): decoded frame} per clip whose source
@@ -511,8 +674,7 @@ def _jpeg_sink(quality):
         if lib is not None:
             if self.nvj is None:
                 self.nvj = _NvJpegEncoder(lib, self.stream)
-            jpegs = self.nvj.encode_many(bufs, self.seq_w, self.seq_h,
-                                         self.row, quality)
+            jpegs = encode_preview(self, bufs, quality)
             return [("jpeg", b) for b in jpegs]
         return [("raw", raw) for raw in host_rgb(self, bufs)]
     return sink
@@ -537,7 +699,15 @@ def _frame_locked(self, frame, snapshot, worker, quality):
         if lib is not None:
             if self.nvj is None:
                 self.nvj = _NvJpegEncoder(lib, self.stream)
-            out = self.nvj.encode(src, self.seq_w, self.seq_h, self.row, quality)
+            pw, ph = _preview_dims(self)
+            if (pw, ph) == (self.seq_w, self.seq_h):
+                out = self.nvj.encode(src, self.seq_w, self.seq_h, self.row, quality)
+            else:
+                # Preview Size below 100%: scale on the card, encode that
+                small = _scaled_buffers(self, 1, pw, ph)[0]
+                resample_rgb(self, src, self.seq_w, self.seq_h, self.row,
+                             small, pw, ph)
+                out = self.nvj.encode(small, pw, ph, pw * 3, quality)
             return ("jpeg", out)
         size = self.row * self.seq_h
         host = ctypes.create_string_buffer(size)
@@ -760,11 +930,15 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         else:
             ranges.append([a, b - 1, sig, items])
     plan = []
+    from sequence_preview import preview_size_percent
+    pw, ph = _preview_dims(gen)
     print("WORKER refresh plan: %d ranges, free %s of %s MB, keep %d MB, "
-          "pool %.1f MB/frame, Preview Frame Cap %d" % (
+          "pool %.1f MB/frame, Preview Frame Cap %d, Preview Size %d%% "
+          "(%dx%d)" % (
               len(ranges), (fv[0] >> 20) if fv else "?",
               (fv[1] >> 20) if fv else "?", keep >> 20,
-              pool_px / float(1 << 20), pool_n))
+              pool_px / float(1 << 20), pool_n,
+              preview_size_percent(gen.timeline._project_db()), pw, ph))
     for a, b, _sig, items in ranges:
         per, still, big_path, big_size = 0, 0, None, None
         per_all = {}
@@ -836,8 +1010,9 @@ def reserve_refresh_pool(project_path, sequence_id, n):
             for b in bufs:
                 _check(_libs()[0].cudaMemsetAsync(b, 0, gen.row * gen.seq_h,
                                                   gen.stream), "clear")
-            gen.nvj.encode_many(bufs, gen.seq_w, gen.seq_h, gen.row,
-                                preview_jpeg_quality())
+            # at the Preview Size: the states take that size's memory and
+            # the small buffers are allocated before free VRAM is read
+            encode_preview(gen, bufs, preview_jpeg_quality())
         return int(n)
     except Exception as e:
         print(f"Refresh pool reserve failed: {e}")

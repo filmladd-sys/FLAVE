@@ -163,6 +163,7 @@ class PreviewWorker(object):
         apply_dirty_queue()
         if total <= 0:
             return
+        self._sync_preview_size(project, sequence_id)
         if _refresh_all[0] or _play_priority[0]:
             # BUILD 247: a full pass (F5 refresh or Play fill) is timed
             plog.begin("F5 refresh" if _refresh_all[0] else "Play fill",
@@ -180,6 +181,27 @@ class PreviewWorker(object):
             batch.close()
             self.saved += n
             self._done += n
+
+    def _sync_preview_size(self, project, sequence_id):
+        # BUILD 255: the stored previews must be at the project's Preview
+        # Size (sequence size x percent). When the preview file holds
+        # another size (setting or sequence size changed), every frame is
+        # marked dirty (sequence_preview.sync_image_size) and the ruler
+        # repaints (saved is its repaint counter).
+        try:
+            from sequence_preview import (preview_size_percent,
+                                          preview_frame_size, sync_image_size)
+            from sequence_preview_gpu import _sequence_size
+            full = _sequence_size(project, sequence_id)
+            pct = preview_size_percent(project)
+            size = preview_frame_size(full[0], full[1], pct)
+            if sync_image_size(project, sequence_id, size, full):
+                print("WORKER preview size: %d%% (%dx%d of %dx%d); stored "
+                      "frames were another size, all marked dirty" % (
+                          pct, size[0], size[1], full[0], full[1]))
+                self.saved += 1
+        except Exception as e:
+            print(f"Preview size check failed: {e}")
 
     def _commit(self, batch, wait=True):
         # Commit the open transaction; counts rows for the ruler repaint and
@@ -257,7 +279,11 @@ class PreviewWorker(object):
             # wakes the worker, then a retarget restarts the pass) reuses
             # the plan when nothing it depends on changed; a finished pass
             # clears it. Each range's pool fit still rechecks free VRAM.
-            pkey = (project, sequence_id, total, cap, snapshot)
+            # (the Preview Size is part of it: the nvJPEG states are
+            # warmed and measured at that size)
+            from sequence_preview import preview_size_percent
+            pkey = (project, sequence_id, total, cap, snapshot,
+                    preview_size_percent(project))
             plan = None
             if self._plan is not None:
                 try:
