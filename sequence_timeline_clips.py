@@ -1196,8 +1196,18 @@ def _clip_context_menu(self, clip, pos):
         menu = QMenu(self)
         clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
         key_menu = menu.addMenu("Key")
-        key_click_action = key_menu.addAction("At Mouse Click")
-        key_tick_action = key_menu.addAction("At Timeline Tick")
+        key_click_action = key_menu.addAction("Add At Mouse Click")
+        key_tick_action = key_menu.addAction("Add At Timeline Click")
+        # BUILD 260: keys outside the clip's [in, out) of the right-clicked
+        # keyframe clip, or of every selected keyframe clip when it is
+        # selected; disabled when there are none
+        from keyframe import keys_beyond_horizon
+        horizon_clips = [clip]
+        if clip[0] in self._selected_clip_ids:
+            horizon_clips += [c for c in self._selected_clips()
+                              if c[0] != clip[0] and is_keyframe_clip_id(c[0])]
+        horizon_action = key_menu.addAction("Delete Keys Beyond Event Horizon")
+        horizon_action.setEnabled(any(keys_beyond_horizon(c) for c in horizon_clips))
         rename_action = menu.addAction("Rename")
         # BUILD 221: a new keyframe clip of any type on this track, starting
         # at this clip's out frame (the Add Keyframe Clip dialog; it fills
@@ -1222,6 +1232,9 @@ def _clip_context_menu(self, clip, pos):
         elif action == key_tick_action:
             # Playhead frame; add_key clamps it to the clip [in, out)
             _add_key(self, clip, int(self.current_frame))
+        elif action == horizon_action:
+            from keyframe import delete_keys_beyond_horizon
+            delete_keys_beyond_horizon(self, horizon_clips)
         elif action == add_after_action:
             self.add_keyframe_clip(self._clip_track_id(clip),
                                    int(clip[2]) + max(1, int(clip[3])))

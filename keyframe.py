@@ -1370,6 +1370,59 @@ def delete_key(timeline, key_id, clip=None):
     timeline._after_clip_change("Deleted keyframe")
 
 
+# BUILD 260: Key > Delete Keys Beyond Event Horizon. Keys store absolute
+# sequence frames; the horizon is the keyframe clip's own range on the
+# timeline, [in, out) (in_frame up to and including the last frame of the
+# clip, the same range add_key clamps to). Keys before in or at / after
+# out are hidden by a trim but still shape the interpolation inside.
+
+def keys_beyond_horizon(clip):
+    # Keys of an in-memory keyframe clip whose frame is outside [in, out)
+    in_f = max(0, int(clip[2]))
+    out_f = in_f + max(1, int(clip[3]))
+    keys = clip[9] if len(clip) > 9 and clip[9] else []
+    return [k for k in keys
+            if not in_f <= int(k[1] if len(k) >= 3 else k[0]) < out_f]
+
+
+def delete_keys_beyond_horizon(timeline, clips):
+    # Delete the keys outside [in, out) of every keyframe clip in clips,
+    # one undo step. The refresh's snapshot diff marks the frames whose
+    # interpolation changed.
+    targets = [c for c in clips if is_keyframe_clip_id(c[0])]
+    if not any(keys_beyond_horizon(c) for c in targets):
+        timeline.status_bar.showMessage("No keys beyond the clip range", 3000)
+        return
+    project_db = timeline._project_db()
+    if not project_db:
+        return
+    from undo import push_undo
+    push_undo(project_db, "Delete keys beyond event horizon")
+    count = 0
+    try:
+        conn = sqlite3.connect(project_db)
+        cur = conn.cursor()
+        tables = key_tables(cur)
+        for c in targets:
+            db_id = db_id_from_mem(c[0])
+            cur.execute("SELECT in_frame, out_frame FROM keyframe_clips "
+                        "WHERE id = ?", (db_id,))
+            row = cur.fetchone()
+            if row is None:
+                continue
+            for table in tables:
+                cur.execute("DELETE FROM %s WHERE keyframe_clip_id = ? AND "
+                            "(frame < ? OR frame >= ?)" % table,
+                            (db_id, int(row[0]), int(row[1])))
+                count += max(0, cur.rowcount)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        QMessageBox.warning(timeline, "Delete Keys", "Could not delete: %s" % e)
+        return
+    timeline._after_clip_change("Deleted %d key(s) beyond the clip range" % count)
+
+
 def key_context_menu(timeline, key_hit, pos):
     # Right-click on a key box: Edit Keyframe / Delete Keyframe
     from PySide6.QtWidgets import QMenu
