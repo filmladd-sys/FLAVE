@@ -468,6 +468,13 @@ class SequenceTimeline(QMainWindow):
     def _create_menus(self):
         menubar = self.menuBar()
 
+        # File menu: Exit quits FLAVE the same way as Project Manager's
+        # File > Exit (its closeEvent saves the open windows, then quits)
+        file_menu = menubar.addMenu("File")
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self._exit_app)
+        file_menu.addAction(exit_action)
+
         # Edit menu (in-memory clipboard per sequence, timeline_clipboard.py)
         edit_menu = menubar.addMenu("Edit")
         # BUILD 156: the shortcut text only (the keys are the QShortcuts
@@ -754,6 +761,14 @@ class SequenceTimeline(QMainWindow):
             return
         if action in acts:
             acts[action]()
+
+    def _exit_app(self):
+        # Project Manager is found by class name (it may run as __main__)
+        for w in QApplication.topLevelWidgets():
+            if type(w).__name__ == "ProjectManager":
+                w.close()
+                return
+        QApplication.quit()
 
     def _status_bar_menu(self, pos):
         text = self.status_bar.currentMessage()
