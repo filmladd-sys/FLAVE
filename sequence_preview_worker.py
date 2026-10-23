@@ -16,6 +16,13 @@
 # sequence_player_preview.py (block comment above _composite_by_layer).
 # This module walks the frames, fits the pool per range and runs the
 # per-batch guards.
+# BUILD 318: while a render (export) runs (set_export_pause, counted per
+# render) the worker starts no pass: no playhead frame, no F5 refresh, no
+# Play fill. The pass in progress stops at its next gen check and its
+# refresh pool is released; export_pause_ready tells the render when the
+# worker is out of its pass. A new F5 request is refused while paused
+# (set_refresh_all returns False); the request in progress is kept and
+# runs again after the last render ends, which wakes the worker once.
 
 import threading
 import time
@@ -61,6 +68,9 @@ class PreviewWorker(object):
         # (inputs, plan) of the refresh pass in progress, so a restarted
         # pass with the same inputs does not plan twice
         self._plan = None
+        # BUILD 318: True from taking a target until the pass's cleanup
+        # (pool release) is done; read by export_pause_ready
+        self._in_pass = False
         self._thread = threading.Thread(target=self._run, name="PreviewWorker",
                                         daemon=True)
         self._thread.start()
@@ -112,7 +122,9 @@ class PreviewWorker(object):
         while True:
             idle_release = False
             with self._cond:
-                while self._target is None or self._done_gen == self._gen:
+                # BUILD 318: no pass while a render runs (_export_pause)
+                while (self._target is None or self._done_gen == self._gen
+                       or _export_pause[0]):
                     if self._target is None and _headless_active():
                         # BUILD 141: timeline closed: free the headless GPU
                         # composite (outside the condition: it takes the
@@ -122,7 +134,9 @@ class PreviewWorker(object):
                     self._cond.wait()
                 target = self._target
                 gen = self._gen
+                self._in_pass = True
             if idle_release:
+                self._in_pass = False
                 _release_headless()
                 continue
             try:
@@ -144,6 +158,15 @@ class PreviewWorker(object):
                     self._pool_key = None
                     # Idle: the timeline status clears
                     self.progress = None
+                elif _export_pause[0]:
+                    # BUILD 318: stopped for a render: free the pool and
+                    # drop the plan now (the render needs the memory); the
+                    # requests stay and the pass runs again after it
+                    self._plan = None
+                    pool = self._pool_key if self._pool_n else None
+                    self._pool_n = 0
+                    self._pool_key = None
+                    self.progress = None
                 else:
                     pool = None
             if pool is not None:
@@ -154,6 +177,7 @@ class PreviewWorker(object):
                     release_refresh_pool(pool[0], pool[1])
                 except Exception as e:
                     print(f"Refresh pool release failed: {e}")
+            self._in_pass = False       # BUILD 318
 
     def _pass(self, target, gen):
         from sequence_player import FrameGenerate
@@ -717,6 +741,40 @@ _gui_beat = [0.0]
 # BUILD 317: (sequence_id, message) of a refresh pass aborted for lack of
 # VRAM, set on the worker thread, taken on the GUI thread
 _refresh_abort = [None]
+# BUILD 318: number of renders (exports) running; > 0 = no preview pass
+_export_pause = [0]
+EXPORT_PAUSE_TEXT = "Preview rendering is paused while an export is running."
+
+
+def set_export_pause(on):
+    # BUILD 318: a render starts (on) or ends (off), any thread. Under the
+    # worker lock with a gen bump: the start stops the pass in progress at
+    # its next gen check; the end of the last render wakes the worker once.
+    w = _worker
+    if w is None:
+        _export_pause[0] = (_export_pause[0] + 1 if on
+                            else max(0, _export_pause[0] - 1))
+        return
+    with w._cond:
+        if on:
+            _export_pause[0] += 1
+        else:
+            _export_pause[0] = max(0, _export_pause[0] - 1)
+        if on or _export_pause[0] == 0:
+            w._gen += 1
+            w._cond.notify()
+
+
+def export_paused():
+    # BUILD 318: True while a render runs (preview rendering paused)
+    return _export_pause[0] > 0
+
+
+def export_pause_ready():
+    # BUILD 318: paused and the worker is out of its pass (its refresh
+    # pool released): the render may allocate its GPU composer
+    w = _worker
+    return _export_pause[0] > 0 and (w is None or not w._in_pass)
 
 
 def take_refresh_abort(sequence_id=None):
@@ -731,7 +789,10 @@ def take_refresh_abort(sequence_id=None):
 
 def set_refresh_all(on):
     # Set under the worker lock with a gen bump, so a pass that ends now
-    # (old gen) cannot clear the new request
+    # (old gen) cannot clear the new request.
+    # BUILD 318: a new request is refused (False) while a render runs
+    if on and _export_pause[0]:
+        return False
     if on:
         plog.begin("F5 refresh", "requested")     # BUILD 247
         _refresh_abort[0] = None    # BUILD 317: a new request drops an old abort
@@ -740,11 +801,12 @@ def set_refresh_all(on):
     w = _worker
     if w is None:
         _refresh_all[0] = 1 if on else 0
-        return
+        return True
     with w._cond:
         _refresh_all[0] = 1 if on else 0
         w._gen += 1
         w._cond.notify()
+    return True
 
 
 def set_play_priority(on):

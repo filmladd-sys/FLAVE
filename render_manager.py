@@ -18,6 +18,14 @@
 # those clips decode that proxy (timeline_snapshot(tl, use_proxies=False,
 # render_deint=True)); every other clip and percent stays the original.
 # Scale math stays based on the original size.
+# BUILD 318: H.264 over 4096 pixels wide or high never uses h264_nvenc
+# (the NVENC H.264 hardware limit): that render uses hevc_nvenc when its
+# test encode works, else libx264, with a non-modal warning at the start
+# (encoder_for); the codec choice itself is unchanged. While a render
+# runs the preview worker renders nothing (sequence_preview_worker
+# set_export_pause): Render waits for the worker's current pass to stop
+# before the render's GPU composer is created, and every end of the
+# render (done, failed, cancelled, window closed) resumes the preview.
 # ASCII only.
 
 import os
@@ -304,6 +312,30 @@ def pick_encoder(codec="H.264", ffmpeg="ffmpeg"):
     return cpu
 
 
+# BUILD 318: largest width / height the NVENC H.264 encoder takes (all
+# NVIDIA GPUs); H.265 NVENC goes to 8192 on Pascal and newer
+H264_NVENC_MAX = 4096
+H264_LIMIT_TEXT = ("H.264 hardware encoding is limited to %d pixels. "
+                   "This %s export will use %s.")
+
+
+def encoder_for(codec, width, height, ffmpeg="ffmpeg"):
+    # BUILD 318: (encoder, warning text or "") for a render of width x
+    # height. pick_encoder, except that h264_nvenc over H264_NVENC_MAX
+    # in either direction becomes hevc_nvenc (its test encode works) or
+    # libx264, with the warning text for the user.
+    enc = pick_encoder(codec, ffmpeg)
+    if enc != "h264_nvenc" or (int(width) <= H264_NVENC_MAX
+                               and int(height) <= H264_NVENC_MAX):
+        return enc, ""
+    size = "%dx%d" % (int(width), int(height))
+    if nvenc_works("hevc_nvenc", ffmpeg):
+        return "hevc_nvenc", H264_LIMIT_TEXT % (H264_NVENC_MAX, size,
+                                                "H.265 (NVENC) instead")
+    return "libx264", H264_LIMIT_TEXT % (H264_NVENC_MAX, size,
+                                         "CPU H.264 (slower)")
+
+
 # ---------------------------------------------------------------- DB reads
 
 def render_length_frames(project_db, sequence_id):
@@ -456,6 +488,7 @@ class RenderJob(object):
         self.p = params
         self.frame_source = frame_source
         self.on_done = on_done            # on_done(ok, message), any thread
+        self.on_warn = None               # BUILD 318: on_warn(text), any thread
         self.cancelled = False
         self.proc = None
         self.thread = None
@@ -530,8 +563,16 @@ class RenderJob(object):
                     lang = language_tag(p.get("languages", []))
             if self.cancelled:
                 return False, "Render cancelled."
-            enc = p.get("encoder") or pick_encoder(p.get("codec", "H.264"),
-                                                   p.get("ffmpeg", "ffmpeg"))
+            enc = p.get("encoder")
+            if not enc:
+                # BUILD 318: H.264 over 4096 falls back (encoder_for)
+                enc, warn = encoder_for(p.get("codec", "H.264"), p["width"],
+                                        p["height"], p.get("ffmpeg", "ffmpeg"))
+                if warn and self.on_warn is not None:
+                    try:
+                        self.on_warn(warn)
+                    except Exception:
+                        pass
             cmd = build_ffmpeg_cmd(out_path, p["width"], p["height"], p["fps"],
                                    enc, p["gop"], p["target_mbps"], p["burst_mbps"],
                                    p["faststart"], wav, p["stereo"], srt, lang,
@@ -644,6 +685,7 @@ def _make_window_class():
 
     class _Bridge(QObject):
         done = Signal(bool, str)
+        warn = Signal(str)      # BUILD 318: encoder fallback warning
 
     class RenderManagerWindow(QMainWindow):
         def __init__(self, timeline):
@@ -655,6 +697,11 @@ def _make_window_class():
             self._user_cancel = False
             self._bridge = _Bridge()
             self._bridge.done.connect(self._on_done, Qt.QueuedConnection)
+            self._bridge.warn.connect(self._on_warn, Qt.QueuedConnection)
+            # BUILD 318: [True] while this window holds the preview export
+            # pause (set_export_pause); _unpause clears it exactly once
+            self._pause = None
+            self._pause_wait = False
             from sequence_timeline_sql import _load_sequence_name
             self.seq_name = _load_sequence_name(self.sequence_id) or (
                 "Sequence %d" % self.sequence_id)
@@ -757,10 +804,56 @@ def _make_window_class():
                 self.unsetCursor()
             self.status.setText(text)
 
+        def _unpause(self, token):
+            # BUILD 318: release this render's preview export pause once
+            # (any thread); the last release wakes the preview worker
+            if token is not None and token[0]:
+                token[0] = False
+                try:
+                    from sequence_preview_worker import set_export_pause
+                    set_export_pause(False)
+                except Exception as e:
+                    print(f"Preview resume failed: {e}")
+
         def _render(self):
-            if self.job is not None:
+            if self.job is not None or self._pause_wait:
                 return
             self._user_cancel = False
+            # BUILD 318: the preview worker stops rendering for the whole
+            # render; the GPU composer is created once its pass has stopped
+            try:
+                from sequence_preview_worker import set_export_pause
+                set_export_pause(True)
+                self._pause = [True]
+            except Exception as e:
+                print(f"Preview pause failed: {e}")
+                self._pause = None
+            self._pause_wait = True
+            self._set_busy(True, "Pausing preview rendering...")
+            self._render_when_paused()
+
+        def _render_when_paused(self):
+            # BUILD 318: poll (50 ms, GUI thread) until the preview worker
+            # is out of its pass, then start; Cancel / close stop the wait
+            if not self._pause_wait:
+                return
+            if self._closing:
+                self._pause_wait = False
+                self._unpause(self._pause)
+                self._pause = None
+                return
+            try:
+                from sequence_preview_worker import export_pause_ready
+                ready = export_pause_ready()
+            except Exception:
+                ready = True
+            if not ready:
+                QTimer.singleShot(50, self._render_when_paused)
+                return
+            self._pause_wait = False
+            self._render_start()
+
+        def _render_start(self):
             # BUILD 142: no Sequence Player and no OpenGL wait: the render
             # composites on its own headless GPU composer
             # from sequence_player import open_player_for
@@ -823,6 +916,7 @@ def _make_window_class():
                 self._fail("Could not prepare the render: %s" % e)
                 return
             gpu = _RenderGpu(player)
+            token = self._pause     # BUILD 318: released by done() (or _fail)
 
             def source(frames):
                 return gpu.frames_rgb(frames, snapshot)
@@ -832,17 +926,40 @@ def _make_window_class():
                     gpu.close()
                 except Exception:
                     pass
+                # BUILD 318: render GPU memory freed: the preview resumes
+                self._unpause(token)
                 self._bridge.done.emit(bool(ok), str(msg))
 
             self.job = RenderJob(params, source, done)
+            self.job.on_warn = self._bridge.warn.emit
             self._set_busy(True, "Rendering %d frames to %s ..." % (total, params["out_path"]))
             self.job.start()
+            self._pause = None      # BUILD 318: done() owns the release now
 
         def _fail(self, msg):
             self.job = None
+            self._unpause(self._pause)      # BUILD 318
+            self._pause = None
             self._set_busy(False, "")
             from proxy_manager import show_message
             show_message(self, "Render Manager", msg)
+
+        def _on_warn(self, text):
+            # BUILD 318: encoder fallback (encoder_for): status line and a
+            # non-modal message box; the render goes on
+            if self._closing:
+                return
+            self.status.setText(text + "\n" + self.status.text())
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                box = QMessageBox(QMessageBox.Warning, "Render Manager", text,
+                                  QMessageBox.Ok, self)
+                box.setWindowModality(Qt.NonModal)
+                box.setAttribute(Qt.WA_DeleteOnClose, True)
+                box.show()
+                self._warn_box = box
+            except Exception as e:
+                print(f"Render warning failed: {e}")
 
         # ---- render end (GUI thread, queued from the render thread)
 
@@ -874,6 +991,13 @@ def _make_window_class():
                 self.job.cancel()
                 self.status.setText("Cancelling the render...")
                 return
+            if self._pause_wait:
+                # BUILD 318: still waiting for the preview to pause
+                self._pause_wait = False
+                self._unpause(self._pause)
+                self._pause = None
+                self._set_busy(False, "Render cancelled.")
+                return
             self.close()
 
         def closeEvent(self, event):
@@ -881,6 +1005,11 @@ def _make_window_class():
             self._closing = True
             if self.job is not None:
                 self.job.cancel()
+            if self._pause_wait:
+                # BUILD 318: closed while waiting for the preview to pause
+                self._pause_wait = False
+                self._unpause(self._pause)
+                self._pause = None
             if _open_windows.get(self.sequence_id) is self:
                 del _open_windows[self.sequence_id]
             event.accept()

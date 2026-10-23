@@ -593,6 +593,8 @@ class SequenceTimeline(QMainWindow):
         # starts; normal editing only rebuilds the playhead frame
         if self.sequence_id is None:
             return
+        if self._export_refused():      # BUILD 318
+            return
         # BUILD 169: the audio mix thread starts first, then runs alongside
         # the image pass
         self._audio_auto_failed = False
@@ -607,6 +609,18 @@ class SequenceTimeline(QMainWindow):
         self._show_refresh_dialog()
         self._retarget_preview(force=True)
         self.status_bar.showMessage("Refreshing preview", 3000)
+
+    def _export_refused(self):
+        # BUILD 318: True (and a status bar note) while a render runs: the
+        # preview worker renders nothing then (set_export_pause)
+        try:
+            from sequence_preview_worker import export_paused, EXPORT_PAUSE_TEXT
+            if not export_paused():
+                return False
+            self.status_bar.showMessage(EXPORT_PAUSE_TEXT, 5000)
+            return True
+        except Exception:
+            return False
 
     def _show_refresh_dialog(self):
         # BUILD 167: progress window, closes itself when both are done
@@ -1833,6 +1847,9 @@ class SequenceTimeline(QMainWindow):
             if mixing:
                 self._show_refresh_dialog()
             self._start_clock()
+            return
+        if self._export_refused():      # BUILD 318: no fill during a render
+            self._stop_play()
             return
         self._play_filling = True
         try:
