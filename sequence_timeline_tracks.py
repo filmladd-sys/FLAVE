@@ -158,10 +158,12 @@ def _toggle_collapse_at(self, pos):
 # ---------------------------------------------------------------- track selection
 # Left-click a Name cell: select only that track (yellow Name outline, same
 # as the right-click menu outline). Shift+left-click: select every track
-# from the last plain-clicked track to this one. Click the Name column below
-# the tracks: clear. Kept by track id in self._selected_track_ids, so it
-# survives refresh and track moves. Open / Collapse in the track menu acts
-# on these tracks.
+# from the last plain-clicked track to this one. Ctrl+Shift+left-click: add
+# just this track to the selection (already selected: stays selected; the
+# anchor is unchanged). Ctrl+left-click alone: same as a plain click. Click
+# the Name column below the tracks: clear. Kept by track id in
+# self._selected_track_ids, so it survives refresh and track moves. Open /
+# Collapse in the track menu acts on these tracks.
 
 def _track_row_ids(self):
     # Track id of each table row, top to bottom (None for a row without one)
@@ -181,6 +183,9 @@ def _track_name_click(self, event, pos):
     if row < 0 or row >= len(ids) or ids[row] is None:
         self._selected_track_ids = set()
         self._track_anchor_id = None
+    elif ((event.modifiers() & Qt.ShiftModifier)
+          and (event.modifiers() & Qt.ControlModifier)):
+        self._selected_track_ids = set(self._selected_track_ids) | {ids[row]}
     elif (event.modifiers() & Qt.ShiftModifier) and self._track_anchor_id in ids:
         lo, hi = sorted((ids.index(self._track_anchor_id), row))
         self._selected_track_ids = {t for t in ids[lo:hi + 1] if t is not None}
