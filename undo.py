@@ -337,6 +337,10 @@ def _refresh_after_restore(project_path, message):
                 # diff (footage paths included) marks what the undo changed
                 # tl._mark_preview_dirty([WHOLE_RANGE])
                 tl._after_clip_change(message)
+                # BUILD 316: an undone / redone resolution change rebuilds
+                # the open Sequence Player at the restored size
+                from sequence_player import sync_player_size
+                sync_player_size(tl)
             except Exception as e:
                 print(f"Undo timeline refresh failed: {e}")
     except Exception:

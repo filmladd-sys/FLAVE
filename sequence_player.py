@@ -2285,3 +2285,26 @@ def close_player_for(timeline):
     if player is not None and not player.closed:
         player.close()
     timeline._player = None
+
+
+def sync_player_size(timeline):
+    # BUILD 316: the player keeps its sequence size (GL texture, CUDA
+    # buffers) from when it opened. When the sequence size changed
+    # (Sequence Settings resolution, or an undo / redo of it), the open
+    # player is closed and opened again at the new size (geometry and
+    # fullscreen kept). True when it was rebuilt.
+    player = getattr(timeline, "_player", None)
+    if player is None or player.closed:
+        return False
+    try:
+        size = tuple(int(v) for v in timeline._sequence_size())
+    except Exception:
+        return False
+    if (int(player.seq_w), int(player.seq_h)) == size:
+        return False
+    full = player.visibility() == QWindow.FullScreen
+    close_player_for(timeline)
+    player = open_player_for(timeline)
+    if full and player is not None:
+        player.showFullScreen()
+    return True
