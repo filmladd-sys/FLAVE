@@ -15,7 +15,11 @@
 # '#RRGGBBAA'), blur radius, angle (degrees clockwise from up, 135 =
 # down-right; text_clip.shadow_delta) and offset (sequence px). The on
 # switch and the color are one undo step each; the blur, angle and offset
-# boxes are one undo step per focus like the size box. ASCII only.
+# boxes are one undo step per focus like the size box. BUILD 315: every
+# style change (font, size, color, shadow fields; not the text) also stores
+# the clip's whole style as the last used text style in the global
+# settings (text_clip.remember_text_style), the style of the next new text
+# clip. ASCII only.
 
 import sqlite3
 from PySide6.QtCore import Qt, QEvent, QPoint
@@ -259,6 +263,13 @@ def apply_text_field(tl, clip_id, key, value, push=True):
     except sqlite3.Error as e:
         tl.status_bar.showMessage(f"Could not save text clip: {e}", 3000)
         return False
+    # BUILD 315: a style change: the clip's whole style is the last used
+    # text style (global settings; Add Text Clip uses it)
+    from text_clip import REMEMBER_KEYS, read_text_style, remember_text_style
+    if key in REMEMBER_KEYS:
+        style = read_text_style(project_db, clip_id)
+        if style is not None:
+            remember_text_style(style)
     if key == "text":
         for clips in (getattr(tl, "clips_by_track", None) or {}).values():
             for c in clips:

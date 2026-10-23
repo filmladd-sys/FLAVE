@@ -9,7 +9,10 @@
 # the load / add / update helpers (link_id: sequence_timeline_captions.
 # persist_caption_link_id) and the text image (QPainter -> RGBA
 # QImage, cached). Timeline wiring: sequence_timeline_text.py. Style
-# window: text_style_window.py. ASCII only.
+# window: text_style_window.py. BUILD 315: the last used text style
+# (REMEMBER_KEYS) is kept in the global settings (LAST_STYLE_PREFIX + key)
+# and is the style of every new text clip (remember_text_style /
+# remembered_text_style). ASCII only.
 
 import sqlite3
 import threading
@@ -80,18 +83,152 @@ def load_text_clips(cur, sequence_id, clips):
 
 
 def insert_text_clip(cur, sequence_id, track_id, start_frame, length_frames,
-                     seq_w, seq_h, family=None):
-    # New text_clips row with the defaults ('Text', default sans font,
-    # size seq_h / 12, white, centered); returns its in-memory id
+                     seq_w, seq_h, family=None, style=None):
+    # New text_clips row: 'Text', centered, with the defaults (default sans
+    # font, size seq_h / 12, white, shadow off with the column defaults);
+    # BUILD 315: style ({REMEMBER_KEYS key: value}, e.g.
+    # remembered_text_style) replaces the default of each key it has.
+    # Returns the in-memory id.
+    st = default_text_style(seq_h)
+    if family:
+        st["font_family"] = family
+    st.update(style or {})
     cur.execute(
         "INSERT INTO text_clips (sequence_id, track_id, start_frame, "
-        "length_frames, text, font_family, font_size, color, x, y) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "length_frames, text, x, y, %s) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, %s)" % (
+            ", ".join(REMEMBER_KEYS), ", ".join("?" * len(REMEMBER_KEYS))),
         (int(sequence_id), int(track_id), int(start_frame),
-         int(length_frames), DEFAULT_TEXT, family or default_font_family(),
-         default_font_size(seq_h), DEFAULT_COLOR,
-         int(seq_w) // 2, int(seq_h) // 2))
+         int(length_frames), DEFAULT_TEXT, int(seq_w) // 2, int(seq_h) // 2)
+        + tuple(st[k] for k in REMEMBER_KEYS))
     return text_mem_id(cur.lastrowid)
+
+
+# ---- BUILD 315: last used text style. Every style change of a text clip
+# made in the Text Style window (text_style_window.apply_text_field) stores
+# the clip's whole style (REMEMBER_KEYS: font, size, color and the five
+# shadow fields; not the text or the position) in the global settings, one
+# key per field (LAST_STYLE_PREFIX + key, e.g. text_style_last_font_size).
+# Add Text Clip gives the new clip that style; a missing or invalid stored
+# value (unknown key, font not installed, bad color, number out of range)
+# falls back to that field's default alone. Existing clips never change.
+
+REMEMBER_KEYS = ("font_family", "font_size", "color", "shadow_on",
+                 "shadow_color", "shadow_blur", "shadow_angle",
+                 "shadow_offset")
+LAST_STYLE_PREFIX = "text_style_last_"
+# Ranges of the Text Style window boxes
+FONT_SIZE_RANGE = (1, 2000)
+SHADOW_BLUR_RANGE = (0, 500)
+SHADOW_ANGLE_RANGE = (0, 359)
+SHADOW_OFFSET_RANGE = (0, 2000)
+
+
+def default_text_style(seq_h):
+    # {REMEMBER_KEYS key: default} of a new text clip
+    return {"font_family": default_font_family(),
+            "font_size": default_font_size(seq_h),
+            "color": DEFAULT_COLOR,
+            "shadow_on": 0,
+            "shadow_color": DEFAULT_SHADOW_COLOR,
+            "shadow_blur": DEFAULT_SHADOW_BLUR,
+            "shadow_angle": DEFAULT_SHADOW_ANGLE,
+            "shadow_offset": DEFAULT_SHADOW_OFFSET}
+
+
+def _font_installed(family):
+    # True when family is an installed font family (case-insensitive);
+    # True when the font list cannot be read (no GUI application)
+    try:
+        from PySide6.QtGui import QFontDatabase, QGuiApplication
+        if QGuiApplication.instance() is None:
+            return True
+        fams = QFontDatabase.families()
+    except Exception:
+        return True
+    low = family.lower()
+    return any(f.lower() == low for f in fams)
+
+
+def _hex_color(value, lengths):
+    # '#' + hex digits of one of lengths, else None
+    v = (value or "").strip() if isinstance(value, str) else ""
+    h = v[1:] if v.startswith("#") else ""
+    if len(h) not in lengths:
+        return None
+    try:
+        int(h, 16)
+    except ValueError:
+        return None
+    return v
+
+
+def _int_in(value, lo_hi):
+    try:
+        v = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if lo_hi[0] <= v <= lo_hi[1] else None
+
+
+def valid_style_value(key, value):
+    # The stored text of one REMEMBER_KEYS field as a clip value, or None
+    # when it is missing or invalid
+    if value is None:
+        return None
+    if key == "font_family":
+        v = str(value).strip()
+        return v if v and _font_installed(v) else None
+    if key == "font_size":
+        return _int_in(value, FONT_SIZE_RANGE)
+    if key == "color":
+        return _hex_color(value, (6,))
+    if key == "shadow_on":
+        v = str(value).strip()
+        return int(v) if v in ("0", "1") else None
+    if key == "shadow_color":
+        return _hex_color(value, (6, 8))
+    if key == "shadow_blur":
+        return _int_in(value, SHADOW_BLUR_RANGE)
+    if key == "shadow_angle":
+        return _int_in(value, SHADOW_ANGLE_RANGE)
+    if key == "shadow_offset":
+        return _int_in(value, SHADOW_OFFSET_RANGE)
+    return None
+
+
+def remembered_text_style(seq_h):
+    # {REMEMBER_KEYS key: value}: the last used style from the global
+    # settings, each missing / invalid field its default
+    style = default_text_style(seq_h)
+    try:
+        from global_settings import _get_global_setting
+    except Exception:
+        return style
+    for key in REMEMBER_KEYS:
+        try:
+            v = valid_style_value(
+                key, _get_global_setting(LAST_STYLE_PREFIX + key, None))
+        except Exception:
+            v = None
+        if v is not None:
+            style[key] = v
+    return style
+
+
+def remember_text_style(style):
+    # Store the REMEMBER_KEYS fields of style (a read_text_style dict) as
+    # the last used text style; None values are skipped. False on failure.
+    try:
+        from global_settings import _set_global_setting
+        for key in REMEMBER_KEYS:
+            v = (style or {}).get(key)
+            if v is not None:
+                _set_global_setting(LAST_STYLE_PREFIX + key, str(v))
+    except Exception as e:
+        # print(f"Could not remember text style: {e}")
+        return False
+    return True
 
 
 def read_text_style(project_db, clip_mem_id):

@@ -19,8 +19,10 @@ def _add_text_track(self):
 def add_text_clip(self, track_id, click_frame):
     # Add Text Clip: a DEFAULT_SECONDS text clip at the mouse mark with the
     # defaults (text_clip.insert_text_clip), one undo step; refused when it
-    # would overlap a text clip on this track
-    from text_clip import insert_text_clip, DEFAULT_SECONDS
+    # would overlap a text clip on this track. BUILD 315: its style is the
+    # last used text style (text_clip.remembered_text_style; each missing
+    # or invalid field its default).
+    from text_clip import insert_text_clip, remembered_text_style, DEFAULT_SECONDS
     project_db = self._project_db()
     if not project_db:
         return None
@@ -42,7 +44,8 @@ def add_text_clip(self, track_id, click_frame):
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         mem_id = insert_text_clip(cur, self.sequence_id, track_id,
-                                  start_frame, length_frames, seq_w, seq_h)
+                                  start_frame, length_frames, seq_w, seq_h,
+                                  style=remembered_text_style(seq_h))
         conn.commit()
         conn.close()
     except Exception as e:
