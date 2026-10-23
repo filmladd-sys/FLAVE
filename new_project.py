@@ -132,6 +132,27 @@ def project_path_for(folder, name):
     return os.path.join(folder, name + PROJECT_EXT)
 
 
+def ensure_project_schema(db_path):
+    # BUILD 320: project-load schema check, run by Project Manager when a
+    # project is opened (startup autoload and File > Open) before any window
+    # reads the project. Never raises.
+    # TEMP MIGRATION (BUILD 320): adds sequences.preview_size to old projects. Safe to delete once all projects have been opened in BUILD 320+; new_project.py _init_db already creates it.
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(sequences)").fetchall()]
+            if cols and "preview_size" not in cols:
+                # Nullable, no default: NULL = Project Default (Preview Size)
+                conn.execute("ALTER TABLE sequences ADD COLUMN preview_size INTEGER")
+                conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    # END TEMP MIGRATION (BUILD 320)
+    return None
+
+
 def create_project_db(db_path):
     # Create the project database at db_path (raises on failure)
     NewProjectWindow._init_db(None, db_path)
@@ -213,7 +234,8 @@ class NewProjectWindow(QMainWindow):
                 name TEXT NOT NULL,
                 width INTEGER NOT NULL,
                 height INTEGER NOT NULL,
-                fps REAL NOT NULL
+                fps REAL NOT NULL,
+                preview_size INTEGER
             )
         """)
 

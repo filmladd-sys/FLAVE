@@ -215,6 +215,57 @@ def set_preview_size_percent(project_path, pct):
     return pct
 
 
+# BUILD 320: a sequence can override the project Preview Size (Sequence
+# Settings > Preview Size). Kept in the project db as sequences.preview_size;
+# NULL (or a missing column / bad value) = Project Default. Read from the db
+# on every call so a Sequence Settings save or an undo restore is seen at
+# once; a failed read (db busy) keeps the last value read for that sequence.
+_SEQ_PCT_LAST = {}      # (normcase abspath, sequence id) -> override or None
+
+
+def sequence_preview_size_override(project_path, sequence_id):
+    # The sequence's Preview Size override percent, or None (Project Default)
+    if not project_path or sequence_id is None:
+        return None
+    try:
+        sid = int(sequence_id)
+    except (TypeError, ValueError):
+        return None
+    key = (os.path.normcase(os.path.abspath(project_path)), sid)
+    try:
+        conn = sqlite3.connect(project_path)
+        try:
+            row = conn.execute("SELECT preview_size FROM sequences WHERE id = ?",
+                               (sid,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as e:
+        if "no such column" in str(e).lower():
+            return None
+        return _SEQ_PCT_LAST.get(key)
+    except sqlite3.Error:
+        return _SEQ_PCT_LAST.get(key)
+    pct = None
+    if row and row[0] is not None:
+        try:
+            pct = int(row[0])
+        except (TypeError, ValueError):
+            pct = None
+        if pct not in PREVIEW_SIZE_CHOICES:
+            pct = None
+    _SEQ_PCT_LAST[key] = pct
+    return pct
+
+
+def sequence_preview_size_percent(project_path, sequence_id):
+    # The Preview Size percent a sequence renders its previews at: its
+    # override when set, else the project Preview Size
+    pct = sequence_preview_size_override(project_path, sequence_id)
+    if pct is None:
+        return preview_size_percent(project_path)
+    return pct
+
+
 def preview_frame_size(seq_w, seq_h, pct):
     # Stored preview frame size for a sequence of seq_w x seq_h at pct
     # percent: the sequence size itself at 100, else each side scaled and

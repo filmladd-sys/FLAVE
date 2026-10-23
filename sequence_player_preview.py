@@ -109,14 +109,23 @@ def _qt_preview_image(self, data):
 # to disk. The player scales any stored size back to the sequence size
 # (decode_play_jpegs for playback, QImage.scaled for a still frame).
 
-def _preview_dims(self):
-    # (w, h) the preview JPEGs are stored at for this composer's project
-    from sequence_preview import preview_size_percent, preview_frame_size
+def _preview_pct(self):
+    # BUILD 320: this composer's sequence Preview Size percent (the sequence
+    # override, else the project Preview Size)
+    from sequence_preview import sequence_preview_size_percent
+    sid = getattr(self, "sequence_id", None)
+    if sid is None:
+        sid = getattr(getattr(self, "timeline", None), "sequence_id", None)
     try:
-        pct = preview_size_percent(self.timeline._project_db())
+        return sequence_preview_size_percent(self.timeline._project_db(), sid)
     except Exception:
-        pct = 100
-    return preview_frame_size(self.seq_w, self.seq_h, pct)
+        return 100
+
+
+def _preview_dims(self):
+    # (w, h) the preview JPEGs are stored at for this composer's sequence
+    from sequence_preview import preview_frame_size
+    return preview_frame_size(self.seq_w, self.seq_h, _preview_pct(self))
 
 
 def resample_rgb(self, src, sw, sh, sstride, dst, dw, dh):
@@ -172,8 +181,9 @@ def _free_scaled(self):
 
 
 def encode_preview(self, bufs, quality):
-    # nvJPEG bytes of full-size composites bufs, at the project's Preview
-    # Size. At 100% this is encode_many on the composites; below it, groups
+    # nvJPEG bytes of full-size composites bufs, at the sequence's Preview
+    # Size (BUILD 320: its override, else the project's). At 100% this is
+    # encode_many on the composites; below it, groups
     # of max_states are scaled into the small buffers and encoded from
     # there (encode_many syncs the stream, so the next group can reuse
     # them). Lock held, self.nvj created.
@@ -1137,7 +1147,6 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         else:
             ranges.append([a, b - 1, sig, items])
     plan = []
-    from sequence_preview import preview_size_percent
     pw, ph = _preview_dims(gen)
     if preview_log.RENDER_LOG:
         print("WORKER refresh plan: %d ranges, free %s of %s MB, keep %d MB, "
@@ -1146,7 +1155,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
                   len(ranges), (fv[0] >> 20) if fv else "?",
                   (fv[1] >> 20) if fv else "?", keep >> 20,
                   pool_px / float(1 << 20), pool_n,
-                  preview_size_percent(gen.timeline._project_db()), pw, ph))
+                  _preview_pct(gen), pw, ph))
     for a, b, _sig, items in ranges:
         per, still, big_path, big_size = 0, 0, None, None
         per_all = {}

@@ -47,6 +47,9 @@ class SequenceAddDialog(QDialog):
         self.size_changed = False
         self.rescale_stats = None
         self._loaded_size = None
+        # BUILD 320: Preview Size override loaded (None = Project Default)
+        self._loaded_preview = None
+        self.preview_changed = False
 
         self.name_edit = QLineEdit()
         if not self.edit_mode:
@@ -63,10 +66,24 @@ class SequenceAddDialog(QDialog):
         self.size_combo.setCurrentIndex(preset_index(*DEFAULT_SIZE) or 0)
         self.fps_edit = QLineEdit("29.97")
 
+        # BUILD 320: Preview Size override (sequences.preview_size); item
+        # data = percent, None = Project Default (the project's Preview Size)
+        from sequence_preview import PREVIEW_SIZE_CHOICES, preview_size_percent
+        self.preview_combo = QComboBox()
+        try:
+            project_pct = preview_size_percent(self.project_db)
+        except Exception:
+            project_pct = 100
+        self.preview_combo.addItem("Project Default (%d%%)" % project_pct, None)
+        for pct in PREVIEW_SIZE_CHOICES:
+            self.preview_combo.addItem("%d%%" % pct, pct)
+        self.preview_combo.setCurrentIndex(0)
+
         form = QFormLayout()
         form.addRow("Name", self.name_edit)
         form.addRow("Resolution", self.size_combo)
         form.addRow("FPS", self.fps_edit)
+        form.addRow("Preview Size", self.preview_combo)
 
         create_btn = QPushButton("Save" if self.edit_mode else "Create")
         create_btn.setDefault(True)
@@ -100,6 +117,11 @@ class SequenceAddDialog(QDialog):
         self._set_size(int(width), int(height))
         self._loaded_size = (int(width), int(height))
         self.fps_edit.setText(f"{fps:g}")
+        from sequence_preview import sequence_preview_size_override
+        self._loaded_preview = sequence_preview_size_override(
+            self.project_db, self.sequence_id)
+        i = self.preview_combo.findData(self._loaded_preview)
+        self.preview_combo.setCurrentIndex(i if i >= 0 else 0)
         return True
 
     def _set_size(self, width, height):
@@ -111,6 +133,11 @@ class SequenceAddDialog(QDialog):
                                     (width, height))
             i = self.size_combo.count() - 1
         self.size_combo.setCurrentIndex(i)
+
+    def selected_preview(self):
+        # BUILD 320: the chosen Preview Size override, None = Project Default
+        data = self.preview_combo.currentData()
+        return int(data) if data is not None else None
 
     def selected_size(self):
         data = self.size_combo.currentData()
@@ -142,6 +169,8 @@ class SequenceAddDialog(QDialog):
         # Same aspect: one undo step, then the size and every sequence-pixel
         # value (sequence_resize.rescale_sequence) in one transaction.
         old = self._loaded_size if self.edit_mode else None
+        preview = self.selected_preview()
+        preview_set = preview != self._loaded_preview
         resize = old is not None and old != (width, height)
         if resize:
             from sequence_resize import same_aspect, NOT_IMPLEMENTED_TEXT
@@ -172,6 +201,11 @@ class SequenceAddDialog(QDialog):
                     (name, width, height, fps)
                 )
                 self.new_id = cur.lastrowid
+            # BUILD 320: Preview Size override, written only when it changed
+            # (Project Default on a new sequence leaves the column NULL)
+            if preview_set:
+                cur.execute("UPDATE sequences SET preview_size = ? WHERE id = ?",
+                            (preview, self.new_id))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -180,6 +214,13 @@ class SequenceAddDialog(QDialog):
             QMessageBox.warning(self, self.windowTitle(), f"Could not save sequence: {e}")
             return
 
+        if preview_set and self.edit_mode:
+            # BUILD 320: a new Preview Size for this sequence: wake the
+            # preview worker like a Project Settings Preview Size change (its
+            # size check marks this sequence's stored frames dirty)
+            self.preview_changed = True
+            from project_settings import _wake_preview_worker
+            _wake_preview_worker()
         self.accept()
 
 

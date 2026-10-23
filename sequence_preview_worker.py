@@ -208,17 +208,18 @@ class PreviewWorker(object):
             self._done += n
 
     def _sync_preview_size(self, project, sequence_id):
-        # BUILD 255: the stored previews must be at the project's Preview
-        # Size (sequence size x percent). When the preview file holds
+        # BUILD 255: the stored previews must be at the sequence's Preview
+        # Size (sequence size x percent; BUILD 320: the sequence override,
+        # else the project Preview Size). When the preview file holds
         # another size (setting or sequence size changed), every frame is
         # marked dirty (sequence_preview.sync_image_size) and the ruler
         # repaints (saved is its repaint counter).
         try:
-            from sequence_preview import (preview_size_percent,
+            from sequence_preview import (sequence_preview_size_percent,
                                           preview_frame_size, sync_image_size)
             from sequence_preview_gpu import _sequence_size
             full = _sequence_size(project, sequence_id)
-            pct = preview_size_percent(project)
+            pct = sequence_preview_size_percent(project, sequence_id)
             size = preview_frame_size(full[0], full[1], pct)
             if sync_image_size(project, sequence_id, size, full):
                 print("WORKER preview size: %d%% (%dx%d of %dx%d); stored "
@@ -358,9 +359,9 @@ class PreviewWorker(object):
             # clears it. Each range's pool fit still rechecks free VRAM.
             # (the Preview Size is part of it: the nvJPEG states are
             # warmed and measured at that size)
-            from sequence_preview import preview_size_percent
+            from sequence_preview import sequence_preview_size_percent
             pkey = (project, sequence_id, total, cap, snapshot,
-                    preview_size_percent(project))
+                    sequence_preview_size_percent(project, sequence_id))
             plan = None
             if self._plan is not None:
                 try:
