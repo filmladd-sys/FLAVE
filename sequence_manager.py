@@ -312,23 +312,31 @@ class SequenceManager(QMainWindow):
         self.status_bar.showMessage(f"Renamed to {new}")
 
     def _row_context_menu(self, pos):
+        # BUILD 323: "New Sequence" on top (same handler as the Sequence
+        # menu's Add New Sequence); on empty space it is the only item
+        sequence_id = None
         item = self.table.itemAt(pos)
-        if item is None:
-            return
-        name_item = self.table.item(item.row(), 0)
-        if name_item is None:
-            return
-        sequence_id = name_item.data(Qt.UserRole)
-        if sequence_id is None:
-            return
+        if item is not None:
+            name_item = self.table.item(item.row(), 0)
+            if name_item is not None:
+                sequence_id = name_item.data(Qt.UserRole)
 
         menu = QMenu(self)
-        edit_action = menu.addAction("Edit")
-        settings_action = menu.addAction("Settings")
-        replace_action = menu.addAction("Replace")
-        remove_action = menu.addAction("Remove")
+        new_action = menu.addAction("New Sequence")
+        new_action.setEnabled(self.add_action.isEnabled())
+        edit_action = settings_action = replace_action = remove_action = None
+        if sequence_id is not None:
+            menu.addSeparator()
+            edit_action = menu.addAction("Edit")
+            settings_action = menu.addAction("Settings")
+            replace_action = menu.addAction("Replace")
+            remove_action = menu.addAction("Remove")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if action == edit_action:
+        if action is None:
+            return
+        if action == new_action:
+            self._add_sequence()
+        elif action == edit_action:
             self._edit_sequence(sequence_id)
         elif action == settings_action:
             self._sequence_settings(sequence_id)
