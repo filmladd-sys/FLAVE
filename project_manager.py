@@ -122,6 +122,26 @@ def _ensure_icons_index_for(project_db):
         print("Icon index check failed: %s" % e)
 
 
+def _ensure_key_tables_for(project_db):
+    # BUILD 294: keyframe_border and keyframe_move tables (CREATE TABLE IF
+    # NOT EXISTS, new_project.py SQL) in a project made before they existed.
+    # TEMPORARY older-project check: remove it in the future, once every
+    # project in use has these tables from new_project.py.
+    if not project_db:
+        return
+    try:
+        import new_project
+        conn = sqlite3.connect(project_db)
+        try:
+            conn.execute(new_project.KEYFRAME_BORDER_SQL)
+            conn.execute(new_project.KEYFRAME_MOVE_SQL)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print("Key table check failed: %s" % e)
+
+
 def _ensure_undo_db_for(project_db):
     # {ProjectName}_Undo.db next to the project, created if missing
     try:
@@ -295,6 +315,7 @@ class ProjectManager(QMainWindow):
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
             _ensure_icons_index_for(path)
+            _ensure_key_tables_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -369,6 +390,7 @@ class ProjectManager(QMainWindow):
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
             _ensure_icons_index_for(path)
+            _ensure_key_tables_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

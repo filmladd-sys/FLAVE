@@ -526,10 +526,16 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # Frame rate conform (snapshot[19]): {footage_id: footage_fps / seq_fps}
     # for footage whose rate differs from the sequence (clip_source_frame)
     fps_conform = resolve_fps_conform(project_db, getattr(tl, "fps", None))
+    # BUILD 294: move keyframe clips, x (snapshot[20]) and y (snapshot[21])
+    # (keyframe.collect_move_clips)
+    from keyframe import collect_move_clips
+    move_x_clips, move_y_clips = collect_move_clips(
+        tl.clips_by_track, track_order)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
             gamma_clips, brightness_clips, contrast_clips, rotate_clips,
-            outline_clips) + tuple(outline_rgba_clips) + (fps_conform,)
+            outline_clips) + tuple(outline_rgba_clips) + (
+                fps_conform, move_x_clips, move_y_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -928,6 +934,11 @@ class SequencePlayer(QWindow):
         from keyframe import outline_for_link
         # Frame rate conform by footage id (snapshot[19], clip_source_frame)
         fps_conform = snapshot[19] if len(snapshot) > 19 else {}
+        # BUILD 294: move keyframes (snapshot[20] x, [21] y); their offset
+        # is added to the position X / Y offsets in pos_dx / pos_dy
+        move_x_clips = snapshot[20] if len(snapshot) > 20 else []
+        move_y_clips = snapshot[21] if len(snapshot) > 21 else []
+        from keyframe import move_offset_for_link
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -969,6 +980,12 @@ class SequencePlayer(QWindow):
                         pos_x_clips, link_id, frame, clip_order, self.seq_w)
                     pos_dy = position_y_offset(
                         pos_y_clips, link_id, frame, clip_order, self.seq_h)
+                    move = move_offset_for_link(
+                        move_x_clips, move_y_clips, link_id, frame,
+                        clip_order, self.seq_w, self.seq_h)
+                    if move is not None:
+                        pos_dx = (pos_dx or 0.0) + move[0]
+                        pos_dy = (pos_dy or 0.0) + move[1]
                     opacity = opacity_for_link(
                         opacity_clips, link_id, frame, clip_order)
                     crop_x = crop_offset_for_link(

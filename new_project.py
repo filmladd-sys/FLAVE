@@ -23,6 +23,33 @@ PROJECT_EXT = ".db"
 ICONS_INDEX_NAME = "idx_icons_lookup"
 ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
                    "ON icons (footage_id, frame_number, is_original, height)")
+# BUILD 222: keys of type-border keyframe clips (one row per key: absolute
+# sequence frame like keyframes.frame, border px and its RGBA color 0..255).
+# BUILD 294: keys of type-move keyframe clips (absolute sequence frame, x and
+# y the layer center in sequence px). Other types keep their keys in
+# keyframes. Also run on project open for older projects (project_manager
+# _ensure_key_tables_for).
+KEYFRAME_BORDER_SQL = """
+    CREATE TABLE IF NOT EXISTS keyframe_border (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        keyframe_clip_id INTEGER NOT NULL,
+        frame INTEGER NOT NULL,
+        px REAL NOT NULL,
+        r REAL NOT NULL,
+        g REAL NOT NULL,
+        b REAL NOT NULL,
+        a REAL NOT NULL
+    )
+"""
+KEYFRAME_MOVE_SQL = """
+    CREATE TABLE IF NOT EXISTS keyframe_move (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        keyframe_clip_id INTEGER NOT NULL,
+        frame INTEGER NOT NULL,
+        x REAL NOT NULL,
+        y REAL NOT NULL
+    )
+"""
 # Characters Windows does not allow in a file name, plus control characters
 _BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = set(["CON", "PRN", "AUX", "NUL"] +
@@ -272,21 +299,10 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
-        # BUILD 222: keys of type-border keyframe clips (one row per key:
-        # absolute sequence frame like keyframes.frame, border px and its
-        # RGBA color 0..255); other types keep their keys in keyframes
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS keyframe_border (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                keyframe_clip_id INTEGER NOT NULL,
-                frame INTEGER NOT NULL,
-                px REAL NOT NULL,
-                r REAL NOT NULL,
-                g REAL NOT NULL,
-                b REAL NOT NULL,
-                a REAL NOT NULL
-            )
-        """)
+        # BUILD 222 / 294: keys of type-border and type-move keyframe clips
+        # (KEYFRAME_BORDER_SQL, KEYFRAME_MOVE_SQL above)
+        cur.execute(KEYFRAME_BORDER_SQL)
+        cur.execute(KEYFRAME_MOVE_SQL)
 
         # Proxies of footage (path to the proxy file, size percentage).
         # BUILD 119: proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc';

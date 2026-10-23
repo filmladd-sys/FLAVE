@@ -18,7 +18,8 @@ import time
 SNAP_TABLES = ("clips", "keyframe_clips", "keyframes", "tracks", "footage",
                "sequences", "captions", "Marker",
                "sequence_children",   # BUILD 106: follows sequence clips
-               "keyframe_border")     # BUILD 222: border clip keys
+               "keyframe_border",     # BUILD 222: border clip keys
+               "keyframe_move")       # BUILD 294: move clip keys
 # Thumbnails follow footage only through a Footage Manager remove (BUILD
 # 235): that snapshot holds the icon rows of the removed footage ids
 ICONS_TABLE = "icons"
