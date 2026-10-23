@@ -87,7 +87,10 @@ class _Effect(object):
 
 
 class SnapshotIndex(object):
-    # Per-frame layer descriptor of one snapshot, by segment
+    # Per-frame layer descriptor of one snapshot, by segment. Layer
+    # descriptor: (kind, footage id, src, proxy, conform, effects); src is
+    # the source frame mapping of a video layer, the style tuple of a text
+    # layer (BUILD 309), else 0.
     def __init__(self, snap):
         rows = snap[0]
         clips_by_track = snap[1]
@@ -100,6 +103,11 @@ class SnapshotIndex(object):
         # clip's source frame is not frame + constant, so its desc holds
         # (in, start - d, speed), which fixes the mapping for every frame
         self.speeds = snap[28] if len(snap) > 28 else {}
+        # BUILD 309: text clip styles (snap[29], {clip id: (text, font,
+        # size, color, x, y)}); a text layer's src in desc is its style, so
+        # a text / style / position edit changes every frame of the clip.
+        # Move and trim change the clip edges like any clip.
+        self.text_styles = snap[29] if len(snap) > 29 else {}
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7)]
         # BUILD 147: + crop_x (snap[8]) and crop_y (snap[9]): their clip
@@ -183,6 +191,8 @@ class SnapshotIndex(object):
                 else:
                     src = int(c[7]) - (int(c[2]) - d)
                 conform = self.fps_conform.get(c[1])
+            elif kind == "text":
+                src = self.text_styles.get(c[0])
             else:
                 src = 0
             fx = []

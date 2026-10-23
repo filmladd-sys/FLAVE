@@ -5,7 +5,8 @@
 # volume; BUILD 147: crop_x / crop_y, BUILD 154: gamma / brightness /
 # contrast, BUILD 219: rotate, BUILD 222: border px / color, BUILD 294:
 # move x / y, BUILD 295: crop_xy x / y, BUILD 296: crop_edges, all via
-# SnapshotIndex.effects), enable / disable, gain and proxy switches (attributes of a clip,
+# SnapshotIndex.effects), enable / disable, gain and proxy switches and
+# (BUILD 309) a text clip's text / style / position (attributes of a clip,
 # so they change at its in / out). Between two markers the structure is
 # constant (same clips, same keyframe interpolation segment); only the
 # interpolated value moves (existing linear evaluation).

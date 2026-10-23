@@ -523,7 +523,8 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
         tid = item.data(Qt.UserRole)
         track_order[tid] = r
         kind = (item.data(Qt.UserRole + 4) or "").lower()
-        if kind not in ("video", "image"):
+        # BUILD 309: WYSIWYG Text tracks are layers too (kind "text")
+        if kind not in ("video", "image", "text"):
             continue
         rows.append((tid, bool(item.data(Qt.UserRole + 1)),
                      bool(item.data(Qt.UserRole + 2)), kind))
@@ -587,13 +588,20 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # BUILD 303: clip speed percent by clip id, only clips != 100
     # (snapshot[28], clip_speed.load_clip_speeds; _layer_items)
     clip_speeds = dict(getattr(tl, "_clip_speeds", None) or {})
+    # BUILD 309: text clip styles (snapshot[29], {text clip mem id: (text,
+    # font_family, font_size, color, x, y)}, text_clip.load_text_styles),
+    # read only when a text track is in the rows
+    text_styles = {}
+    if any(r[3] == "text" for r in rows):
+        from text_clip import load_text_styles
+        text_styles = load_text_styles(project_db, getattr(tl, "sequence_id", None))
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
             gamma_clips, brightness_clips, contrast_clips, rotate_clips,
             outline_clips) + tuple(outline_rgba_clips) + (
                 fps_conform, move_x_clips, move_y_clips,
                 crop_xy_x_clips, crop_xy_y_clips) + tuple(crop_edge_clips) + (
-                clip_speeds,)
+                clip_speeds, text_styles)
 
 
 # ---------------------------------------------------------------- window
@@ -1010,6 +1018,11 @@ class SequencePlayer(QWindow):
         # BUILD 303: clip speed (snapshot[28], {clip id: percent != 100})
         speeds = snapshot[28] if len(snapshot) > 28 else {}
         from clip_speed import source_pos
+        # BUILD 309: text clip styles (snapshot[29]); a text layer's path is
+        # its texture key (player_text.text_layer_path), source frame 0, and
+        # every linked keyframe effect applies as to an image layer
+        text_styles = snapshot[29] if len(snapshot) > 29 else {}
+        from player_text import text_layer_path
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -1026,10 +1039,15 @@ class SequencePlayer(QWindow):
                 start, length = clip[2], clip[3]
                 if not clip[5] or not (start <= frame < start + length):
                     continue
-                path = self._footage_path(clip[1])
                 orig_size = None
                 ratio = pframes = None
-                if path and clip[0] in proxies:
+                if kind == "text":
+                    style = text_styles.get(clip[0])
+                    path = (text_layer_path(clip[0], style, self.seq_w, self.seq_h)
+                            if style is not None else None)
+                else:
+                    path = self._footage_path(clip[1])
+                if path and kind != "text" and clip[0] in proxies:
                     # Proxy: same source frame, or (double rate / IVTC,
                     # BUILD 119) the source frame mapped by time
                     pr = proxies[clip[0]]
@@ -1858,6 +1876,22 @@ class SequencePlayer(QWindow):
             crop_edges = layer[17] if len(layer) > 17 else None  # BUILD 296
             if kind == "image":
                 item = self._image(path)
+                if item is not None:
+                    self._blend(item[0].value, item[1], item[2], item[3], 4,
+                                scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,
+                                orig_size=orig_size, opacity=opacity,
+                                crop_x=crop_x, crop_y=crop_y,
+                                gamma=gamma, brightness=brightness, contrast=contrast,
+                                rotate=rotate, outline=outline,
+                                crop_edges=crop_edges)
+                continue
+            if kind == "text":
+                # BUILD 309: the text clip's image (player_text), blended
+                # like a still with the same layer effects
+                from player_text import text_texture
+                styles = snapshot[29] if len(snapshot) > 29 else {}
+                item = text_texture(self, path, layer[6][0],
+                                    styles.get(layer[6][0]))
                 if item is not None:
                     self._blend(item[0].value, item[1], item[2], item[3], 4,
                                 scale=scale, pos_dx=pos_dx, pos_dy=pos_dy,

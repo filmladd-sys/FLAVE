@@ -8,7 +8,9 @@
 # as an undo step; typing in the text field, or in the size box, is one
 # undo step per focus of that field. The timeline label (first line of the
 # text) repaints at once. The window position is kept in the global
-# settings (POS_KEY). ASCII only.
+# settings (POS_KEY). BUILD 309: each change also schedules a preview
+# retarget (schedule_text_preview), which marks the clip's preview frames
+# stale. ASCII only.
 
 import sqlite3
 from PySide6.QtCore import Qt, QEvent, QPoint
@@ -181,7 +183,33 @@ def apply_text_field(tl, clip_id, key, value, push=True):
                 if c[0] == clip_id:
                     c[4] = first_line(value)
         tl.table.viewport().update()
+    schedule_text_preview(tl)
     return True
+
+
+# BUILD 309: a style edit changes the burned-in picture: one preview
+# retarget (new snapshot, mile marker diff marks the clip's frames dirty,
+# the shown frame redraws) PREVIEW_DELAY_MS after the last edit, so typing
+# does not snapshot the timeline per key
+PREVIEW_DELAY_MS = 150
+
+
+def schedule_text_preview(tl):
+    from PySide6.QtCore import QTimer
+    timer = getattr(tl, "_text_preview_timer", None)
+    if timer is None:
+        timer = QTimer(tl)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: _text_preview_now(tl))
+        tl._text_preview_timer = timer
+    timer.start(PREVIEW_DELAY_MS)
+
+
+def _text_preview_now(tl):
+    try:
+        tl._retarget_preview(force=True)
+    except Exception as e:
+        print(f"Text preview refresh failed: {e}")
 
 
 def selected_text_clip_id(tl):

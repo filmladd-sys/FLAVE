@@ -581,7 +581,7 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
             used.add(item[6][0])
-            if item[0] == "image":
+            if item[0] in ("image", "text"):      # BUILD 309: text textures
                 stills.add(item[1])
             elif len(item) > 16:
                 used_keys[item[6][0]] = item[16]
@@ -647,11 +647,12 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
 
 
 def track_stills(self, frames, snapshot, clips):
-    # Still (image) paths of the given clips in these frames
+    # Still (image) paths and text texture keys (BUILD 309) of the given
+    # clips in these frames
     out = set()
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
-            if item[0] == "image" and item[6][0] in clips:
+            if item[0] in ("image", "text") and item[6][0] in clips:
                 out.add(item[1])
     return out
 
@@ -1052,6 +1053,10 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         per, still, big_path, big_size = 0, 0, None, None
         per_all = {}
         for it in items:
+            if it[0] == "text":
+                # BUILD 309: a text texture is sequence size (no probe)
+                still += 4 * int(gen.seq_w) * int(gen.seq_h)
+                continue
             size = _source_size(it[1]) or (int(gen.seq_w), int(gen.seq_h))
             if it[0] == "image":
                 still += 4 * size[0] * size[1]

@@ -9,6 +9,7 @@
 # window: text_style_window.py. ASCII only.
 
 import sqlite3
+import threading
 
 TEXT_TRACK_TYPE = "text"
 TEXT_TRACK_LABEL = "WYSIWYG Text"
@@ -107,13 +108,40 @@ def write_text_field(cur, clip_mem_id, key, value):
                 (value, text_db_id(clip_mem_id)))
 
 
+def load_text_styles(project_db, sequence_id):
+    # BUILD 309: {mem id: (text, font_family, font_size, color, x, y)} of
+    # every text clip of the sequence (TEXT_STYLE_KEYS order), the
+    # compositor's text layers (timeline_snapshot index [29]). {} on any
+    # failure or a project without the table.
+    out = {}
+    if not project_db or sequence_id is None:
+        return out
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            rows = conn.execute(
+                "SELECT id, %s FROM text_clips WHERE sequence_id = ?" % ", ".join(
+                    TEXT_STYLE_KEYS), (int(sequence_id),)).fetchall()
+        finally:
+            conn.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        return out
+    for row in rows:
+        out[text_mem_id(row[0])] = tuple(row[1:])
+    return out
+
+
 # ---- Text image: the clip's box drawn at its place in a sequence-size
 # transparent frame (QImage ARGB32 premultiplied), the layer the
-# compositor blends like an image clip. Cached per (clip, text, style,
-# position, sequence size); a change of any of them makes a new entry.
+# compositor blends like an image clip (player_text uploads it). Cached
+# per (clip, text, style, position, sequence size); a change of any of
+# them makes a new entry. BUILD 309: at most _IMAGE_CACHE_MAX host images
+# (one is seq_w x seq_h x 4 bytes, 8 MB at 1080p); the GUI thread and
+# the compositor threads share the cache under _IMAGE_LOCK.
 
 _IMAGE_CACHE = {}
-_IMAGE_CACHE_MAX = 64
+_IMAGE_CACHE_MAX = 8
+_IMAGE_LOCK = threading.Lock()
 
 
 def text_font(family, size_px):
@@ -146,7 +174,8 @@ def render_text_image(text, family, size_px, color, x, y, seq_w, seq_h,
     y = int(seq_h) // 2 if y is None else y
     key = (clip_key, text, family, int(size_px or 1), color, int(x), int(y),
            int(seq_w), int(seq_h))
-    img = _IMAGE_CACHE.get(key)
+    with _IMAGE_LOCK:
+        img = _IMAGE_CACHE.get(key)
     if img is not None:
         return img
     img = QImage(int(seq_w), int(seq_h), QImage.Format_ARGB32_Premultiplied)
@@ -163,7 +192,8 @@ def render_text_image(text, family, size_px, color, x, y, seq_w, seq_h,
                        int(Qt.AlignHCenter | Qt.AlignTop), text)
         finally:
             p.end()
-    if len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
-        _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)))
-    _IMAGE_CACHE[key] = img
+    with _IMAGE_LOCK:
+        while len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
+            _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)))
+        _IMAGE_CACHE[key] = img
     return img
