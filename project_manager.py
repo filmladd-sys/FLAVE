@@ -145,6 +145,25 @@ def _ensure_key_tables_for(project_db):
         print("Key table check failed: %s" % e)
 
 
+def _ensure_text_clips_for(project_db):
+    # BUILD 308: text_clips table (WYSIWYG Text clips; CREATE TABLE IF NOT
+    # EXISTS, new_project.TEXT_CLIPS_SQL) in a project made before it
+    # existed. TEMPORARY older-project check: remove it in the future, once
+    # every project in use has the table from new_project.py.
+    if not project_db:
+        return
+    try:
+        import new_project
+        conn = sqlite3.connect(project_db)
+        try:
+            conn.execute(new_project.TEXT_CLIPS_SQL)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print("Text clip table check failed: %s" % e)
+
+
 def _ensure_speed_columns_for(project_db):
     # BUILD 303: clip speed column (speed_percent) on clips, captions and
     # keyframe_clips (clip_speed.ensure_speed_columns) in a project made
@@ -338,6 +357,7 @@ class ProjectManager(QMainWindow):
             _prune_proxies_for(path)
             _ensure_icons_index_for(path)
             _ensure_key_tables_for(path)
+            _ensure_text_clips_for(path)     # TEMPORARY (BUILD 308)
             _ensure_speed_columns_for(path)
             self._update_windows_menu()
 
@@ -414,6 +434,7 @@ class ProjectManager(QMainWindow):
             _prune_proxies_for(path)
             _ensure_icons_index_for(path)
             _ensure_key_tables_for(path)
+            _ensure_text_clips_for(path)     # TEMPORARY (BUILD 308)
             _ensure_speed_columns_for(path)
             self._update_windows_menu()
 

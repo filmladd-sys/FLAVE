@@ -434,10 +434,10 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
                         f"INSERT INTO {ktable} ({', '.join(knames)}) VALUES "
                         f"({', '.join('?' for _ in knames)})",
                         [kd[k] for k in knames])
-            elif table == "captions":
-                mem = -new_id
             else:
-                mem = new_id
+                # clips.id, -captions.id or a text clip id (BUILD 308)
+                from sequence_timeline_captions import mem_id_for
+                mem = mem_id_for(table, new_id)
             if table == "clips" and it.get("markers"):
                 from markers import insert_marker_rows
                 insert_marker_rows(cur, mem, it["markers"])
@@ -657,8 +657,9 @@ def apply_overwrite(cur, state, ranges):
             for n, (a, b) in enumerate(pieces[1:], 1):
                 new_id = _copy_row(cur, table, row_id,
                                    {"start_frame": a, "length_frames": b - a})
+                from sequence_timeline_captions import mem_id_for
                 extra.setdefault((st["link_id"], n), []).append(
-                    (table, new_id, -new_id))
+                    (table, new_id, mem_id_for(table, new_id)))
             cur.execute(
                 f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
                 (a0, b0 - a0, row_id))

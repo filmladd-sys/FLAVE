@@ -1,6 +1,7 @@
 # clip_speed.py
 # Clip speed (BUILD 303): one integer percent per timeline clip, 1 .. 1000,
-# default 100, stored in speed_percent on clips, captions and keyframe_clips
+# default 100, stored in speed_percent on clips, captions, keyframe_clips and
+# text_clips
 # (new_project.py; ensure_speed_columns adds it to an older project on
 # open). The timeline keeps {timeline clip id: speed} for clips whose speed
 # is not 100 (tl._clip_speeds, load_clip_speeds); the player snapshot copies
@@ -29,7 +30,7 @@ SPEED_MAX = 1000
 SPEED_DEFAULT = 100
 SPEED_COLUMN = "speed_percent"
 # Tables whose rows are timeline clips
-SPEED_TABLES = ("clips", "captions", "keyframe_clips")
+SPEED_TABLES = ("clips", "captions", "keyframe_clips", "text_clips")
 
 
 def ensure_speed_columns(conn):
@@ -57,10 +58,12 @@ def clamp_speed(value):
 
 
 def load_clip_speeds(cur, sequence_id):
-    # {timeline clip id: speed} of this sequence's clips, captions and
-    # keyframe clips whose speed is not 100 (ids as in clips_by_track:
-    # clips.id, -captions.id, keyframe.mem_id_from_db)
+    # {timeline clip id: speed} of this sequence's clips, captions,
+    # keyframe clips and text clips whose speed is not 100 (ids as in
+    # clips_by_track: clips.id, -captions.id, keyframe.mem_id_from_db,
+    # text_clip.text_mem_id)
     from keyframe import mem_id_from_db
+    from text_clip import text_mem_id
     out = {}
     queries = (
         ("clips", "SELECT c.id, c.%s FROM clips c JOIN tracks t ON t.id = "
@@ -70,6 +73,9 @@ def load_clip_speeds(cur, sequence_id):
                      "AND %s != %d", lambda i: -i),
         ("keyframe_clips", "SELECT id, %s FROM keyframe_clips WHERE "
                            "sequence_id = ? AND %s != %d", mem_id_from_db),
+        # BUILD 308: WYSIWYG Text clips
+        ("text_clips", "SELECT id, %s FROM text_clips WHERE sequence_id = ? "
+                       "AND %s != %d", text_mem_id),
     )
     for table, sql, to_mem in queries:
         try:

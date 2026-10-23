@@ -13,6 +13,7 @@ from sequence_timeline_ruler import (
 )
 from sequence_timeline_image import IMAGE_EXTENSIONS, _add_image_track
 from sequence_timeline_keyframe import _add_keyframe_track
+from sequence_timeline_text import _add_text_track, add_text_clip
 from sequence_timeline_video import (
     VIDEO_EXTENSIONS, out_frame_for, video_out_pixmap,
     _add_video_track, _add_video_audio_track, _generate_out_icon, _clip_is_video,
@@ -172,6 +173,9 @@ class SequenceTimeline(QMainWindow):
     _add_image_track = _add_image_track
     # Keyframe methods live in sequence_timeline_keyframe.py / keyframe.py
     _add_keyframe_track = _add_keyframe_track
+    # WYSIWYG Text methods live in sequence_timeline_text.py (BUILD 308)
+    _add_text_track = _add_text_track
+    add_text_clip = add_text_clip
 
     def add_keyframe_clip(self, track_id, click_frame):
         from keyframe import add_keyframe_clip as _add_kf_clip
@@ -638,7 +642,10 @@ class SequenceTimeline(QMainWindow):
         # Copy/Cut need a selection; Paste needs a clipboard from this
         # sequence, or from another one with matching tracks selected
         # (timeline_clipboard.has_clipboard); Paste w/New Tracks one from
-        # any sequence of the project
+        # any sequence of the project. BUILD 308: first, the text style
+        # window follows the selection (text_style_window.py)
+        from text_style_window import sync_text_style_window
+        sync_text_style_window(self)
         if not hasattr(self, "_copy_action"):
             return
         try:
@@ -887,6 +894,7 @@ class SequenceTimeline(QMainWindow):
         ripple_action = None
         add_caption_action = None
         add_keyframe_action = None
+        add_text_action = None
         x_in_clips = self._x_in_clips(pos)
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower()
         # BUILD 297: Ripple Delete (close the gap under the mouse,
@@ -901,6 +909,8 @@ class SequenceTimeline(QMainWindow):
             menu.addSeparator()
             if track_type == "caption":
                 add_caption_action = menu.addAction("Add Caption")
+            elif track_type == "text":
+                add_text_action = menu.addAction("Add Text Clip")  # BUILD 308
             ripple_action = menu.addAction("Ripple Delete")
         if ripple_action is not None:
             gap_frame = max(0.0, self.view_start_frame
@@ -939,6 +949,10 @@ class SequenceTimeline(QMainWindow):
         if add_caption_action is not None and action == add_caption_action:
             click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
             self.add_caption(track_id, click_frame)
+            return
+        if add_text_action is not None and action == add_text_action:
+            click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
+            self.add_text_clip(track_id, click_frame)
             return
         if ripple_action is not None and action == ripple_action:
             click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
@@ -1493,12 +1507,14 @@ class SequenceTimeline(QMainWindow):
         try:
             from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
             from sequence_timeline_captions import persist_caption_link_id
+            from text_clip import is_text_clip_id
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
             for c in selected:
                 if is_keyframe_clip_id(c[0]):
                     persist_keyframe_link_id(cur, c[0], new_link)
-                elif is_caption_id(c[0]):
+                elif is_caption_id(c[0]) or is_text_clip_id(c[0]):
+                    # captions / BUILD 308 text_clips
                     persist_caption_link_id(cur, c[0], new_link)
                 else:
                     cur.execute("UPDATE clips SET link_id = ? WHERE id = ?",
@@ -1525,12 +1541,14 @@ class SequenceTimeline(QMainWindow):
         try:
             from keyframe import is_keyframe_clip_id, persist_keyframe_link_id
             from sequence_timeline_captions import persist_caption_link_id
+            from text_clip import is_text_clip_id
             conn = sqlite3.connect(self._project_db())
             cur = conn.cursor()
             for cid in ids:
                 if is_keyframe_clip_id(cid):
                     persist_keyframe_link_id(cur, cid, None)
-                elif is_caption_id(cid):
+                elif is_caption_id(cid) or is_text_clip_id(cid):
+                    # captions / BUILD 308 text_clips
                     persist_caption_link_id(cur, cid, None)
                 else:
                     cur.execute("UPDATE clips SET link_id = NULL WHERE id = ?",

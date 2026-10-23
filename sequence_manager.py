@@ -79,8 +79,8 @@ CLIP_COUNT_TYPES = ("video", "image", "audio")
 
 def sequence_stats(cur):
     # {sequence_id: {frames, video, image, audio, caption}}. frames is the
-    # sequence length (latest out-point of clips, captions and keyframe
-    # clips). Counts are clips per track type, captions per sequence.
+    # sequence length (latest out-point of clips, captions, keyframe
+    # clips and text clips). Counts are clips per track type, captions per sequence.
     out = {}
 
     def get(sid):
@@ -117,6 +117,15 @@ def sequence_stats(cur):
         for sid, end in cur.execute(
                 "SELECT sequence_id, MAX(out_frame) FROM keyframe_clips "
                 "GROUP BY sequence_id").fetchall():
+            st = get(sid)
+            st["frames"] = max(st["frames"], int(end or 0))
+    except sqlite3.OperationalError:
+        pass
+    # BUILD 308: WYSIWYG Text clips count toward length only
+    try:
+        for sid, end in cur.execute(
+                "SELECT sequence_id, MAX(start_frame + length_frames) "
+                "FROM text_clips GROUP BY sequence_id").fetchall():
             st = get(sid)
             st["frames"] = max(st["frames"], int(end or 0))
     except sqlite3.OperationalError:

@@ -6,7 +6,7 @@ import sqlite3
 
 TRACK_NAME_PREFIX = {
     "video": "Video", "audio": "Audio", "image": "Image",
-    "caption": "Caption", "keyframe": "Keyframe",
+    "caption": "Caption", "keyframe": "Keyframe", "text": "Text",
 }
 
 

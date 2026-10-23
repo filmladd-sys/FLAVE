@@ -19,6 +19,7 @@ from keyframe import (
     ensure_keyframe_tables, load_keyframe_clips, is_keyframe_clip_id,
     keyframe_range_overlaps, persist_keyframe_clip_time,
 )
+from text_clip import is_text_clip_id, text_mem_id
 
 EDGE_HIT_PX = 6
 OUT_ICON_MIN_PX = 4   # smallest visible out-icon block on narrow clips
@@ -40,8 +41,9 @@ ROLE_OPEN_HEIGHT = Qt.UserRole + 6   # on the Name item: height_px when open
 # keyframe is not listed: footage drops are rejected like caption.
 CLIP_TRACK_TYPES = ("image", "video", "audio")
 # Track types whose clips can be hit, dragged, trimmed, sliced and deleted.
-# Caption / keyframe clips use negative in-memory ids (separate ranges).
-EDIT_TRACK_TYPES = CLIP_TRACK_TYPES + ("caption", "keyframe")
+# Caption / keyframe / text clips use negative in-memory ids (separate
+# ranges). "text" is the WYSIWYG Text track (BUILD 308, text_clip.py).
+EDIT_TRACK_TYPES = CLIP_TRACK_TYPES + ("caption", "keyframe", "text")
 TRACK_FOOTAGE_EXTENSIONS = {
     "image": IMAGE_EXTENSIONS,
     "video": VIDEO_EXTENSIONS,
@@ -359,6 +361,9 @@ def refresh(self):
                     c[4] = ref[1]
         load_captions(cur, self.sequence_id, clips)
         load_keyframe_clips(cur, self.sequence_id, clips)
+        # BUILD 308: WYSIWYG Text clips (text_clip.py)
+        from text_clip import load_text_clips
+        load_text_clips(cur, self.sequence_id, clips)
         for track_clips in clips.values():
             track_clips.sort(key=lambda c: (c[2], c[0]))
         self.clips_by_track = clips
@@ -404,6 +409,9 @@ def refresh(self):
                 type_text = caption_type_text(
                     language, caption_type,
                     (" [S]" if solo else "") + ("" if enabled else " [d]"))
+            elif (track_type or "").lower() == "text":
+                from text_clip import TEXT_TRACK_LABEL
+                type_text = TEXT_TRACK_LABEL + type_text[len(track_type):]
             type_item = QTableWidgetItem(type_text)
             type_item.setFlags(read_only)
             clips_item = QTableWidgetItem("")
@@ -697,7 +705,7 @@ def _range_overlaps(self, cur, track_id, start, length):
     ttype = self._track_type(track_id)
     if ttype == "keyframe":
         return keyframe_range_overlaps(cur, track_id, start, length)
-    table = "captions" if ttype == "caption" else "clips"
+    table = {"caption": "captions", "text": "text_clips"}.get(ttype, "clips")
     cur.execute(
         f"SELECT 1 FROM {table} WHERE track_id = ? "
         "AND start_frame < ? AND start_frame + length_frames > ? LIMIT 1",
@@ -894,7 +902,9 @@ def slice_members_db(self, cur, members, split_frame, linked):
             # captions ending at or before it stay with the left pieces.
             # BUILD 243: linked keyframe clips the same way (their keys
             # are untouched)
-            if (linked and (is_caption_id(c[0]) or is_keyframe_clip_id(c[0]))
+            # BUILD 308: linked text clips the same way as captions
+            if (linked and (is_caption_id(c[0]) or is_keyframe_clip_id(c[0])
+                            or is_text_clip_id(c[0]))
                     and c_start >= split_frame):
                 right_other.append(c[0])
             continue
@@ -929,6 +939,19 @@ def slice_members_db(self, cur, members, split_frame, linked):
             )
             copy_speed(cur, "captions", cap_id, cur.lastrowid)
             right_other.append(-cur.lastrowid)
+            continue
+        if is_text_clip_id(c[0]):
+            # BUILD 308: text clip: two rows, same text and style (the right
+            # row starts unlinked; the link step below may join it)
+            from timeline_clipboard import _copy_row
+            _t, row_id = clip_table_and_id(c[0])
+            cur.execute("UPDATE text_clips SET length_frames = ? WHERE id = ?",
+                        (left_length, row_id))
+            new_row = _copy_row(cur, "text_clips", row_id,
+                                {"start_frame": split_frame,
+                                 "length_frames": right_length,
+                                 "link_id": None})
+            right_other.append(text_mem_id(new_row))
             continue
         cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
                     (left_length, c[0]))
@@ -1075,7 +1098,8 @@ def ripple_moving(self, right, delta, gone=()):
 
 def _toggle_clip_flag(self, clip_id, column):
     # Flip one clip's enabled or solo flag; other clips' solos are untouched
-    if column not in ("enabled", "solo") or is_caption_id(clip_id):
+    if (column not in ("enabled", "solo") or is_caption_id(clip_id)
+            or is_text_clip_id(clip_id)):
         return
     default = 1 if column == "enabled" else 0
     try:
@@ -1458,7 +1482,8 @@ def prune_sequence_children(cur, pairs):
 
 def delete_track_rows(cur, track_id):
     # Deletes clips (+ their markers and BUILD 106 sequence_children
-    # pruning), keyframe clips (+ their keys), captions and the track row.
+    # pruning), keyframe clips (+ their keys), captions, text clips and the
+    # track row.
     # Returns [(first, last)] frame ranges of what was removed (for preview
     # dirty marking). Linked partners on other tracks are not touched.
     tid = int(track_id)
@@ -1492,6 +1517,12 @@ def delete_track_rows(cur, track_id):
                     "WHERE track_id = ?", (tid,))
     if cap_rows:
         cur.execute("DELETE FROM captions WHERE track_id = ?", (tid,))
+    # BUILD 308: WYSIWYG Text clips (picture: their ranges go dirty)
+    txt_rows = _try("SELECT start_frame, length_frames FROM text_clips "
+                    "WHERE track_id = ?", (tid,))
+    if txt_rows:
+        cur.execute("DELETE FROM text_clips WHERE track_id = ?", (tid,))
+        ranges += [(int(s), int(s) + max(1, int(n)) - 1) for s, n in txt_rows]
     cur.execute("DELETE FROM tracks WHERE id = ?", (tid,))
     return ranges
 

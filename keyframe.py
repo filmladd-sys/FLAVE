@@ -193,7 +193,10 @@ def ensure_keyframe_tables(conn):
 
 
 def is_keyframe_clip_id(clip_id):
-    return clip_id is not None and int(clip_id) <= -KEYFRAME_ID_BASE
+    # Below this range (<= -text_clip.TEXT_ID_BASE) are text clip ids
+    from text_clip import TEXT_ID_BASE
+    return (clip_id is not None
+            and -TEXT_ID_BASE < int(clip_id) <= -KEYFRAME_ID_BASE)
 
 
 def mem_id_from_db(db_id):

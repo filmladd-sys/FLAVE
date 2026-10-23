@@ -35,6 +35,7 @@ from PySide6.QtGui import QPainter, QColor, QPixmap
 # BUILD 108: clip backgrounds
 VIDEO_CLIP_BG = QColor(70, 90, 130)
 AUDIO_CLIP_BG = QColor(80, 80, 80)
+TEXT_CLIP_BG = QColor(110, 70, 120)   # BUILD 308: WYSIWYG Text clips
 
 # Zoomed-out drawing: clips narrower than TINY_CLIP_W px are one solid bar in
 # the outline color (adjacent ones merged), plus their markers. Clips
@@ -104,7 +105,8 @@ class ClipDelegate(QStyledItemDelegate):
             clip_rect = QRect(x, rect.top(), w, rect.height())
             if w < TINY_CLIP_W:
                 tiny.add(x, w, clip_id in tl._selected_clip_ids, clip_enabled)
-                if (markers and not collapsed and track_type not in ("caption", "keyframe")
+                if (markers and not collapsed
+                        and track_type not in ("caption", "keyframe", "text")
                         and clip_id is not None and clip_id > 0 and markers.get(clip_id)):
                     tiny.flush()
                     from keyframe import split_title_rect
@@ -171,6 +173,8 @@ class ClipDelegate(QStyledItemDelegate):
             ctop, ch = clip_rect.top(), clip_rect.height()
             if track_type == "caption":
                 paint_caption_bar(painter, clip_rect)
+            elif track_type == "text":
+                painter.fillRect(clip_rect, TEXT_CLIP_BG)
             else:
                 # BUILD 108: audio clips gray; video / image keep (70, 90, 130)
                 painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
@@ -185,6 +189,10 @@ class ClipDelegate(QStyledItemDelegate):
                 if title_rect is not None and detail:
                     from sequence_timeline_captions import paint_caption_text
                     paint_caption_text(painter, clip_rect, filename or "", rect)
+            elif track_type == "text":
+                # BUILD 308: WYSIWYG Text: plain bar, the name (first line of
+                # the text) in the title bar; no icon, waveform or markers
+                pass
             elif seq_ref is not None:
                 # BUILD 105: sequence clip, left / right sequence icons and
                 # the child name (no footage icon, waveform or peaks)
@@ -280,7 +288,7 @@ class ClipDelegate(QStyledItemDelegate):
             # bar) plus a line (video / image / audio only); hit-testing is
             # by x only, so it still lines up
             from markers import paint_markers
-            if track_type != "caption":
+            if track_type not in ("caption", "text"):
                 paint_markers(painter, clip_rect, clip, markers, ppf,
                               getattr(tl, "_hover_marker_id", None),
                               speed_of(speeds, clip_id))
@@ -404,7 +412,7 @@ _SEQ_ICON_CACHE = {}
 
 
 COLLAPSED_BAR_COLORS = {"audio": AUDIO_CLIP_BG, "caption": QColor(30, 110, 110),
-                        "keyframe": QColor(30, 110, 110)}
+                        "keyframe": QColor(30, 110, 110), "text": TEXT_CLIP_BG}
 
 
 NAME_MIN_PX = 24   # narrower than this between the icons: draw over them
@@ -696,12 +704,14 @@ def _add_source_caps(self, group):
 
 
 def _no_source_floor(self, clip):
-    # True for keyframe, caption and image (still) clips: they have no
-    # source media to run out of, so a left trim may take their in-point
+    # True for keyframe, caption, text and image (still) clips: they have
+    # no source media to run out of, so a left trim may take their in-point
     # below source 0. Video and audio clips, and sequence clips on any
     # track (their in-point is a frame of the child sequence), stop at 0.
     from keyframe import is_keyframe_clip_id
-    if is_keyframe_clip_id(clip[0]) or is_caption_id(clip[0]):
+    from text_clip import is_text_clip_id
+    if (is_keyframe_clip_id(clip[0]) or is_caption_id(clip[0])
+            or is_text_clip_id(clip[0])):
         return True
     if clip[0] in (getattr(self, "_seq_refs", None) or {}):
         return False
@@ -1501,12 +1511,16 @@ def _clip_context_menu(self, clip, pos):
         elif action == ripple_action:
             self.ripple_delete_clips()
         return
-    if is_caption_id(clip[0]):
+    from text_clip import is_text_clip_id
+    if is_caption_id(clip[0]) or is_text_clip_id(clip[0]):
         # Caption clip menu: Edit, Slice, Link or Unlink, Delete
-        # (BUILD 133: one of the two, same rule as the other clip menus)
+        # (BUILD 133: one of the two, same rule as the other clip menus).
+        # BUILD 308: WYSIWYG Text clips use it without Edit (their text
+        # and style are edited in the text style window)
         menu = QMenu(self)
         clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
-        edit_action = menu.addAction("Edit")
+        edit_action = (menu.addAction("Edit") if is_caption_id(clip[0])
+                       else None)
         slice_action = menu.addAction("Slice")
         speed_action = menu.addAction("Speed...")     # BUILD 303
         link_action, unlink_action = self._add_link_actions(menu, clip)
@@ -1519,7 +1533,7 @@ def _clip_context_menu(self, clip, pos):
         # if self._run_clipboard_action(action, clip_acts, clip):
         if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
             return
-        if action == edit_action:
+        if edit_action is not None and action == edit_action:
             self.edit_caption(clip)
         elif action == slice_action:
             self.slice_clip(clip, self._x_in_clips(pos))
@@ -1652,10 +1666,12 @@ def _edge_drag_release(self):
                 # edge trim: keys stay at their sequence frames
                 persist_keyframe_clip_time(cur, c, shift_keys=False)
                 continue
-            if is_caption_id(c[0]):
+            table, row_id = clip_table_and_id(c[0])
+            if table != "clips":
+                # captions / BUILD 308 text_clips: time only
                 cur.execute(
-                    "UPDATE captions SET start_frame = ?, length_frames = ? WHERE id = ?",
-                    (c[2], c[3], -c[0])
+                    f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
+                    (c[2], c[3], row_id)
                 )
                 continue
             cur.execute(

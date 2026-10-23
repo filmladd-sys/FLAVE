@@ -74,6 +74,28 @@ KEYFRAME_CROP_EDGES_SQL = """
         right REAL NOT NULL
     )
 """
+# BUILD 308: WYSIWYG Text clips (track_type 'text'): one text box per clip,
+# burned into the picture. start_frame / length_frames like captions;
+# font_size and x / y (the box center) in sequence pixels; color '#RRGGBB'.
+# Also run on project open for older projects (project_manager
+# _ensure_text_clips_for).
+TEXT_CLIPS_SQL = """
+    CREATE TABLE IF NOT EXISTS text_clips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sequence_id INTEGER NOT NULL,
+        track_id INTEGER NOT NULL,
+        start_frame INTEGER NOT NULL,
+        length_frames INTEGER NOT NULL,
+        link_id INTEGER,
+        speed_percent INTEGER NOT NULL DEFAULT 100,
+        text TEXT NOT NULL,
+        font_family TEXT,
+        font_size INTEGER,
+        color TEXT,
+        x INTEGER,
+        y INTEGER
+    )
+"""
 # Characters Windows does not allow in a file name, plus control characters
 _BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = set(["CON", "PRN", "AUX", "NUL"] +
@@ -334,6 +356,8 @@ class NewProjectWindow(QMainWindow):
         cur.execute(KEYFRAME_MOVE_SQL)
         cur.execute(KEYFRAME_CROP_SQL)
         cur.execute(KEYFRAME_CROP_EDGES_SQL)
+        # BUILD 308: WYSIWYG Text clips
+        cur.execute(TEXT_CLIPS_SQL)
 
         # Proxies of footage (path to the proxy file, size percentage).
         # BUILD 119: proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc';

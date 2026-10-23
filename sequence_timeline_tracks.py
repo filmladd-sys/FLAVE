@@ -254,6 +254,7 @@ TRACK_ADD_ITEMS = (
     ("+ Image", "_add_image_track"),
     ("+ Caption", "_add_caption_track"),
     ("+ Keyframe", "_add_keyframe_track"),
+    ("+ WYSIWYG Text", "_add_text_track"),     # BUILD 308
 )
 
 

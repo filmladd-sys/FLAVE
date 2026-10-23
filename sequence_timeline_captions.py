@@ -15,8 +15,12 @@ def ensure_captions_table(project_db):
 
 
 def is_caption_id(clip_id):
-    # Caption clips use negative in-memory ids (not keyframe negatives)
+    # Caption clips use negative in-memory ids (not keyframe or text clip
+    # negatives)
     if clip_id is None or clip_id >= 0:
+        return False
+    from text_clip import is_text_clip_id
+    if is_text_clip_id(clip_id):
         return False
     try:
         from keyframe import is_keyframe_clip_id
@@ -28,7 +32,10 @@ def is_caption_id(clip_id):
 
 
 def clip_table_and_id(clip_id):
-    # (table, row id) for caption / keyframe / clips
+    # (table, row id) for caption / keyframe / text / clips
+    from text_clip import is_text_clip_id, text_db_id
+    if is_text_clip_id(clip_id):
+        return "text_clips", text_db_id(clip_id)
     try:
         from keyframe import is_keyframe_clip_id, db_id_from_mem
         if is_keyframe_clip_id(clip_id):
@@ -38,6 +45,19 @@ def clip_table_and_id(clip_id):
     if is_caption_id(clip_id):
         return "captions", -clip_id
     return "clips", clip_id
+
+
+def mem_id_for(table, row_id):
+    # In-memory clip id of a row of table (inverse of clip_table_and_id)
+    if table == "keyframe_clips":
+        from keyframe import mem_id_from_db
+        return mem_id_from_db(row_id)
+    if table == "text_clips":
+        from text_clip import text_mem_id
+        return text_mem_id(row_id)
+    if table == "captions":
+        return -int(row_id)
+    return int(row_id)
 
 
 def load_captions(cur, sequence_id, clips):
@@ -60,10 +80,12 @@ def load_captions(cur, sequence_id, clips):
 
 
 def persist_caption_link_id(cur, clip_mem_id, link_id):
-    # clip_mem_id is -captions.id; None clears group membership
+    # clip_mem_id is -captions.id, or a text clip id (text_clips row);
+    # None clears group membership
+    table, row_id = clip_table_and_id(clip_mem_id)
     cur.execute(
-        "UPDATE captions SET link_id = ? WHERE id = ?",
-        (link_id, -int(clip_mem_id))
+        "UPDATE %s SET link_id = ? WHERE id = ?" % table,
+        (link_id, int(row_id))
     )
 
 
