@@ -321,8 +321,17 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
                 if ftype in IMAGE_EXTS and path and os.path.isfile(path):
                     original = QPixmap(path)
                 elif ftype in VIDEO_EXTS and path and os.path.isfile(path):
-                    # Full native-size frame from NVDEC; no scale, no ffmpeg
-                    original = _video_frame_full(path, frame_number)
+                    # BUILD 302: from the smallest usable proxy
+                    # (_icon_proxy) at the matching proxy frame, else the
+                    # original; full frame of that file from NVDEC, no
+                    # scale, no ffmpeg. The stored full frame (is_original
+                    # 1) is then that proxy's size.
+                    need_h = target_height if target_height is not None else max_h
+                    proxy = _icon_proxy(conn, footage_id, frame_number, need_h)
+                    if proxy is not None:
+                        original = _video_frame_full(proxy[0], proxy[1])
+                    if original is None or original.isNull():
+                        original = _video_frame_full(path, frame_number)
                 elif ftype in AUDIO_EXTS:
                     original = _speaker_icon(256, 256)
                 elif not (path and os.path.isfile(path)):
@@ -396,7 +405,54 @@ CUDA_MEMCPY_DEVICE_TO_HOST = 2
 
 _nvc = None            # PyNvVideoCodec module, or False if unavailable
 _cudart = None         # cudart library, or False if unavailable
-_decoders = {}         # path -> SimpleDecoder, one per file
+_decoders = {}         # path -> (file stamp, SimpleDecoder), one per file
+
+
+def _icon_proxy(conn, footage_id, frame_number, need_h=None):
+    # BUILD 302: (proxy path, proxy frame index) for a new video icon grab,
+    # or None (grab the original). Proxies rows of the footage whose file
+    # exists and that NVDEC can decode (sequence_player._proxy_decodable),
+    # at the smallest percentage whose frame is at least need_h tall (the
+    # icon height asked for, so the icon is never scaled up; a proxy of
+    # unknown size counts as tall enough). Several modes at one percentage:
+    # the player's choice (sequence_player._pick_proxy). frame_number is a
+    # footage index; a rate-changing proxy (double rate, IVTC) is read at
+    # the player's proxy index (proxy_frame_ratio, map_source_frame).
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
+        if not cols:
+            return None
+        extra = ("COALESCE(proxy_mode, 'normal'), proxy_fps, proxy_frames, source_fps"
+                 if all(c in cols for c in ("proxy_mode", "proxy_fps", "proxy_frames",
+                                            "source_fps"))
+                 else "'normal', NULL, NULL, NULL")
+        rows = conn.execute(
+            "SELECT percentage, " + extra + ", path FROM Proxies "
+            "WHERE footage_id = ? ORDER BY percentage, id",
+            (int(footage_id),)).fetchall()
+    except sqlite3.Error:
+        return None
+    from sequence_player import (_proxy_decodable, _pick_proxy, _PROXY_SIZE_CACHE,
+                                 proxy_frame_ratio, map_source_frame)
+    by_pct = {}
+    for pct, mode, pfps, pframes, sfps, ppath in rows:
+        if not ppath or not os.path.isfile(ppath) or not _proxy_decodable(ppath):
+            continue
+        if need_h:
+            try:
+                st = os.stat(ppath)
+                size = _PROXY_SIZE_CACHE.get((ppath, st.st_mtime, st.st_size))
+            except OSError:
+                size = None
+            if size is not None and size[1] < int(need_h):
+                continue
+        by_pct.setdefault(int(pct), []).append((mode, pfps, pframes, sfps, ppath))
+    if not by_pct:
+        return None
+    mode, pfps, pframes, sfps, ppath = _pick_proxy(by_pct[min(by_pct)])
+    index = map_source_frame(max(0, int(frame_number or 0)),
+                             proxy_frame_ratio(sfps, pfps), pframes)
+    return ppath, index
 
 
 def _load_nvc():
@@ -439,12 +495,20 @@ def _load_cudart():
 
 
 def _get_decoder(path):
-    # One SimpleDecoder per path; later frames of the same file reuse it
+    # One SimpleDecoder per path (originals and, BUILD 302, proxies); later
+    # frames of the same file reuse it. A file rewritten in place (new
+    # mtime or size, e.g. a regenerated proxy) gets a new decoder.
     nvc = _load_nvc()
     if nvc is None:
         return None
     key = os.path.normcase(os.path.abspath(path))
-    decoder = _decoders.get(key)
+    try:
+        st = os.stat(path)
+        stamp = (st.st_mtime, st.st_size)
+    except OSError:
+        stamp = None
+    entry = _decoders.get(key)
+    decoder = entry[1] if entry is not None and entry[0] == stamp else None
     if decoder is not None:
         pass
         # print(f"ICON: decoder reused for {path}")
@@ -458,7 +522,7 @@ def _get_decoder(path):
             output_color_type=nvc.OutputColorType.RGB,
         )
         # print(f"ICON: timing decoder create {_ms(t)} ms")
-        _decoders[key] = decoder
+        _decoders[key] = (stamp, decoder)
     return decoder
 
 
