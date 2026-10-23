@@ -589,7 +589,8 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # (snapshot[28], clip_speed.load_clip_speeds; _layer_items)
     clip_speeds = dict(getattr(tl, "_clip_speeds", None) or {})
     # BUILD 309: text clip styles (snapshot[29], {text clip mem id: (text,
-    # font_family, font_size, color, x, y)}, text_clip.load_text_styles),
+    # font_family, font_size, color, x, y, shadow_on, shadow_color,
+    # shadow_blur, shadow_angle, shadow_offset)}, text_clip.load_text_styles),
     # read only when a text track is in the rows
     text_styles = {}
     if any(r[3] == "text" for r in rows):

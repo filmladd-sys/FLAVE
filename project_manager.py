@@ -148,8 +148,10 @@ def _ensure_key_tables_for(project_db):
 def _ensure_text_clips_for(project_db):
     # BUILD 308: text_clips table (WYSIWYG Text clips; CREATE TABLE IF NOT
     # EXISTS, new_project.TEXT_CLIPS_SQL) in a project made before it
-    # existed. TEMPORARY older-project check: remove it in the future, once
-    # every project in use has the table from new_project.py.
+    # existed. BUILD 311: also adds the drop shadow columns
+    # (new_project.TEXT_SHADOW_COLUMNS) missing from an older text_clips
+    # table. TEMPORARY older-project check: remove it in the future, once
+    # every project in use has the table and columns from new_project.py.
     if not project_db:
         return
     try:
@@ -157,6 +159,11 @@ def _ensure_text_clips_for(project_db):
         conn = sqlite3.connect(project_db)
         try:
             conn.execute(new_project.TEXT_CLIPS_SQL)
+            have = {r[1] for r in conn.execute("PRAGMA table_info(text_clips)")}
+            for name, decl in new_project.TEXT_SHADOW_COLUMNS:
+                if name not in have:
+                    conn.execute("ALTER TABLE text_clips ADD COLUMN %s %s"
+                                 % (name, decl))
             conn.commit()
         finally:
             conn.close()

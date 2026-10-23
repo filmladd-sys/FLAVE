@@ -21,7 +21,8 @@ TEXT_TEX_MAX = 8
 
 
 def style_hash(style):
-    # Short hash of a style tuple (text, font_family, font_size, color, x, y)
+    # Short hash of a style tuple (text_clip.TEXT_STYLE_KEYS order: text,
+    # font_family, font_size, color, x, y and the BUILD 311 shadow fields)
     return hashlib.md5(repr(tuple(style)).encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -45,9 +46,11 @@ def text_rgba(clip_id, style, seq_w, seq_h):
     # premultiplied) alpha, as blend_layer reads a bpp 4 source
     from PySide6.QtGui import QImage
     from text_clip import render_text_image
-    text, family, size, color, x, y = tuple(style)
+    style = tuple(style)
+    text, family, size, color, x, y = style[:6]
     img = render_text_image(text, family, size, color, x, y,
-                            int(seq_w), int(seq_h), clip_key=clip_id)
+                            int(seq_w), int(seq_h), clip_key=clip_id,
+                            shadow=style[6:11] or None)
     return img.convertToFormat(QImage.Format_RGBA8888)
 
 

@@ -2,7 +2,10 @@
 # WYSIWYG Text clips (BUILD 308): one text box per clip on a 'text' track
 # (WYSIWYG Text), stored in the text_clips table (new_project.TEXT_CLIPS_SQL).
 # Per-clip style: font family, font size (sequence px), color '#RRGGBB';
-# x / y are the box center in sequence pixels. This module holds the ids,
+# x / y are the box center in sequence pixels. BUILD 311: optional drop
+# shadow (shadow_on, shadow_color '#RRGGBBAA', shadow_blur radius px,
+# shadow_angle, shadow_offset px; see new_project.TEXT_CLIPS_SQL and
+# shadow_delta). This module holds the ids,
 # the load / add / update helpers (link_id: sequence_timeline_captions.
 # persist_caption_link_id) and the text image (QPainter -> RGBA
 # QImage, cached). Timeline wiring: sequence_timeline_text.py. Style
@@ -20,7 +23,16 @@ TEXT_ID_BASE = 2000000000
 DEFAULT_TEXT = "Text"
 DEFAULT_COLOR = "#ffffff"
 DEFAULT_SECONDS = 5
-TEXT_STYLE_KEYS = ("text", "font_family", "font_size", "color", "x", "y")
+# BUILD 311: the five shadow fields follow the six text fields (style
+# tuples of load_text_styles, player_text.text_rgba)
+TEXT_STYLE_KEYS = ("text", "font_family", "font_size", "color", "x", "y",
+                   "shadow_on", "shadow_color", "shadow_blur", "shadow_angle",
+                   "shadow_offset")
+SHADOW_KEYS = TEXT_STYLE_KEYS[6:]
+DEFAULT_SHADOW_COLOR = "#000000B4"
+DEFAULT_SHADOW_BLUR = 6
+DEFAULT_SHADOW_ANGLE = 135
+DEFAULT_SHADOW_OFFSET = 6
 
 
 def is_text_clip_id(clip_id):
@@ -86,7 +98,8 @@ def insert_text_clip(cur, sequence_id, track_id, start_frame, length_frames,
 
 
 def read_text_style(project_db, clip_mem_id):
-    # {text, font_family, font_size, color, x, y} of one text clip, or None
+    # {key: value} of TEXT_STYLE_KEYS (text, font, color, position and the
+    # shadow fields) of one text clip, or None
     try:
         conn = sqlite3.connect(project_db)
         try:
@@ -109,7 +122,8 @@ def write_text_field(cur, clip_mem_id, key, value):
 
 
 def load_text_styles(project_db, sequence_id):
-    # BUILD 309: {mem id: (text, font_family, font_size, color, x, y)} of
+    # BUILD 309: {mem id: (text, font_family, font_size, color, x, y,
+    # shadow_on, shadow_color, shadow_blur, shadow_angle, shadow_offset)} of
     # every text clip of the sequence (TEXT_STYLE_KEYS order), the
     # compositor's text layers (timeline_snapshot index [29]). {} on any
     # failure or a project without the table.
@@ -134,7 +148,7 @@ def load_text_styles(project_db, sequence_id):
 # ---- Text image: the clip's box drawn at its place in a sequence-size
 # transparent frame (QImage ARGB32 premultiplied), the layer the
 # compositor blends like an image clip (player_text uploads it). Cached
-# per (clip, text, style, position, sequence size); a change of any of
+# per (clip, text, style, position, shadow, sequence size); a change of any of
 # them makes a new entry. BUILD 309: at most _IMAGE_CACHE_MAX host images
 # (one is seq_w x seq_h x 4 bytes, 8 MB at 1080p); the GUI thread and
 # the compositor threads share the cache under _IMAGE_LOCK.
@@ -162,18 +176,160 @@ def text_box_rect(text, family, size_px, x, y):
     return QRect(int(x) - w // 2, int(y) - h // 2, w, h)
 
 
+def parse_rgba(color, default=DEFAULT_SHADOW_COLOR):
+    # (r, g, b, a) 0..255 of '#RRGGBBAA' or '#RRGGBB' (alpha 255); the
+    # default's on a bad value
+    for c in (color, default):
+        h = (c or "").strip().lstrip("#")
+        try:
+            if len(h) in (6, 8):
+                v = [int(h[i:i + 2], 16) for i in range(0, len(h), 2)]
+                return tuple(v + [255] * (4 - len(v)))
+        except ValueError:
+            pass
+    return (0, 0, 0, 255)
+
+
+def shadow_delta(angle, offset):
+    # (dx, dy) sequence px of the shadow: offset px in the direction angle,
+    # degrees clockwise from straight up (90 = right, 135 = down-right,
+    # 180 = down, 270 = left; the Premiere / After Effects Drop Shadow
+    # direction); screen y grows down
+    import math
+    a = math.radians(float(angle or 0))
+    d = float(offset or 0)
+    return int(round(d * math.sin(a))), int(round(-d * math.cos(a)))
+
+
+def norm_shadow(shadow):
+    # Shadow fields (on, color, blur, angle, offset) with defaults for
+    # None, or None when the shadow is off or invisible (alpha 0)
+    if not shadow:
+        return None
+    on, color, blur, angle, offset = (tuple(shadow) + (None,) * 5)[:5]
+    if not on:
+        return None
+    color = color or DEFAULT_SHADOW_COLOR
+    if parse_rgba(color)[3] <= 0:
+        return None
+    blur = DEFAULT_SHADOW_BLUR if blur is None else max(0, int(blur))
+    angle = DEFAULT_SHADOW_ANGLE if angle is None else int(angle) % 360
+    offset = DEFAULT_SHADOW_OFFSET if offset is None else int(offset)
+    return (1, color, blur, angle, offset)
+
+
+def _box_blur(arr, k, axis):
+    # Running mean of width 2k + 1 along axis (zeros beyond the edges)
+    import numpy as np
+    n = arr.shape[axis]
+    pad = [(0, 0), (0, 0)]
+    pad[axis] = (k + 1, k)
+    c = np.cumsum(np.pad(arr, pad), axis=axis)
+    hi = np.take(c, np.arange(2 * k + 1, 2 * k + 1 + n), axis=axis)
+    lo = np.take(c, np.arange(0, n), axis=axis)
+    return (hi - lo) / float(2 * k + 1)
+
+
+def _shadow_image(mask, blur, rgba):
+    # Shadow picture from mask (Format_RGBA8888_Premultiplied, the text in
+    # white): its alpha blurred, times the shadow alpha, in the shadow
+    # color. Blur: three box passes per axis of half-width round(blur / 3)
+    # (numpy; reach ~blur px, close to a Gaussian of sigma ~blur / 2.4).
+    # Without numpy: the same box passes with QPainter (the tinted mask
+    # drawn 2k + 1 times shifted, additive, each at 1 / (2k + 1) opacity;
+    # 8-bit rounding makes it slightly fainter).
+    from PySide6.QtGui import QImage, QPainter, QColor
+    from PySide6.QtCore import Qt
+    r, g, b, a = rgba
+    w, h = mask.width(), mask.height()
+    k = int(round(blur / 3.0)) if blur > 0 else 0
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    if np is not None:
+        raw = np.frombuffer(bytes(mask.constBits())[: mask.sizeInBytes()],
+                            dtype=np.uint8)
+        al = raw.reshape(h, mask.bytesPerLine())[:, : w * 4].reshape(
+            h, w, 4)[:, :, 3].astype(np.float32)
+        if k > 0:
+            for _ in range(3):
+                al = _box_blur(al, k, 1)
+                al = _box_blur(al, k, 0)
+        al = np.clip(al * (a / 255.0), 0.0, 255.0)
+        out = np.empty((h, w, 4), dtype=np.uint8)
+        out[:, :, 0] = np.round(al * (r / 255.0))
+        out[:, :, 1] = np.round(al * (g / 255.0))
+        out[:, :, 2] = np.round(al * (b / 255.0))
+        out[:, :, 3] = np.round(al)
+        return QImage(out.tobytes(), w, h, w * 4,
+                      QImage.Format_RGBA8888_Premultiplied).copy()
+    img = mask.copy()
+    p = QPainter(img)
+    try:
+        p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        p.fillRect(img.rect(), QColor(r, g, b, a))
+    finally:
+        p.end()
+    for _ in range(3 if k > 0 else 0):
+        for horizontal in (True, False):
+            out = QImage(w, h, QImage.Format_RGBA8888_Premultiplied)
+            out.fill(Qt.transparent)
+            p = QPainter(out)
+            try:
+                p.setCompositionMode(QPainter.CompositionMode_Plus)
+                p.setOpacity(1.0 / (2 * k + 1))
+                for i in range(-k, k + 1):
+                    p.drawImage(i if horizontal else 0, 0 if horizontal else i, img)
+            finally:
+                p.end()
+            img = out
+    return img
+
+
+def _draw_shadow(p, text, family, size_px, x, y, shadow):
+    # Draw the drop shadow of the text box with painter p (before the
+    # text): the text mask in a margin big enough for the blur, blurred,
+    # placed at the box offset by shadow_delta
+    from PySide6.QtGui import QImage, QPainter, QColor
+    from PySide6.QtCore import Qt, QRect
+    _on, color, blur, angle, offset = shadow
+    box = text_box_rect(text, family, size_px, x, y)
+    k = int(round(blur / 3.0)) if blur > 0 else 0
+    m = 3 * k + max(2, int(size_px or 1) // 4)    # blur reach + overhangs
+    mask = QImage(box.width() + 2 * m, box.height() + 2 * m,
+                  QImage.Format_RGBA8888_Premultiplied)
+    mask.fill(Qt.transparent)
+    mp = QPainter(mask)
+    try:
+        mp.setRenderHint(QPainter.Antialiasing)
+        mp.setRenderHint(QPainter.TextAntialiasing)
+        mp.setFont(text_font(family, size_px))
+        mp.setPen(QColor(255, 255, 255))
+        mp.drawText(QRect(m, m, box.width(), box.height()),
+                    int(Qt.AlignHCenter | Qt.AlignTop), text)
+    finally:
+        mp.end()
+    dx, dy = shadow_delta(angle, offset)
+    p.drawImage(box.left() - m + dx, box.top() - m + dy,
+                _shadow_image(mask, blur, parse_rgba(color)))
+
+
 def render_text_image(text, family, size_px, color, x, y, seq_w, seq_h,
-                      clip_key=None):
+                      clip_key=None, shadow=None):
     # Sequence-size RGBA image, transparent except the text (center-aligned
     # lines, box centered on x / y). clip_key (e.g. the clip id) only
-    # separates cache entries.
+    # separates cache entries. BUILD 311: shadow (shadow_on, shadow_color,
+    # shadow_blur, shadow_angle, shadow_offset), when on, is drawn under
+    # the text (_draw_shadow).
     from PySide6.QtGui import QImage, QPainter, QColor
     from PySide6.QtCore import Qt
     # x / y unset: the frame center
     x = int(seq_w) // 2 if x is None else x
     y = int(seq_h) // 2 if y is None else y
+    shadow = norm_shadow(shadow)
     key = (clip_key, text, family, int(size_px or 1), color, int(x), int(y),
-           int(seq_w), int(seq_h))
+           int(seq_w), int(seq_h), shadow)
     with _IMAGE_LOCK:
         img = _IMAGE_CACHE.get(key)
     if img is not None:
@@ -185,6 +341,8 @@ def render_text_image(text, family, size_px, color, x, y, seq_w, seq_h,
         try:
             p.setRenderHint(QPainter.Antialiasing)
             p.setRenderHint(QPainter.TextAntialiasing)
+            if shadow is not None:
+                _draw_shadow(p, text, family, size_px, x, y, shadow)
             p.setFont(text_font(family, size_px))
             c = QColor(color or DEFAULT_COLOR)
             p.setPen(c if c.isValid() else QColor(DEFAULT_COLOR))

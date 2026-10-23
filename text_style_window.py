@@ -10,19 +10,26 @@
 # text) repaints at once. The window position is kept in the global
 # settings (POS_KEY). BUILD 309: each change also schedules a preview
 # retarget (schedule_text_preview), which marks the clip's preview frames
-# stale. ASCII only.
+# stale. BUILD 311: a 'Drop Shadow' group (checkable = shadow_on) with
+# the shadow color (button -> QColorDialog with alpha, swatch; stored
+# '#RRGGBBAA'), blur radius, angle (degrees clockwise from up, 135 =
+# down-right; text_clip.shadow_delta) and offset (sequence px). The on
+# switch and the color are one undo step each; the blur, angle and offset
+# boxes are one undo step per focus like the size box. ASCII only.
 
 import sqlite3
 from PySide6.QtCore import Qt, QEvent, QPoint
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QHBoxLayout, QFontComboBox, QSpinBox, QPushButton,
-    QLabel, QPlainTextEdit, QColorDialog,
+    QLabel, QPlainTextEdit, QColorDialog, QGroupBox,
 )
 
 POS_KEY = "text_style_window_pos"
 SIZE_MIN = 1
 SIZE_MAX = 2000
+SHADOW_BLUR_MAX = 500
+SHADOW_OFFSET_MAX = 2000
 
 
 class TextStyleWindow(QWidget):
@@ -52,7 +59,37 @@ class TextStyleWindow(QWidget):
         self.text_edit = QPlainTextEdit()
         self.text_edit.setTabChangesFocus(True)
         form.addRow("Text:", self.text_edit)
+        # BUILD 311: drop shadow
+        self.shadow_box = QGroupBox("Drop Shadow")
+        self.shadow_box.setCheckable(True)
+        self.shadow_box.setChecked(False)
+        sform = QFormLayout(self.shadow_box)
+        srow = QHBoxLayout()
+        self.shadow_color_btn = QPushButton("Color...")
+        self.shadow_swatch = QLabel()
+        self.shadow_swatch.setFixedSize(40, 20)
+        srow.addWidget(self.shadow_color_btn)
+        srow.addWidget(self.shadow_swatch)
+        srow.addStretch(1)
+        sform.addRow("Color:", srow)
+        self.shadow_blur_spin = QSpinBox()
+        self.shadow_blur_spin.setRange(0, SHADOW_BLUR_MAX)
+        self.shadow_blur_spin.setSuffix(" px")
+        sform.addRow("Blur:", self.shadow_blur_spin)
+        self.shadow_angle_spin = QSpinBox()
+        self.shadow_angle_spin.setRange(0, 359)
+        self.shadow_angle_spin.setWrapping(True)
+        self.shadow_angle_spin.setSuffix(" deg")
+        self.shadow_angle_spin.setToolTip(
+            "Direction the shadow falls, clockwise from up (135 = down-right)")
+        sform.addRow("Angle:", self.shadow_angle_spin)
+        self.shadow_offset_spin = QSpinBox()
+        self.shadow_offset_spin.setRange(0, SHADOW_OFFSET_MAX)
+        self.shadow_offset_spin.setSuffix(" px")
+        sform.addRow("Offset:", self.shadow_offset_spin)
+        form.addRow(self.shadow_box)
         self._color = "#ffffff"
+        self._shadow_color = "#000000B4"
         self.font_box.currentFontChanged.connect(
             lambda f: self._apply("font_family", f.family(), False))
         self.size_spin.valueChanged.connect(
@@ -60,8 +97,18 @@ class TextStyleWindow(QWidget):
         self.color_btn.clicked.connect(self._pick_color)
         self.text_edit.textChanged.connect(
             lambda: self._apply("text", self.text_edit.toPlainText(), True))
+        self.shadow_box.toggled.connect(
+            lambda on: self._apply("shadow_on", 1 if on else 0, False))
+        self.shadow_color_btn.clicked.connect(self._pick_shadow_color)
+        self.shadow_blur_spin.valueChanged.connect(
+            lambda v: self._apply("shadow_blur", int(v), True))
+        self.shadow_angle_spin.valueChanged.connect(
+            lambda v: self._apply("shadow_angle", int(v), True))
+        self.shadow_offset_spin.valueChanged.connect(
+            lambda v: self._apply("shadow_offset", int(v), True))
         # Focus-in on a field starts a new undo step for that field
-        for w in (self.size_spin, self.text_edit):
+        for w in (self.size_spin, self.text_edit, self.shadow_blur_spin,
+                  self.shadow_angle_spin, self.shadow_offset_spin):
             w.installEventFilter(self)
 
     def eventFilter(self, obj, event):
@@ -112,13 +159,48 @@ class TextStyleWindow(QWidget):
             self.text_edit.blockSignals(True)
             self.text_edit.setPlainText(text)
             self.text_edit.blockSignals(False)
+        # BUILD 311: shadow fields (None: the text_clip defaults)
+        import text_clip as tc
+        on = bool(style.get("shadow_on"))
+        if self.shadow_box.isChecked() != on:
+            self.shadow_box.blockSignals(True)
+            self.shadow_box.setChecked(on)
+            self.shadow_box.blockSignals(False)
+        self._show_shadow_color(style.get("shadow_color") or tc.DEFAULT_SHADOW_COLOR)
+        for spin, key, default in (
+                (self.shadow_blur_spin, "shadow_blur", tc.DEFAULT_SHADOW_BLUR),
+                (self.shadow_angle_spin, "shadow_angle", tc.DEFAULT_SHADOW_ANGLE),
+                (self.shadow_offset_spin, "shadow_offset", tc.DEFAULT_SHADOW_OFFSET)):
+            v = style.get(key)
+            v = default if v is None else int(v)
+            if spin.value() != v:
+                spin.blockSignals(True)
+                spin.setValue(v)
+                spin.blockSignals(False)
 
     def _show_color(self, color):
         self._color = color
         self.swatch.setStyleSheet(
             "background-color: %s; border: 1px solid #808080;" % color)
 
+    def _show_shadow_color(self, color):
+        from text_clip import parse_rgba
+        self._shadow_color = color
+        self.shadow_swatch.setStyleSheet(
+            "background-color: rgba(%d, %d, %d, %d); border: 1px solid #808080;"
+            % parse_rgba(color))
+
     # ---- edits
+
+    def _pick_shadow_color(self):
+        # Shadow color with alpha, stored '#RRGGBBAA'
+        from text_clip import parse_rgba
+        c = QColorDialog.getColor(QColor(*parse_rgba(self._shadow_color)), self,
+                                  "Shadow Color", QColorDialog.ShowAlphaChannel)
+        if c.isValid():
+            name = "#%02X%02X%02X%02X" % (c.red(), c.green(), c.blue(), c.alpha())
+            self._show_shadow_color(name)
+            self._apply("shadow_color", name, False)
 
     def _pick_color(self):
         c = QColorDialog.getColor(QColor(self._color), self, "Text Color")

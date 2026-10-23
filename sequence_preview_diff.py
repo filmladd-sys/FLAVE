@@ -104,7 +104,7 @@ class SnapshotIndex(object):
         # (in, start - d, speed), which fixes the mapping for every frame
         self.speeds = snap[28] if len(snap) > 28 else {}
         # BUILD 309: text clip styles (snap[29], {clip id: (text, font,
-        # size, color, x, y)}); a text layer's src in desc is its style, so
+        # size, color, x, y, shadow fields)}); a text layer's src in desc is its style, so
         # a text / style / position edit changes every frame of the clip.
         # Move and trim change the clip edges like any clip.
         self.text_styles = snap[29] if len(snap) > 29 else {}

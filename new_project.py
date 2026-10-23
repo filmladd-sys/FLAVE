@@ -77,8 +77,13 @@ KEYFRAME_CROP_EDGES_SQL = """
 # BUILD 308: WYSIWYG Text clips (track_type 'text'): one text box per clip,
 # burned into the picture. start_frame / length_frames like captions;
 # font_size and x / y (the box center) in sequence pixels; color '#RRGGBB'.
+# BUILD 311: drop shadow: shadow_on 0 / 1, shadow_color '#RRGGBBAA',
+# shadow_blur (blur radius, sequence px), shadow_angle (direction the
+# shadow falls, degrees clockwise from straight up, like the Premiere /
+# After Effects Drop Shadow direction: 90 = right, 135 = down-right,
+# 180 = down) and shadow_offset (distance, sequence px).
 # Also run on project open for older projects (project_manager
-# _ensure_text_clips_for).
+# _ensure_text_clips_for, which also adds TEXT_SHADOW_COLUMNS).
 TEXT_CLIPS_SQL = """
     CREATE TABLE IF NOT EXISTS text_clips (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,9 +98,23 @@ TEXT_CLIPS_SQL = """
         font_size INTEGER,
         color TEXT,
         x INTEGER,
-        y INTEGER
+        y INTEGER,
+        shadow_on INTEGER NOT NULL DEFAULT 0,
+        shadow_color TEXT DEFAULT '#000000B4',
+        shadow_blur INTEGER DEFAULT 6,
+        shadow_angle INTEGER DEFAULT 135,
+        shadow_offset INTEGER DEFAULT 6
     )
 """
+# BUILD 311: the shadow columns of TEXT_CLIPS_SQL as (name, declaration),
+# added by ALTER TABLE to text_clips tables made before BUILD 311
+TEXT_SHADOW_COLUMNS = (
+    ("shadow_on", "INTEGER NOT NULL DEFAULT 0"),
+    ("shadow_color", "TEXT DEFAULT '#000000B4'"),
+    ("shadow_blur", "INTEGER DEFAULT 6"),
+    ("shadow_angle", "INTEGER DEFAULT 135"),
+    ("shadow_offset", "INTEGER DEFAULT 6"),
+)
 # Characters Windows does not allow in a file name, plus control characters
 _BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = set(["CON", "PRN", "AUX", "NUL"] +
