@@ -1,6 +1,8 @@
 # render_manager.py
 # BUILD 116: Render Manager, first version. MP4 only (H.264 High + AAC,
 # optional mov_text captions). Whole sequence, no progress bar, no in/out.
+# BUILD 319: progress bar in the window (frame N of M, busy while the
+# preview pauses and the audio mixes; RenderJob.on_progress, throttled).
 # BUILD 117: Codec choice H.264 (h264_nvenc / libx264, High) or H.265
 # (hevc_nvenc / libx265, Main, -tag:v hvc1); default output is a full path.
 # One window per sequence, opened from the Sequence Timeline 'Render' menu.
@@ -480,6 +482,34 @@ class _RenderGpu(object):
 
 # ---------------------------------------------------------------- render job
 
+# BUILD 319: render progress. RenderJob.on_progress(done, total) from the
+# render thread: PROGRESS_BUSY while the audio mixes, then frames written
+# (0 .. total), at most one call per PROGRESS_MIN_S (first / last always)
+PROGRESS_BUSY = -1
+PROGRESS_IDLE = -2
+PROGRESS_MIN_S = 0.1
+
+
+def _set_progress_bar(bar, done, total):
+    # BUILD 319: QProgressBar state (GUI thread): busy (indeterminate),
+    # idle (empty) or frame done of total with the percent
+    if bar is None:
+        return
+    done, total = int(done), int(total)
+    if done == PROGRESS_BUSY:
+        bar.setRange(0, 0)
+        bar.setFormat("")
+    elif done < 0 or total <= 0:
+        bar.setRange(0, 100)
+        bar.setValue(0)
+        bar.setFormat("")
+    else:
+        done = min(done, total)
+        bar.setRange(0, total)
+        bar.setValue(done)
+        bar.setFormat("%%p%%  (frame %d of %d)" % (done, total))
+
+
 class RenderJob(object):
     # Built on the GUI thread (snapshot, captions, sizes), run on a thread.
     # frame_source(frames) -> list of RGB24 bytes; tests pass a CPU one.
@@ -489,6 +519,8 @@ class RenderJob(object):
         self.frame_source = frame_source
         self.on_done = on_done            # on_done(ok, message), any thread
         self.on_warn = None               # BUILD 318: on_warn(text), any thread
+        self.on_progress = None           # BUILD 319: on_progress(done, total)
+        self._progress_t = None
         self.cancelled = False
         self.proc = None
         self.thread = None
@@ -505,6 +537,21 @@ class RenderJob(object):
                 proc.kill()
             except Exception:
                 pass
+
+    def _progress(self, done, total, force=False):
+        # BUILD 319: throttled on_progress (render thread)
+        cb = self.on_progress
+        if cb is None:
+            return
+        now = time.perf_counter()
+        if (not force and self._progress_t is not None
+                and now - self._progress_t < PROGRESS_MIN_S):
+            return
+        self._progress_t = now
+        try:
+            cb(int(done), int(total))
+        except Exception:
+            pass
 
     def _run(self):
         try:
@@ -541,6 +588,7 @@ class RenderJob(object):
         err_path = os.path.join(tmp, _base + "_RenderStderr.txt")
         try:
             # audio (fresh mix of the whole range)
+            self._progress(PROGRESS_BUSY, total, True)  # BUILD 319: no audio progress
             t0 = time.perf_counter()
             wav = None
             if p.get("mono_pcm") is not None:
@@ -593,6 +641,7 @@ class RenderJob(object):
                     return False, "Could not start ffmpeg: %s" % e
                 broken = False
                 f = 0
+                self._progress(0, total, True)      # BUILD 319
                 try:
                     while f < total and not self.cancelled:
                         frames = list(range(f, min(total, f + chunk)))
@@ -614,6 +663,7 @@ class RenderJob(object):
                             break
                         t_pipe += time.perf_counter() - c1
                         f += len(frames)
+                        self._progress(f, total, f >= total)  # BUILD 319
                 except Exception as e:
                     # Composite failed (player closed, CUDA error): stop ffmpeg
                     try:
@@ -680,12 +730,13 @@ def _make_window_class():
     from PySide6.QtWidgets import (
         QMainWindow, QWidget, QFormLayout, QVBoxLayout, QHBoxLayout,
         QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QRadioButton,
-        QButtonGroup, QPushButton, QLabel, QComboBox,
+        QButtonGroup, QPushButton, QLabel, QComboBox, QProgressBar,
     )
 
     class _Bridge(QObject):
         done = Signal(bool, str)
         warn = Signal(str)      # BUILD 318: encoder fallback warning
+        progress = Signal(int, int)     # BUILD 319: frames done, total
 
     class RenderManagerWindow(QMainWindow):
         def __init__(self, timeline):
@@ -698,6 +749,8 @@ def _make_window_class():
             self._bridge = _Bridge()
             self._bridge.done.connect(self._on_done, Qt.QueuedConnection)
             self._bridge.warn.connect(self._on_warn, Qt.QueuedConnection)
+            self._bridge.progress.connect(self._on_progress, Qt.QueuedConnection)
+            self._render_total = 0
             # BUILD 318: [True] while this window holds the preview export
             # pause (set_export_pause); _unpause clears it exactly once
             self._pause = None
@@ -777,6 +830,11 @@ def _make_window_class():
             self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.status.setWordWrap(True)
             outer.addWidget(self.status)
+            # BUILD 319: render progress (frame N of M)
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setTextVisible(True)
+            _set_progress_bar(self.progress_bar, PROGRESS_IDLE, 0)
+            outer.addWidget(self.progress_bar)
             outer.addStretch(1)
             self.setCentralWidget(central)
             self.resize(520, 330)
@@ -803,6 +861,9 @@ def _make_window_class():
             else:
                 self.unsetCursor()
             self.status.setText(text)
+            # BUILD 319: busy bar while busy (until frames report), else empty
+            _set_progress_bar(getattr(self, "progress_bar", None),
+                              PROGRESS_BUSY if busy else PROGRESS_IDLE, 0)
 
         def _unpause(self, token):
             # BUILD 318: release this render's preview export pause once
@@ -932,6 +993,9 @@ def _make_window_class():
 
             self.job = RenderJob(params, source, done)
             self.job.on_warn = self._bridge.warn.emit
+            self._render_total = total
+            if hasattr(self._bridge, "progress"):
+                self.job.on_progress = self._bridge.progress.emit  # BUILD 319
             self._set_busy(True, "Rendering %d frames to %s ..." % (total, params["out_path"]))
             self.job.start()
             self._pause = None      # BUILD 318: done() owns the release now
@@ -961,6 +1025,12 @@ def _make_window_class():
             except Exception as e:
                 print(f"Render warning failed: {e}")
 
+        def _on_progress(self, done, total):
+            # BUILD 319: queued from the render thread (throttled there)
+            if self._closing or self.job is None:
+                return
+            _set_progress_bar(getattr(self, "progress_bar", None), done, total)
+
         # ---- render end (GUI thread, queued from the render thread)
 
         def _on_done(self, ok, msg):
@@ -975,6 +1045,9 @@ def _make_window_class():
             self._user_cancel = False
             if ok:
                 self._set_busy(False, msg)
+                total = int(getattr(self, "_render_total", 0) or 0)
+                if total > 0:   # BUILD 319: success ends at 100%
+                    _set_progress_bar(getattr(self, "progress_bar", None), total, total)
                 # the next render suggests the next version
                 self.refresh_output_path()
             else:
