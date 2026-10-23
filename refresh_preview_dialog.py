@@ -11,10 +11,37 @@
 # pending Play start is dropped, the explicit refresh pass stops (frames
 # already built stay clean, the rest stay dirty) and a running audio mix is
 # cancelled. ASCII only.
+# BUILD 317: a refresh pass the worker aborted for lack of GPU memory
+# (sequence_preview_worker.take_refresh_abort) closes this window, stops
+# a pending Play start and shows the message (show_refresh_abort).
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import (QDialog, QLabel, QProgressBar, QPushButton,
-                               QVBoxLayout)
+from PySide6.QtWidgets import (QDialog, QLabel, QMessageBox, QProgressBar,
+                               QPushButton, QVBoxLayout)
+
+
+def show_refresh_abort(timeline, text):
+    # GUI thread (BUILD 317): the refresh pass was aborted for lack of GPU
+    # memory. Drop a pending Play start (it would wait for frames that
+    # will not come), put the text on the status bar and show it in a
+    # non-modal message box over the timeline.
+    try:
+        timeline._stop_play()
+    except Exception as e:
+        print(f"Refresh abort (play) failed: {e}")
+    try:
+        timeline.status_bar.showMessage(text, 15000)
+    except Exception:
+        pass
+    try:
+        box = QMessageBox(QMessageBox.Warning, "Preview", text,
+                          QMessageBox.Ok, timeline)
+        box.setWindowModality(Qt.NonModal)
+        box.setAttribute(Qt.WA_DeleteOnClose, True)
+        box.show()
+        timeline._vram_abort_box = box
+    except Exception as e:
+        print(f"Refresh abort message failed: {e}")
 
 
 class RefreshPreviewDialog(QDialog):
@@ -111,6 +138,19 @@ class RefreshPreviewDialog(QDialog):
             spw._gui_beat[0] = time.perf_counter()
         except Exception:
             pass
+        # BUILD 317: refresh aborted for lack of GPU memory: close, then
+        # the message (not under this application-modal window)
+        try:
+            from sequence_preview_worker import take_refresh_abort
+            text = take_refresh_abort(self._timeline.sequence_id)
+        except Exception:
+            text = None
+        if text:
+            self._finished = True
+            self._timer.stop()
+            self.close()
+            show_refresh_abort(self._timeline, text)
+            return
         v_done, v_pct = self._video_state()
         self._video_bar.setValue(v_pct)
         self._video_label.setText("Preview frames: done" if v_done

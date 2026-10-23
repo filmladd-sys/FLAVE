@@ -146,8 +146,9 @@ def resample_rgb(self, src, sw, sh, sstride, dst, dw, dh):
 
 def _scaled_buffers(self, n, pw, ph):
     # n Preview Size RGB device buffers (pw x ph, rows pw * 3), kept and
-    # grown up to the largest n asked (at most STATES_MAX: encode_preview
-    # works group by group); all freed when the size changes. Lock held.
+    # grown up to the largest n asked (at most the encoder's max_states:
+    # encode_preview works group by group); all freed when the size
+    # changes. Lock held.
     if getattr(self, "_scaled_dims", None) != (pw, ph):
         _free_scaled(self)
         self._scaled_dims = (pw, ph)
@@ -173,14 +174,17 @@ def _free_scaled(self):
 def encode_preview(self, bufs, quality):
     # nvJPEG bytes of full-size composites bufs, at the project's Preview
     # Size. At 100% this is encode_many on the composites; below it, groups
-    # of STATES_MAX are scaled into the small buffers and encoded from
+    # of max_states are scaled into the small buffers and encoded from
     # there (encode_many syncs the stream, so the next group can reuse
     # them). Lock held, self.nvj created.
+    # BUILD 317: the encoder's max_states is sized for this encode size
+    # first (nvj_fit_states), on every pass (normal and refresh).
     pw, ph = _preview_dims(self)
+    nvj_fit_states(self, pw, ph)
     if (pw, ph) == (self.seq_w, self.seq_h):
         return self.nvj.encode_many(bufs, self.seq_w, self.seq_h, self.row, quality)
     out = []
-    step = _NvJpegEncoder.STATES_MAX
+    step = self.nvj.max_states
     for g0 in range(0, len(bufs), step):
         group = bufs[g0:g0 + step]
         small = _scaled_buffers(self, len(group), pw, ph)
@@ -188,6 +192,59 @@ def encode_preview(self, bufs, quality):
             resample_rgb(self, b, self.seq_w, self.seq_h, self.row, d, pw, ph)
         out.extend(self.nvj.encode_many(small, pw, ph, pw * 3, quality))
     return out
+
+
+# BUILD 317: nvJPEG encoder states per encoder, by resolution. A warmed
+# state costs about 60 MB at 1920 x 1080 and scales with the encoded
+# pixels (about 240 MB at 3840 x 2160, about 615 MB at 6144 x 3456), so a
+# fixed 16 states could take most of the card at 6K. max_states = the
+# states that fit in NVJ_STATES_VRAM_SHARE of total VRAM at the measured
+# (refresh_plan) or estimated (NVJ_STATE_BYTES_PX) cost of one state at
+# the encode size, clamped to 1..STATES_MAX (16).
+NVJ_STATES_VRAM_SHARE = 0.20
+NVJ_STATE_BYTES_PX = (60 << 20) / float(1920 * 1080)
+
+
+def _nvj_states_for(total_b, cost_b):
+    # States that fit in NVJ_STATES_VRAM_SHARE of total_b at cost_b bytes
+    # per state, 1..STATES_MAX (STATES_MAX when either is unknown)
+    if not total_b or not cost_b or cost_b <= 0:
+        return _NvJpegEncoder.STATES_MAX
+    return max(1, min(_NvJpegEncoder.STATES_MAX,
+                      int((NVJ_STATES_VRAM_SHARE * total_b) // cost_b)))
+
+
+def nvj_fit_states(self, pw, ph, cost=None):
+    # (lock held) Set self.nvj.max_states for encodes at pw x ph. cost =
+    # measured bytes of one warmed state (refresh_plan); None keeps a
+    # cost already known for this size, else uses the estimate. Kept in
+    # self._nvj_cost = ((pw, ph), cost, max_states, measured). Returns
+    # max_states (None without an encoder).
+    nvj = getattr(self, "nvj", None)
+    if nvj is None:
+        return None
+    known = getattr(self, "_nvj_cost", None)
+    measured = cost is not None
+    if cost is None:
+        if known is not None and known[0] == (pw, ph):
+            if nvj.max_states != known[2]:
+                nvj.set_max_states(known[2])
+            return known[2]
+        cost = int(NVJ_STATE_BYTES_PX * int(pw) * int(ph))
+    total = getattr(self, "_vram_total", None)
+    if not total:
+        fv = free_vram()
+        total = fv[1] if fv else 0
+        self._vram_total = total
+    m = nvj.set_max_states(_nvj_states_for(total, cost))
+    self._nvj_cost = ((pw, ph), int(cost), m, measured)
+    return m
+
+
+def nvj_states_cap(self):
+    # The encoder's max_states (STATES_MAX without an encoder)
+    nvj = getattr(self, "nvj", None)
+    return nvj.max_states if nvj is not None else _NvJpegEncoder.STATES_MAX
 
 
 # Play scratch: device buffers a non-sequence-size JPEG decodes into before
@@ -519,7 +576,8 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
 # What a card pass of N frames holds on the card:
 #   - N composite buffers, one per frame, row x height bytes each
 #     (sequence-size RGB). These are the "refresh pool".
-#   - nvJPEG encoder states: at most _NvJpegEncoder.STATES_MAX (16), not
+#   - nvJPEG encoder states: at most the encoder's max_states (BUILD
+#     317: 1..16 by resolution, see nvj_fit_states), not
 #     one per frame (encode_many reuses them group by group). nvJPEG
 #     allocates a state's memory at its first encode, so the plan
 #     reserves and warms them (one encode each) BEFORE it measures free
@@ -535,7 +593,7 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
 # large as its largest get_batch_frames pull and frees it only when the
 # decoder is closed, so the decode held is k x (sum of the layers'
 # per-frame decode costs), not N x. k = N when everything fits;
-# otherwise N gets the room left after pulls of STATES_MAX frames, and k
+# otherwise N gets the room left after pulls of max_states frames, and k
 # gets whatever room N leaves.
 #
 # Decoders are per file (decoder key (instance, path), see
@@ -546,14 +604,19 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
 # fit_refresh_pool() runs at the start of each range. It closes the
 # decoders the range does not use, re-reads the real free VRAM, sizes the pool to the range's N
 # and checks the keep again after reserving. On a shortfall it lowers k
-# first (never below STATES_MAX, or k if that is smaller) and lowers N
-# only for what that cannot cover, so N still covers the range.
+# first (never below max_states, or k if that is smaller) and lowers N
+# only for what that cannot cover, so N still covers the range. At N = 1
+# it frees nvJPEG states next (BUILD 317); if the card is still too
+# short (free after decode under REFRESH_VRAM_FATAL_MB +
+# REFRESH_CHUNK_CUSHION_MB) the refresh pass is aborted with a message
+# (REFRESH_ABORT) instead of running into the hard exit.
 #
 # Guards. kept_decoder_guard() runs after each batch: if free VRAM is
 # under the keep while decoders are held open, it closes them all and
 # the rest of the range closes each layer's decoders after its blend.
 # vram_fatal_check() is the hard stop: free VRAM under 1500 MB at any
-# check point exits FLAVE at once (see that function for why).
+# check point exits FLAVE at once (see that function for why); after
+# BUILD 317 that is only reached by drift after a successful reserve.
 # ---------------------------------------------------------------------
 
 
@@ -951,7 +1014,7 @@ def _refresh_keep(total_b):
 
 def _free_pool(gen, n):
     # (lock held) free composite buffers beyond n. nvJPEG states are kept
-    # up to STATES_MAX (the refresh reuses them); n None or 0 frees every
+    # up to max_states (the refresh reuses them); n None or 0 frees every
     # buffer and every state.
     cudart = _libs()[0]
     for b in gen.gen_bufs[n or 0:]:
@@ -959,15 +1022,18 @@ def _free_pool(gen, n):
             cudart.cudaFree(b)
     del gen.gen_bufs[n or 0:]
     if gen.nvj is not None:
-        gen.nvj.trim(_NvJpegEncoder.STATES_MAX if n else 0)
+        gen.nvj.trim(gen.nvj.max_states if n else 0)
 
 
 def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     # Worker, once per explicit refresh pass, before any batch: the
     # per-range plan (see the memory model above _composite_by_layer).
     #
-    # 1) Close every decoder and free the whole pool, then reserve and
-    #    warm a small pool (min(pool_n, STATES_MAX) buffers + nvJPEG
+    # 1) Close every decoder and free the whole pool. BUILD 317: warm
+    #    one buffer + one nvJPEG state and measure the state's cost;
+    #    max_states = states that fit in NVJ_STATES_VRAM_SHARE of total
+    #    VRAM (1..16, nvj_fit_states). Then reserve and
+    #    warm a small pool (min(pool_n, max_states) buffers + nvJPEG
     #    states) and read free VRAM after it, so the real state cost is
     #    already out of free. budget = that free + the reserved buffers
     #    (they are part of every range's N) - the keep.
@@ -980,9 +1046,9 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     #    w x h; sequence size when ffprobe fails); sum_per is their sum.
     #    want = min(pool_n, range length); room = budget - stills.
     #      - every frame + its full decode fits: N = k = want
-    #      - else N gets the room left after pulls of STATES_MAX frames
-    #        (capped at want) and k the room N leaves (STATES_MAX..N);
-    #        if that N is under STATES_MAX, N = k = what fits with full
+    #      - else N gets the room left after pulls of max_states frames
+    #        (capped at want) and k the room N leaves (max_states..N);
+    #        if that N is under max_states, N = k = what fits with full
     #        pulls
     #      - no video layer: N = buffers that fit, k = 0
     #      - no room or no VRAM reading: N = 1
@@ -1004,13 +1070,45 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         gen._keep_dec = False
         gen._pull_k = 0
         _free_pool(gen, None)
+        # BUILD 317: the encoder and (below 100%) one Preview Size buffer
+        # exist before the measure, so only buffer + state are in it
+        pw, ph = _preview_dims(gen)
+        lib = _nvjpeg_lib()
+        if lib is not None and gen.nvj is None:
+            gen.nvj = _NvJpegEncoder(lib, gen.stream)
+        if lib is not None and (pw, ph) != (gen.seq_w, gen.seq_h):
+            _scaled_buffers(gen, 1, pw, ph)
     finally:
         _GEN_LOCK.release()
+    pool_px = int(gen.row) * int(gen.seq_h)
     fv0 = free_vram()
-    n0 = max(1, min(int(pool_n), _NvJpegEncoder.STATES_MAX))
+    if gen.nvj is not None:
+        # warm 1 buffer + 1 state: the drop in free VRAM minus the buffer
+        # is one state's cost at this encode size
+        n1 = reserve_refresh_pool(project_path, sequence_id, 1)
+        fv1 = free_vram()
+        cost = None
+        if n1 and fv0 and fv1:
+            cost = fv0[0] - fv1[0] - pool_px
+            if cost <= 0:
+                cost = None     # allocator reuse: use the estimate
+        _GEN_LOCK.acquire()
+        try:
+            gen._vram_total = fv0[1] if fv0 else 0
+            m = nvj_fit_states(gen, pw, ph, cost)
+            if cost is None:
+                cost = gen._nvj_cost[1]
+        finally:
+            _GEN_LOCK.release()
+        print("WORKER refresh states: max %d nvJPEG states at %dx%d (1 state "
+              "%.0f MB %s, budget %d%% of %s MB VRAM)" % (
+                  m, pw, ph, cost / float(1 << 20),
+                  "measured" if gen._nvj_cost[3] else "estimated",
+                  int(NVJ_STATES_VRAM_SHARE * 100 + 0.5),
+                  (fv0[1] >> 20) if fv0 else "?"))
+    n0 = max(1, min(int(pool_n), nvj_states_cap(gen)))
     n0 = reserve_refresh_pool(project_path, sequence_id, n0)
     fv = free_vram()
-    pool_px = int(gen.row) * int(gen.seq_h)
     keep = _refresh_keep(fv[1]) if fv else 0
     # the n0 reserved buffers count as free (the range's N includes them)
     budget = (fv[0] + n0 * pool_px - keep) if fv else 0
@@ -1078,7 +1176,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         elif (pool_px + sum_per) * want <= room:
             n = k = want
         else:
-            k0 = _NvJpegEncoder.STATES_MAX
+            k0 = nvj_states_cap(gen)
             n = int((room - k0 * sum_per) // pool_px)
             if n < k0:
                 n = k = max(1, int(room // (pool_px + sum_per)))
@@ -1100,7 +1198,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
 
 def reserve_refresh_pool(project_path, sequence_id, n):
     # Worker, explicit refresh: hold a pool of n composite buffers and up
-    # to STATES_MAX nvJPEG encoder states (min(n, STATES_MAX)); every card
+    # to max_states nvJPEG encoder states (min(n, max_states)); every card
     # pass reuses them, untrimmed, until release_refresh_pool. nvJPEG
     # allocates a state's device memory at its first encode, not at
     # create, so the n cleared buffers are encoded once here: that memory
@@ -1162,7 +1260,14 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
     #    short: lower k first (decode is not allocated yet, so no
     #    re-reserve is needed); only if that cannot cover it, lower N by
     #    the shortfall and refit (up to 4 rounds). k never exceeds N.
-    # Returns the n held (0: reserve failed).
+    # 4) BUILD 317, N = 1 and still short: free nvJPEG states beyond what
+    #    covers the shortfall (N = 1 encodes with one state) and re-read
+    #    free VRAM. Still short and the free VRAM left after the decode
+    #    and stills would be under REFRESH_VRAM_FATAL_MB +
+    #    REFRESH_CHUNK_CUSHION_MB: return REFRESH_ABORT (the worker ends
+    #    the refresh pass with a message); otherwise N = 1 runs as before
+    #    (under the hard floor guard).
+    # Returns the n held (0: reserve failed, REFRESH_ABORT: abort).
     gen = _generator_for(project_path, sequence_id)
     if gen is None:
         return 0
@@ -1196,7 +1301,7 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
                 room = fv[0] + nbufs * int(gen.row) * int(gen.seq_h) - still \
                     - _refresh_keep(fv[1])
                 # shortfall out of the pulls first (k, not under
-                # STATES_MAX), so N still covers the range and leaves no
+                # max_states), so N still covers the range and leaves no
                 # small leftover batch
                 over = n * (per + int(gen.row) * int(gen.seq_h)) + held - room
                 if over > 0 and k:
@@ -1228,8 +1333,10 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
                       n, fv[0] >> 20, fv[1] >> 20, n, per / float(1 << 20),
                       k, held >> 20, still >> 20, _refresh_keep(fv[1]) >> 20,
                       (", short %d MB" % (short >> 20)) if short > 0 else ""))
-        if short <= 0 or n <= 1:
+        if short <= 0:
             return n
+        if n <= 1:
+            return _fit_last_resort(gen, n, per, held, still, short)
         if k:
             # pulls shrink first (no re-reserve: decode is not allocated
             # yet); N only for what that cannot cover
@@ -1251,10 +1358,55 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
     return n
 
 
+# fit_refresh_pool result: not enough VRAM even at N = 1 with the nvJPEG
+# states trimmed; the worker aborts the refresh pass (BUILD 317)
+REFRESH_ABORT = -1
+REFRESH_ABORT_TEXT = ("Not enough GPU memory to build previews at this size. "
+                      "Lower Preview Size in Project Settings.")
+
+
+def _fit_last_resort(gen, n, per, held, still, short):
+    # fit_refresh_pool step 4 (N = 1, short bytes under the keep). Returns
+    # n or REFRESH_ABORT.
+    nvj = gen.nvj
+    fv = free_vram()
+    if nvj is not None and len(nvj.states) > 1 and fv is not None:
+        known = getattr(gen, "_nvj_cost", None)
+        cost = known[1] if known else int(NVJ_STATE_BYTES_PX * gen.seq_w * gen.seq_h)
+        had = len(nvj.states)
+        keep_st = max(1, had - int((short + cost - 1) // max(1, cost)))
+        _GEN_LOCK.acquire()
+        try:
+            _check(_libs()[1].cuCtxSetCurrent(gen.cuda_ctx), "ctx")
+            nvj.trim(keep_st)
+        finally:
+            _GEN_LOCK.release()
+        fv = free_vram()
+        if fv is None:
+            return n
+        _vram_base[0] = fv[0]
+        short = _refresh_keep(fv[1]) - (fv[0] - n * per - held - still)
+        print("WORKER refresh pool: N 1 short of the keep, nvJPEG states %d -> "
+              "%d, free now %d MB%s" % (
+                  had, len(nvj.states), fv[0] >> 20,
+                  (", short %d MB" % (short >> 20)) if short > 0 else ""))
+    if fv is None or short <= 0:
+        return n
+    left = fv[0] - n * per - held - still
+    if left >= ((REFRESH_VRAM_FATAL_MB + REFRESH_CHUNK_CUSHION_MB) << 20):
+        return n
+    print("WORKER refresh aborted: free %d MB of %d MB, %d MB left after the "
+          "decode and stills of N 1 (needs %d MB). %s" % (
+              fv[0] >> 20, fv[1] >> 20, left >> 20,
+              REFRESH_VRAM_FATAL_MB + REFRESH_CHUNK_CUSHION_MB,
+              REFRESH_ABORT_TEXT))
+    return REFRESH_ABORT
+
+
 def _shrink_pull(gen, k, unit_dec, over):
     # Lower the pull size k by enough frames to free over bytes, but not
-    # under min(k, STATES_MAX). Sets gen._pull_k; returns (k, held bytes).
-    floor = min(k, _NvJpegEncoder.STATES_MAX)
+    # under min(k, max_states). Sets gen._pull_k; returns (k, held bytes).
+    floor = min(k, nvj_states_cap(gen))
     k = max(floor, k - int((over + unit_dec - 1) // unit_dec)) if unit_dec else k
     gen._pull_k = k
     return k, k * unit_dec

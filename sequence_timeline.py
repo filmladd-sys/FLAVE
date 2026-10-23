@@ -2524,6 +2524,18 @@ class SequenceTimeline(QMainWindow):
 
     def _preview_status_poll(self):
         # BUILD 129: worker progress -> status label (text set only on change)
+        # BUILD 317: a refresh aborted for lack of GPU memory while no
+        # Refreshing Preview window is up shows its message here
+        try:
+            dlg = getattr(self, "_refresh_dialog", None)
+            if dlg is None or not dlg.isVisible():
+                from sequence_preview_worker import take_refresh_abort
+                abort_text = take_refresh_abort(self.sequence_id)
+                if abort_text:
+                    from refresh_preview_dialog import show_refresh_abort
+                    show_refresh_abort(self, abort_text)
+        except Exception as e:
+            print(f"Refresh abort message failed: {e}")
         try:
             from sequence_preview_worker import _worker, status_text
             prog = getattr(_worker, "progress", None)

@@ -254,6 +254,31 @@ class PreviewWorker(object):
         return (sp._gui_wants[0] > 0
                 or time.perf_counter() - sp._gui_last[0] < sp._GUI_QUIET[0])
 
+    def _abort_refresh(self, project, sequence_id):
+        # BUILD 317: fit_refresh_pool found too little VRAM even at N 1
+        # with the nvJPEG states trimmed. Free the refresh pool and close
+        # the decoders, drop the plan, clear the refresh request and Play
+        # fill (so nothing restarts the pass by itself), and leave the
+        # message for the GUI thread (take_refresh_abort, shown by the
+        # Refreshing Preview window or the timeline status poll). The
+        # pass then ends normally and the worker sleeps until the next
+        # wake (edit, playhead move, size change, F5 / Play).
+        try:
+            from sequence_player_preview import release_refresh_pool
+            release_refresh_pool(project, sequence_id)
+        except Exception as e:
+            print(f"Refresh pool release failed: {e}")
+        from sequence_player_preview import REFRESH_ABORT_TEXT
+        with self._cond:
+            self._pool_n = 0
+            self._pool_key = None
+            self._plan = None
+            # message first: the GUI may see the refresh end at once
+            _refresh_abort[0] = (sequence_id, REFRESH_ABORT_TEXT)
+            _refresh_all[0] = 0
+            _play_priority[0] = 0
+        self.progress = None
+
     def _pass_batched(self, FrameGenerate, sp, batch, project, sequence_id,
                       center, total, snapshot, run, gen):
         # run = frames per second (sequence fps, or 30 if missing)
@@ -301,7 +326,8 @@ class PreviewWorker(object):
             # gpu_n is only the limit for a frame outside every plan range.
             gpu_n = gpu_low
             from sequence_player_preview import (refresh_plan, fit_refresh_pool,
-                                                 kept_decoder_guard)
+                                                 kept_decoder_guard,
+                                                 REFRESH_ABORT)
             # A refresh pass restarted before it finished (set_refresh_all
             # wakes the worker, then a retarget restarts the pass) reuses
             # the plan when nothing it depends on changed; a finished pass
@@ -412,6 +438,11 @@ class PreviewWorker(object):
                                     project, sequence_id, rn, rper, rstill, rk, rheld,
                                     keys=rkeys)
                                 self._pool_fit = r0
+                                if self._pool_n == REFRESH_ABORT:
+                                    # BUILD 317: not enough VRAM even at
+                                    # N 1: end the refresh pass (no exit)
+                                    self._abort_refresh(project, sequence_id)
+                                    return
                                 _vram_fatal_check("after reserve %d..%d" % (r0, r1))
                             limit = self._pool_n or 1
                             break
@@ -683,6 +714,19 @@ _play_priority = [0]
 _refresh_all = [0]
 # perf_counter of the last Refreshing Preview poll (GUI thread)
 _gui_beat = [0.0]
+# BUILD 317: (sequence_id, message) of a refresh pass aborted for lack of
+# VRAM, set on the worker thread, taken on the GUI thread
+_refresh_abort = [None]
+
+
+def take_refresh_abort(sequence_id=None):
+    # GUI thread: the message of an aborted refresh pass (of sequence_id,
+    # or any when None), cleared once taken; None when there is none
+    got = _refresh_abort[0]
+    if got is None or (sequence_id is not None and got[0] != sequence_id):
+        return None
+    _refresh_abort[0] = None
+    return got[1]
 
 
 def set_refresh_all(on):
@@ -690,6 +734,7 @@ def set_refresh_all(on):
     # (old gen) cannot clear the new request
     if on:
         plog.begin("F5 refresh", "requested")     # BUILD 247
+        _refresh_abort[0] = None    # BUILD 317: a new request drops an old abort
     else:
         plog.end("cancelled")
     w = _worker
