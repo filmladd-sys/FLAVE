@@ -596,10 +596,15 @@ class RenderJob(object):
                                "stderr (last 15 lines):\n%s"
                                % (code, subprocess.list2cmdline(cmd), _tail(err_path)))
             el = time.perf_counter() - t_start
-            print("WORKER render: %d frames %.1fs (%.1f fps) composite %.1f ms/f "
-                  "pipe %.1f ms/f audio %.2fs encoder %s"
-                  % (total, el, total / el if el > 0 else 0.0,
-                     1000.0 * t_comp / total, 1000.0 * t_pipe / total, t_audio, enc))
+            # BUILD 312: the render timing summary prints only with
+            # RENDER_LOG (the result message still names frames and time)
+            import preview_log
+            if preview_log.RENDER_LOG:
+                print("WORKER render: %d frames %.1fs (%.1f fps) composite %.1f ms/f "
+                      "pipe %.1f ms/f audio %.2fs encoder %s"
+                      % (total, el, total / el if el > 0 else 0.0,
+                         1000.0 * t_comp / total, 1000.0 * t_pipe / total,
+                         t_audio, enc))
             parts = ["%d frames" % total, enc,
                      ("stereo" if p["stereo"] else "mono") if wav else "no audio"]
             if srt:

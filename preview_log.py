@@ -16,9 +16,10 @@ import time
 # RENDER_LOG: the one switch for the verbose render / preview console
 # instrumentation: these [preview] lines, the WORKER refresh states /
 # decoders / plan / range / pool / batch lines, DECODER open / close and
-# RENDER decoders. False (default): silent; errors, warnings, the VRAM
-# fatal stop and the one-line pass / render summaries still print. Set
-# True to re-enable the instrumentation.
+# RENDER decoders, and (BUILD 312) the one-line 'WORKER preview' pass and
+# 'WORKER render' summaries. False (default): silent; errors,
+# cancellations, warnings and the VRAM fatal stop still print. Set True
+# to re-enable the instrumentation.
 RENDER_LOG = False
 PREVIEW_LOG = RENDER_LOG
 PROGRESS_SEC = 2.0

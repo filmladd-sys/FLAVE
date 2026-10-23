@@ -523,7 +523,8 @@ class PreviewWorker(object):
             sp._worker_burst[0] = False
             if fast:
                 spg._worker_fast[0] = False
-            if made:
+            # BUILD 312: the pass summary prints only with RENDER_LOG
+            if made and plog.RENDER_LOG:
                 el = time.perf_counter() - t_pass0
                 print("WORKER preview: %d frames %.1fs (%.1f fps) bursts %d "
                       "longest card pass %.0f ms" % (
