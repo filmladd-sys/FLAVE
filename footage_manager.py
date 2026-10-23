@@ -1,6 +1,7 @@
 # footage_manager.py
 # Footage Manager window for Ladd Video Editor
-# Menus: top-level Import and Sort By.
+# Menus: top-level Import and Sort By. The table's right-click menu starts
+# with the same Import action (on a row or on empty space).
 # ASCII only.
 
 import os
@@ -238,10 +239,12 @@ class FootageManager(QMainWindow):
     def _create_menus(self):
         menubar = self.menuBar()
 
-        # Top-level Import
+        # Top-level Import (BUILD 299: kept as self._import_action and also
+        # shown at the top of the table's right-click menu)
         import_action = QAction("Import", self)
         import_action.triggered.connect(self._import_footage)
         menubar.addAction(import_action)
+        self._import_action = import_action
 
         # Sort By menu
         sort_menu = menubar.addMenu("Sort By")
@@ -465,18 +468,22 @@ class FootageManager(QMainWindow):
             QMessageBox.warning(self, "Proxies", f"Could not open Proxies: {e}")
 
     def _row_context_menu(self, pos):
+        # BUILD 299: Import (the menu bar's own QAction, so its triggered
+        # handler runs) is first; on a footage row it is followed by a
+        # separator, Replace and Remove. Empty space shows Import alone.
+        footage_id = None
         item = self.table.itemAt(pos)
-        if item is None:
-            return
-        row = item.row()
-        name_item = self.table.item(row, 1)
-        if name_item is None:
-            return
-        footage_id = name_item.data(Qt.UserRole)
-        if footage_id is None:
-            return
+        if item is not None:
+            name_item = self.table.item(item.row(), 1)
+            if name_item is not None:
+                footage_id = name_item.data(Qt.UserRole)
 
         menu = QMenu(self)
+        menu.addAction(self._import_action)
+        if footage_id is None:
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+            return
+        menu.addSeparator()
         replace_action = menu.addAction("Replace")
         remove_action = menu.addAction("Remove")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
