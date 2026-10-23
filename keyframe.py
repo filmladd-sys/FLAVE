@@ -34,10 +34,6 @@ KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
                        "crop_x", "crop_y", "gamma", "brightness", "contrast",
                        "rotate", "border", "move", "crop_xy",
                        "crop_edges")
-# BUILD 305: a new keyframe clip is created untyped: type = UNTYPED (""),
-# which is in no KEYFRAME_CLIP_TYPES, so no effect collector or volume
-# loader picks it up. The first Add Key (or Paste Key) sets its type.
-UNTYPED = ""
 # Timeline title marker for a keyframe clip with no link_id
 UNLINKED_MARK = "(unlinked)"
 
@@ -1096,7 +1092,8 @@ def persist_keyframe_link_id(cur, clip_mem_id, link_id):
 
 
 class AddKeyframeClipDialog(QDialog):
-    # Name + Add. The type is chosen on the clip's first Add Key.
+    # Name + type (X / Y / Scale / ... / X Crop / Y Crop / ... / Rotate /
+    # Border Outline / Outline R / G / B / A) + Add
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Keyframe Clip")
@@ -1106,19 +1103,29 @@ class AddKeyframeClipDialog(QDialog):
         self.name_edit = QLineEdit()
         row.addWidget(self.name_edit)
         layout.addLayout(row)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Type:"))
+        self.type_combo = QComboBox()
+        for label, _stored in KEYFRAME_TYPE_CHOICES:
+            self.type_combo.addItem(label)
+        row2.addWidget(self.type_combo)
+        layout.addLayout(row2)
         add_btn = QPushButton("Add")
         add_btn.clicked.connect(self.accept)
         layout.addWidget(add_btn)
 
     def values(self):
-        # (name, UNTYPED): new clips start untyped
         name = (self.name_edit.text() or "").strip()
-        return name, UNTYPED
+        idx = self.type_combo.currentIndex()
+        if idx < 0 or idx >= len(KEYFRAME_TYPE_CHOICES):
+            return None
+        stored = KEYFRAME_TYPE_CHOICES[idx][1]
+        return name, stored
 
 
 def add_keyframe_clip(timeline, track_id, click_frame):
-    # Name dialog then insert an untyped clip (type UNTYPED; its first Add
-    # Key picks the type) on any keyframe track. out_frame = in_frame +
+    # Dialog then insert, any type on any keyframe track (the dialog lists
+    # every type; nothing on the track limits it). out_frame = in_frame +
     # 30 * fps, shortened to end at the next keyframe clip on the track when
     # that one starts sooner, so the new clip fills the free gap. Refused
     # only when click_frame lies inside a clip (clips on a track never
@@ -1277,9 +1284,6 @@ class AddKeyDialog(QDialog):
         layout.addWidget(ok_btn)
         if self.type_combo is not None:
             self.type_combo.currentIndexChanged.connect(self._type_changed)
-            # An untyped clip (UNTYPED) takes the drop-down's shown type
-            if stored_type not in [c[1] for c in KEYFRAME_TYPE_CHOICES]:
-                self._type_changed(self.type_combo.currentIndex())
 
     def _type_changed(self, idx):
         # BUILD 147: new type: its label, value range and default value
