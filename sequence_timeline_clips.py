@@ -633,7 +633,38 @@ def _drag_group(self, clip, edge="move"):
         if is_keyframe_clip_id(c[0]) and len(c) > 9:
             entry["keys"] = list(c[9])
         group.append(entry)
+    if edge == "right":
+        _add_source_caps(self, group)
     return group
+
+
+def _add_source_caps(self, group):
+    # BUILD 301: for a right trim, each video / audio footage clip gets
+    # "src_end", the cap on its source out-point (in + length, sequence
+    # frames): footage.duration rounded up to a whole second
+    # (sequence_timeline_sql.source_cap_frames). Image, caption, keyframe
+    # and sequence clips, and footage without a duration, get none.
+    from sequence_timeline_sql import footage_cap_map
+    seq_refs = getattr(self, "_seq_refs", None) or {}
+    want = [m for m in group
+            if m["clip"][1] is not None and not m["free_in"]
+            and m["clip"][0] not in seq_refs
+            and self._track_type(self._clip_track_id(m["clip"])) in ("video", "audio")]
+    if not want:
+        return
+    try:
+        conn = sqlite3.connect(self._project_db())
+        try:
+            caps = footage_cap_map(conn.cursor(), [m["clip"][1] for m in want],
+                                   getattr(self, "fps", None))
+        finally:
+            conn.close()
+    except (sqlite3.Error, TypeError):
+        return
+    for m in want:
+        cap = caps.get(int(m["clip"][1]))
+        if cap is not None:
+            m["src_end"] = cap
 
 
 def _no_source_floor(self, clip):
@@ -900,10 +931,15 @@ def _group_delta_range(self, group, edge):
                 lo = max(lo, -in_f)
             hi = min(hi, length - 1)
         else:
-            # length + d >= 1; end + d <= next_start
+            # length + d >= 1; end + d <= next_start; BUILD 301: in +
+            # length + d <= src_end (footage clips, _add_source_caps), so
+            # the group stops at the tightest cap. A clip already past its
+            # cap may not grow but is not cut back.
             lo = max(lo, 1 - length)
             if next_start is not None:
                 hi = min(hi, next_start - (start + length))
+            if m.get("src_end"):
+                hi = min(hi, max(0, m["src_end"] - (in_f + length)))
     return lo, hi
 
 

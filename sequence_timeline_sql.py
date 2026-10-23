@@ -2,6 +2,7 @@
 # Database and SQL helpers for the Sequence Timeline (no window class here).
 # Window methods take the SequenceTimeline instance as self. ASCII only.
 
+import math
 import os
 import sqlite3
 from PySide6.QtWidgets import QMessageBox, QInputDialog, QDialog, QTableWidgetItem
@@ -582,7 +583,9 @@ def _toggle_track_flag(self, track_id, column):
 
 
 def drop_footage(self, footage_id, row, x_in_clips):
-    # Insert a one-second clip: image footage on image tracks, video on video
+    # Insert a clip: image footage on image tracks (one second), video on
+    # video (full length, fitted to the room, BUILD 301), audio on audio
+    # (full length)
     if row < 0 or x_in_clips < 0:
         return False
     name_item = self.table.item(row, 0)
@@ -621,29 +624,22 @@ def drop_footage(self, footage_id, row, x_in_clips):
             # footage duration column, else 1 second
             length_frames = self._audio_length_frames(cur, footage_id)
         # Video with stored peaks and an audio track in this sequence:
-        # also add a linked audio clip on the first audio track, both
-        # sized from the peaks duration
+        # also add a linked audio clip (BUILD 109: nearest audio track below
+        # the video, else above). BUILD 301: the video (and its linked
+        # audio) goes in at the footage's full length (footage_length_frames)
+        # unless the room up to the next clip is shorter; then both fill
+        # only that room, the tightest across the video and audio tracks
+        # (fit_video_drop), so they stay in sync.
         audio_track_id = None
-        audio_full = False
         if track_type == "video":
             peak_seconds = self._peaks_seconds(cur, footage_id)
-            if peak_seconds > 0 and self._first_audio_track_id(cur) is not None:
-                length_frames = max(1, int(round(peak_seconds * self.fps)))
-                # BUILD 109: nearest audio track below the video with room,
-                # else nearest above (video over audio); none with room
-                # refuses the drop as before
-                audio_track_id = _nearest_free_track(
-                    self, cur, track_id, ("audio",), start_frame, length_frames,
-                    prefer_below=True)
-                audio_full = audio_track_id is None
-        # Refuse the drop (insert nothing) if the video clip or its linked
-        # audio clip would overlap a clip already on its track
-        if track_type == "video":
-            refused = None
-            if self._range_overlaps(cur, track_id, start_frame, length_frames):
-                refused = "video"
-            elif audio_full:
-                refused = "audio"
+            linked = peak_seconds > 0 and self._first_audio_track_id(cur) is not None
+            full = footage_length_frames(cur, footage_id, self.fps, peak_seconds)
+            length_frames, audio_track_id, refused = fit_video_drop(
+                self, cur, track_id, start_frame, full, linked,
+                lambda tid, st: next_clip_room(cur, tid, st))
+            # Refuse the drop (insert nothing) if the drop frame is inside a
+            # clip on the video track, or no audio track is free there
             if refused:
                 conn.close()
                 self.status_bar.showMessage(
@@ -1175,6 +1171,98 @@ def _first_free_track(self, cur, kinds, start, length):
         if not self._range_overlaps(cur, tid, start, length):
             return tid
     return None
+
+
+def source_cap_frames(seconds, fps):
+    # BUILD 301: right-trim cap on a footage clip's source out-point
+    # (in_frame + length_frames; edit points are sequence frames, i.e.
+    # sequence time, also under fps conform - sequence_player
+    # clip_source_frame). The reported duration rounded up to a whole
+    # second (12.3 s -> 13 s, 12.0 s -> 12 s) times the sequence fps,
+    # rounded down. None (no cap) when the duration or fps is missing / 0.
+    try:
+        sec, f = float(seconds or 0), float(fps or 0)
+    except (TypeError, ValueError):
+        return None
+    if sec <= 0 or f <= 0:
+        return None
+    return max(1, int(math.floor(math.ceil(sec - 1e-6) * f + 1e-6)))
+
+
+def footage_cap_map(cur, footage_ids, fps):
+    # {footage_id: source_cap_frames} for footage with a duration > 0
+    out = {}
+    ids = sorted({int(i) for i in footage_ids if i is not None})
+    if not ids:
+        return out
+    try:
+        rows = cur.execute(
+            "SELECT id, duration FROM footage WHERE id IN (%s)"
+            % ",".join("?" * len(ids)), ids).fetchall()
+    except sqlite3.Error:
+        return out
+    for fid, dur in rows:
+        cap = source_cap_frames(dur, fps)
+        if cap is not None:
+            out[int(fid)] = cap
+    return out
+
+
+def footage_length_frames(cur, footage_id, fps, peak_seconds=0.0):
+    # BUILD 301: full length of a video drop in sequence frames:
+    # round(footage.duration * fps), else the stored peaks duration, else
+    # one second
+    seconds = 0.0
+    try:
+        row = cur.execute("SELECT duration FROM footage WHERE id = ?",
+                          (footage_id,)).fetchone()
+        seconds = float(row[0]) if row and row[0] else 0.0
+    except (sqlite3.Error, TypeError, ValueError):
+        seconds = 0.0
+    if seconds <= 0:
+        seconds = float(peak_seconds or 0)
+    if seconds <= 0:
+        seconds = 1.0
+    return max(1, int(round(seconds * float(fps or 1))))
+
+
+def next_clip_room(cur, track_id, start):
+    # Frames from start to the next clip starting at or after it on
+    # track_id (clips table), None if there is none
+    row = cur.execute(
+        "SELECT MIN(start_frame) FROM clips WHERE track_id = ? AND start_frame >= ?",
+        (track_id, start)).fetchone()
+    return None if not row or row[0] is None else int(row[0]) - int(start)
+
+
+def fit_video_drop(self, cur, track_id, start, full, linked, room):
+    # BUILD 301: (length, audio_track_id, refused) for a video drop of
+    # full frames at start. refused "video": start is inside a clip on the
+    # video track; "audio": linked and no audio track is free at start.
+    # length is full, cut to room(track_id, start) (frames to the next
+    # clip, None = open); a linked audio clip goes on the nearest audio
+    # track (below first) with room for that length, else the nearest one
+    # free at start, and the length is cut to its room too. Used by
+    # drop_footage and its drag preview (sequence_timeline_droppreview).
+    if self._range_overlaps(cur, track_id, start, 1):
+        return full, None, "video"
+    length = full
+    r = room(track_id, start)
+    if r is not None:
+        length = max(1, min(length, r))
+    audio = None
+    if linked:
+        audio = _nearest_free_track(self, cur, track_id, ("audio",), start,
+                                    length, prefer_below=True)
+        if audio is None:
+            audio = _nearest_free_track(self, cur, track_id, ("audio",), start,
+                                        1, prefer_below=True)
+            if audio is None:
+                return length, None, "audio"
+            r = room(audio, start)
+            if r is not None:
+                length = max(1, min(length, r))
+    return length, audio, None
 
 
 def _nearest_free_track(self, cur, target_id, kinds, start, length, prefer_below):

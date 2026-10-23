@@ -6,13 +6,15 @@
 #   start = max(0, view_start_frame + int(x_in_clips / pixels_per_frame))
 #   (no snapping in drop_footage, so none here)
 #   image footage -> image tracks only; video -> video; audio -> audio
-#   video length: peaks duration if peaks exist and the sequence has an
-#     audio track (then a linked audio clip goes on _nearest_free_track,
-#     below first, then above), else 1 second
+#   video length (BUILD 301): footage_length_frames (footage.duration,
+#     else peaks, else 1 s) cut to the room before the next clip by
+#     fit_video_drop; a linked audio clip (peaks exist and the sequence has
+#     an audio track) goes on _nearest_free_track, below first, then above,
+#     and the room on its track cuts the length too
 #   audio length: _audio_length_frames (peaks, else footage.duration, 1 s)
-#   refused (red): video overlapping a clip on its track, or no audio track
-#     with room; image / audio drops have no overlap check in drop_footage
-#     and are never shown red
+#   refused (red): video drop frame inside a clip on its track, or no
+#     audio track free there; image / audio drops have no overlap check in
+#     drop_footage and are never shown red
 # Footage facts are read once per drag (dragEnter); each move uses the
 # table rows and clips_by_track already in memory (no database query).
 # ASCII only.
@@ -52,10 +54,12 @@ def footage_drag_info(tl, footage_id):
             video_len = max(1, int(round(fps)))
             linked = False
             if "video" in accepts:
+                from sequence_timeline_sql import footage_length_frames
                 peak_seconds = tl._peaks_seconds(cur, int(footage_id))
-                if peak_seconds > 0 and tl._first_audio_track_id(cur) is not None:
-                    video_len = max(1, int(round(peak_seconds * fps)))
-                    linked = True
+                video_len = footage_length_frames(cur, int(footage_id), fps,
+                                                  peak_seconds)
+                linked = (peak_seconds > 0
+                          and tl._first_audio_track_id(cur) is not None)
             audio_len = (tl._audio_length_frames(cur, int(footage_id))
                          if "audio" in accepts else None)
         finally:
@@ -103,6 +107,12 @@ class _MemTimeline(object):
         return mem_range_overlaps(self._clips, track_id, start, length)
 
 
+def mem_next_room(clips_by_track, track_id, start):
+    # Same as next_clip_room: frames to the next clip at or after start
+    nxt = [c[2] for c in clips_by_track.get(track_id, []) if c[2] >= start]
+    return min(nxt) - start if nxt else None
+
+
 def mem_range_overlaps(clips_by_track, track_id, start, length):
     # Same test as _range_overlaps: [start, start + length) vs each clip
     for c in clips_by_track.get(track_id, []):
@@ -132,20 +142,16 @@ def preview_boxes(tl, info, pos):
         return [(row, start, max(1, int(round(tl.fps))), False)]
     if track_type == "audio":
         return [(row, start, info["audio_len"] or max(1, int(round(tl.fps))), False)]
-    length = info["video_len"]
+    from sequence_timeline_sql import fit_video_drop
+    clips = tl.clips_by_track
+    length, tid, why = fit_video_drop(
+        _MemTimeline(tl), _MemCursor(rows), track_id, start, info["video_len"],
+        info["linked_audio"], lambda t, st: mem_next_room(clips, t, st))
     boxes = []
-    video_busy = mem_range_overlaps(tl.clips_by_track, track_id, start, length)
     audio_row = None
-    audio_full = False
-    if info["linked_audio"]:
-        from sequence_timeline_sql import _nearest_free_track
-        tid = _nearest_free_track(_MemTimeline(tl), _MemCursor(rows), track_id,
-                                  ("audio",), start, length, prefer_below=True)
-        if tid is None:
-            audio_full = True
-        else:
-            audio_row = [r for r, t, _tt in rows if t == tid][0]
-    refused = video_busy or audio_full
+    if tid is not None:
+        audio_row = [r for r, t, _tt in rows if t == tid][0]
+    refused = why is not None
     boxes.append((row, start, length, refused))
     if audio_row is not None:
         boxes.append((audio_row, start, length, refused))
