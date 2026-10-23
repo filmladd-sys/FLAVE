@@ -1370,8 +1370,7 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
 # fit_refresh_pool result: not enough VRAM even at N = 1 with the nvJPEG
 # states trimmed; the worker aborts the refresh pass (BUILD 317)
 REFRESH_ABORT = -1
-REFRESH_ABORT_TEXT = ("Not enough GPU memory to build previews at this size. "
-                      "Lower Preview Size in Project Settings.")
+REFRESH_ABORT_TEXT = "Memory Low! Reduce Preview Size"
 
 
 def _fit_last_resort(gen, n, per, held, still, short):
