@@ -1,7 +1,8 @@
 # footage_manager.py
 # Footage Manager window for Ladd Video Editor
-# Menus: top-level Import and Sort By. The table's right-click menu starts
-# with the same Import action (on a row or on empty space).
+# Menus: top-level Import, Slug (Color Bar, Color Fill; footage_slug.py)
+# and Sort By. The table's right-click menu starts with the same Import
+# action and Slug submenu (on a row or on empty space).
 # ASCII only.
 
 import os
@@ -246,6 +247,17 @@ class FootageManager(QMainWindow):
         menubar.addAction(import_action)
         self._import_action = import_action
 
+        # Slug menu (BUILD 304: generated PNGs, footage_slug.py); the same
+        # QMenu is the right-click menu's Slug submenu
+        slug_menu = menubar.addMenu("Slug")
+        bar_action = QAction("Color Bar", self)
+        bar_action.triggered.connect(self._slug_color_bar)
+        slug_menu.addAction(bar_action)
+        fill_action = QAction("Color Fill", self)
+        fill_action.triggered.connect(self._slug_color_fill)
+        slug_menu.addAction(fill_action)
+        self._slug_menu = slug_menu
+
         # Sort By menu
         sort_menu = menubar.addMenu("Sort By")
 
@@ -264,6 +276,14 @@ class FootageManager(QMainWindow):
         sort_length = QAction("Length", self)
         sort_length.triggered.connect(self._sort_by_length)
         sort_menu.addAction(sort_length)
+
+    def _slug_color_bar(self):
+        from footage_slug import color_bar
+        color_bar(self)
+
+    def _slug_color_fill(self):
+        from footage_slug import color_fill
+        color_fill(self)
 
     def _import_footage(self):
         if not self.project_db:
@@ -469,8 +489,9 @@ class FootageManager(QMainWindow):
 
     def _row_context_menu(self, pos):
         # BUILD 299: Import (the menu bar's own QAction, so its triggered
-        # handler runs) is first; on a footage row it is followed by a
-        # separator, Replace and Remove. Empty space shows Import alone.
+        # handler runs) is first, then the menu bar's Slug menu as a
+        # submenu (BUILD 304); on a footage row they are followed by a
+        # separator, Replace and Remove. Empty space shows Import and Slug.
         footage_id = None
         item = self.table.itemAt(pos)
         if item is not None:
@@ -480,6 +501,7 @@ class FootageManager(QMainWindow):
 
         menu = QMenu(self)
         menu.addAction(self._import_action)
+        menu.addMenu(self._slug_menu)
         if footage_id is None:
             menu.exec(self.table.viewport().mapToGlobal(pos))
             return
