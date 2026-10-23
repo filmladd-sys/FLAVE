@@ -124,8 +124,8 @@ def _ensure_icons_index_for(project_db):
 
 def _ensure_key_tables_for(project_db):
     # BUILD 294: keyframe_border and keyframe_move tables (BUILD 295: and
-    # keyframe_crop) (CREATE TABLE IF NOT EXISTS, new_project.py SQL) in a
-    # project made before they existed.
+    # keyframe_crop; BUILD 296: and keyframe_crop_edges) (CREATE TABLE IF
+    # NOT EXISTS, new_project.py SQL) in a project made before they existed.
     # TEMPORARY older-project check: remove it in the future, once every
     # project in use has these tables from new_project.py.
     if not project_db:
@@ -137,6 +137,7 @@ def _ensure_key_tables_for(project_db):
             conn.execute(new_project.KEYFRAME_BORDER_SQL)
             conn.execute(new_project.KEYFRAME_MOVE_SQL)
             conn.execute(new_project.KEYFRAME_CROP_SQL)
+            conn.execute(new_project.KEYFRAME_CROP_EDGES_SQL)
             conn.commit()
         finally:
             conn.close()

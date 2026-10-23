@@ -464,6 +464,48 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
     return out
 
 
+def crop_edge_rect(crop_x, crop_y, crop_edges, sw, sh, orig_size=None):
+    # BUILD 296: the crop of one layer with Edge Crop keys. crop_edges =
+    # (top, bottom, left, right) from the crop_edges keyframes, crop_x /
+    # crop_y the X / Y / XY Crop values (None = 0), all in original source
+    # pixels. Each edge is its own value plus crop_x (left, right) or
+    # crop_y (top, bottom), scaled to a proxy by size / orig_size per axis,
+    # then clamped at 0 (negative = no crop).
+    # Returns ("sym", cx, cy) when left == right and top == bottom: the
+    # kernel's own symmetric crop (exactly the path without edge keys).
+    # Otherwise ("rect", lo_x, hi_x, lo_y, hi_y): the source columns lo_x
+    # .. hi_x and rows lo_y .. hi_y the kernel's crop test would keep with
+    # these edges (pixel center inside [left, sw - right], the same f32
+    # compares), empty when lo > hi.
+    def _f(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    t, b, l, r = (_f(v) for v in crop_edges)
+    cx, cy = _f(crop_x), _f(crop_y)
+    out = []
+    for vals, size, orig_i in (((l + cx, r + cx), sw, 0),
+                               ((t + cy, b + cy), sh, 1)):
+        pair = []
+        for c in vals:
+            if c and orig_size is not None and orig_size[orig_i]:
+                c = c * float(size) / float(orig_size[orig_i])
+            pair.append(max(0.0, c))
+        out.append(pair)
+    (el, er), (et, eb) = out
+    if el == er and et == eb:
+        return ("sym", el, et)
+    f32 = lambda v: ctypes.c_float(v).value
+    rect = []
+    for lo_c, hi_c, size in ((el, er, sw), (et, eb, sh)):
+        lo = max(0, int(math.ceil(f32(lo_c) - 0.5)))
+        hi = min(int(size) - 1,
+                 int(math.floor(f32(float(size) - f32(hi_c)) - 0.5)))
+        rect += [lo, hi]
+    return ("rect",) + tuple(rect)
+
+
 def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # GUI thread only: copy of the track rows and clips the composite reads,
     # so the preview worker never touches Qt widgets. Also copies linked
@@ -536,12 +578,16 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     from keyframe import collect_crop_xy_clips
     crop_xy_x_clips, crop_xy_y_clips = collect_crop_xy_clips(
         tl.clips_by_track, track_order)
+    # BUILD 296: crop_edges keyframe clips, top, bottom, left, right
+    # (snapshot[24] .. [27]) (keyframe.collect_crop_edge_clips)
+    from keyframe import collect_crop_edge_clips
+    crop_edge_clips = collect_crop_edge_clips(tl.clips_by_track, track_order)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
             gamma_clips, brightness_clips, contrast_clips, rotate_clips,
             outline_clips) + tuple(outline_rgba_clips) + (
                 fps_conform, move_x_clips, move_y_clips,
-                crop_xy_x_clips, crop_xy_y_clips)
+                crop_xy_x_clips, crop_xy_y_clips) + tuple(crop_edge_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -950,6 +996,11 @@ class SequencePlayer(QWindow):
         crop_xy_x_clips = snapshot[22] if len(snapshot) > 22 else []
         crop_xy_y_clips = snapshot[23] if len(snapshot) > 23 else []
         from keyframe import crop_xy_for_link
+        # BUILD 296: crop_edges keyframes (snapshot[24] .. [27]); layer
+        # items gain (top, bottom, left, right) or None ([17])
+        crop_edge_clips = tuple(snapshot[i] if len(snapshot) > i else []
+                                for i in (24, 25, 26, 27))
+        from keyframe import crop_edges_for_link
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -1009,6 +1060,8 @@ class SequencePlayer(QWindow):
                     if crop_xy is not None:
                         crop_x = (crop_x or 0.0) + crop_xy[0]
                         crop_y = (crop_y or 0.0) + crop_xy[1]
+                    crop_edges = crop_edges_for_link(
+                        crop_edge_clips, link_id, frame, clip_order)
                     gamma = color_value_for_link(
                         gamma_clips, link_id, frame, clip_order)
                     brightness = color_value_for_link(
@@ -1024,7 +1077,8 @@ class SequencePlayer(QWindow):
                                    pos_dy, (clip[0], path), orig_size, opacity,
                                    crop_x, crop_y, gamma, brightness, contrast,
                                    rotate, outline,
-                                   instances.get(clip[0], (0, path))))
+                                   instances.get(clip[0], (0, path)),
+                                   crop_edges))
                 break
         return layers
 
@@ -1188,7 +1242,7 @@ class SequencePlayer(QWindow):
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
                pos_dx=None, pos_dy=None, orig_size=None, opacity=None,
                crop_x=None, crop_y=None, gamma=None, brightness=None,
-               contrast=None, rotate=None, outline=None):
+               contrast=None, rotate=None, outline=None, crop_edges=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -1239,6 +1293,36 @@ class SequencePlayer(QWindow):
             # BUILD 152: crop_y too (top and bottom); negative = no crop
             c = max(0.0, c)
             crops.append(ctypes.c_float(c))
+        # BUILD 296: Edge Crop (crop_edges = (top, bottom, left, right) or
+        # None = no edge keys, the crop above unchanged). Equal left / right
+        # and top / bottom stay the kernel's symmetric crop. Otherwise the
+        # kernel gets only the kept source rectangle (crop_edge_rect): the
+        # source pointer moves to its top-left pixel, sw / sh become its
+        # size, ox / oy (computed from the full frame below) shift back by
+        # its left / top, so every sequence pixel samples the same source
+        # pixel as before and the picture stays in place; the cropped edges
+        # are transparent. The shift is kept even per axis (the kernel
+        # rounds half to even, so an odd shift could pick the neighbour
+        # pixel at exact halves, e.g. 200% in an odd sequence size): an odd
+        # left / top starts one pixel earlier with one more pixel at the
+        # far side and a kernel crop of 1 on that axis, which trims exactly
+        # those two (else crop 0); pixels it trims are never read. The
+        # border outline follows the kept rectangle. An empty rectangle
+        # draws nothing.
+        rect = None
+        if crop_edges is not None:
+            ce = crop_edge_rect(crop_x, crop_y, crop_edges, sw, sh, orig_size)
+            if ce[0] == "sym":
+                crops = [ctypes.c_float(ce[1]), ctypes.c_float(ce[2])]
+            else:
+                lo_x, hi_x, lo_y, hi_y = ce[1:]
+                if lo_x > hi_x or lo_y > hi_y:
+                    return
+                px, py = lo_x & 1, lo_y & 1
+                # (left, top, width, height) handed to the kernel
+                rect = (lo_x - px, lo_y - py, hi_x - lo_x + 1 + 2 * px,
+                        hi_y - lo_y + 1 + 2 * py)
+                crops = [ctypes.c_float(px), ctypes.c_float(py)]
         # BUILD 154: color keyframes (None = no change). The kernel runs, per
         # RGB channel of the source pixel before the opacity / alpha blend,
         # c = channel / 255, then contrast (c - 0.5) * contrast + 0.5 clamped
@@ -1294,16 +1378,22 @@ class SequencePlayer(QWindow):
             pdy = int(round(float(pos_dy))) if pos_dy is not None else 0
         except (TypeError, ValueError):
             pdy = 0
-        src = ctypes.c_uint64(int(src_ptr))
-        target = self._target if self._target is not None else self.dst
-        dst = ctypes.c_uint64(int(target.value))
-        vals = [ctypes.c_uint32(v) for v in (sw, sh, stride, bpp, self.seq_w, self.seq_h)]
         # Centering ox/oy; with inv_scale=1 and pos_dx=0, sx = x + ox
         dx = (self.seq_w - sw) // 2 if self.seq_w > sw else 0
         dy = (self.seq_h - sh) // 2 if self.seq_h > sh else 0
         cx = (sw - self.seq_w) // 2 if sw > self.seq_w else 0
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
-        vals += [ctypes.c_int32(cx - dx), ctypes.c_int32(cy - dy), inv_scale,
+        ox, oy = cx - dx, cy - dy
+        if rect is not None:
+            # BUILD 296: the kept source rectangle (see above)
+            src_ptr = int(src_ptr) + rect[1] * int(stride) + rect[0] * int(bpp)
+            sw, sh = rect[2], rect[3]
+            ox, oy = ox - rect[0], oy - rect[1]
+        src = ctypes.c_uint64(int(src_ptr))
+        target = self._target if self._target is not None else self.dst
+        dst = ctypes.c_uint64(int(target.value))
+        vals = [ctypes.c_uint32(v) for v in (sw, sh, stride, bpp, self.seq_w, self.seq_h)]
+        vals += [ctypes.c_int32(ox), ctypes.c_int32(oy), inv_scale,
                  ctypes.c_int32(pdx), ctypes.c_int32(pdy), inv_scale_y,
                  opacity_f, crops[0], crops[1], ctypes.c_uint32(cflags),
                  ctypes.c_float(k_), ctypes.c_float(b_), ctypes.c_float(1.0 / g_),
@@ -1754,6 +1844,7 @@ class SequencePlayer(QWindow):
             contrast = layer[13] if len(layer) > 13 else None
             rotate = layer[14] if len(layer) > 14 else None    # BUILD 219
             outline = layer[15] if len(layer) > 15 else None   # BUILD 220
+            crop_edges = layer[17] if len(layer) > 17 else None  # BUILD 296
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
@@ -1762,7 +1853,8 @@ class SequencePlayer(QWindow):
                                 orig_size=orig_size, opacity=opacity,
                                 crop_x=crop_x, crop_y=crop_y,
                                 gamma=gamma, brightness=brightness, contrast=contrast,
-                                rotate=rotate, outline=outline)
+                                rotate=rotate, outline=outline,
+                                crop_edges=crop_edges)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -1777,7 +1869,8 @@ class SequencePlayer(QWindow):
                             orig_size=orig_size, opacity=opacity,
                             crop_x=crop_x, crop_y=crop_y,
                             gamma=gamma, brightness=brightness, contrast=contrast,
-                            rotate=rotate, outline=outline)
+                            rotate=rotate, outline=outline,
+                            crop_edges=crop_edges)
                 continue
             dec = self._decoder(dkey, frame)
             if not source_index_ok(self, dkey, dec, src_frame):
@@ -1843,7 +1936,8 @@ class SequencePlayer(QWindow):
                         orig_size=orig_size, opacity=opacity,
                         crop_x=crop_x, crop_y=crop_y,
                         gamma=gamma, brightness=brightness, contrast=contrast,
-                        rotate=rotate, outline=outline)
+                        rotate=rotate, outline=outline,
+                        crop_edges=crop_edges)
         self._sync()
         self._target = None
         if target is self.dst:

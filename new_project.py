@@ -28,7 +28,9 @@ ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
 # BUILD 294: keys of type-move keyframe clips (absolute sequence frame, x and
 # y the layer center in sequence px). BUILD 295: keys of type-crop_xy
 # keyframe clips (absolute sequence frame, x and y the crop_x / crop_y
-# values in source pixels). Other types keep their keys in
+# values in source pixels). BUILD 296: keys of type-crop_edges keyframe
+# clips (absolute sequence frame, top, bottom, left, right crop in source
+# pixels). Other types keep their keys in
 # keyframes. Also run on project open for older projects (project_manager
 # _ensure_key_tables_for).
 KEYFRAME_BORDER_SQL = """
@@ -59,6 +61,17 @@ KEYFRAME_CROP_SQL = """
         frame INTEGER NOT NULL,
         x REAL NOT NULL,
         y REAL NOT NULL
+    )
+"""
+KEYFRAME_CROP_EDGES_SQL = """
+    CREATE TABLE IF NOT EXISTS keyframe_crop_edges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        keyframe_clip_id INTEGER NOT NULL,
+        frame INTEGER NOT NULL,
+        top REAL NOT NULL,
+        bottom REAL NOT NULL,
+        left REAL NOT NULL,
+        right REAL NOT NULL
     )
 """
 # Characters Windows does not allow in a file name, plus control characters
@@ -311,10 +324,12 @@ class NewProjectWindow(QMainWindow):
         """)
 
         # BUILD 222 / 294: keys of type-border and type-move keyframe clips
-        # (KEYFRAME_BORDER_SQL, KEYFRAME_MOVE_SQL, KEYFRAME_CROP_SQL above)
+        # (KEYFRAME_BORDER_SQL, KEYFRAME_MOVE_SQL, KEYFRAME_CROP_SQL,
+        # KEYFRAME_CROP_EDGES_SQL above)
         cur.execute(KEYFRAME_BORDER_SQL)
         cur.execute(KEYFRAME_MOVE_SQL)
         cur.execute(KEYFRAME_CROP_SQL)
+        cur.execute(KEYFRAME_CROP_EDGES_SQL)
 
         # Proxies of footage (path to the proxy file, size percentage).
         # BUILD 119: proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc';
