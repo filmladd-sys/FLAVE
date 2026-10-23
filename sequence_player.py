@@ -700,10 +700,14 @@ class SequencePlayer(QWindow):
     def moveEvent(self, event):
         super().moveEvent(event)
         self._save_geometry()
+        if self._text_ui(False):
+            self._text_ui().geometry_changed()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._save_geometry()
+        if self._text_ui(False):
+            self._text_ui().geometry_changed()
 
     # ---- window events
 
@@ -722,7 +726,18 @@ class SequencePlayer(QWindow):
     def event(self, event):
         if event.type() == QEvent.Close:
             self._on_close()
+        elif event.type() == QEvent.Leave and self._text_ui(False):
+            self._text_ui().leave()
         return super().event(event)
+
+    def _text_ui(self, make=True):
+        # BUILD 310: on-player text clip move / edit (player_text_edit),
+        # made on first use; make=False returns None until then
+        ui = getattr(self, "_text_edit_ui", None)
+        if ui is None and make:
+            from player_text_edit import PlayerTextEdit
+            ui = self._text_edit_ui = PlayerTextEdit(self)
+        return ui
 
     def mousePressEvent(self, event):
         # BUILD 256: right click anywhere in the player opens the Playback
@@ -732,7 +747,31 @@ class SequencePlayer(QWindow):
             event.accept()
             self._playback_menu(event.globalPosition().toPoint())
             return
+        # BUILD 310: left press on the selected text clip's box starts a drag
+        if event.button() == Qt.LeftButton and self._text_ui().press(event.position()):
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # BUILD 310: hover outline / text drag
+        if self._text_ui().move(event.position()):
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._text_ui().release(event.position()):
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # BUILD 310: double-click on the selected text clip's box edits it
+        if event.button() == Qt.LeftButton and self._text_ui().double_click(event.position()):
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def _playback_menu(self, global_pos):
         # Checkable Playback Size items; a pick is stored and the last
@@ -788,6 +827,8 @@ class SequencePlayer(QWindow):
         if self.closed:
             return
         self.closed = True
+        if self._text_ui(False):
+            self._text_ui().close()
         self._clear_wait()
         self._reader.stop_reader()
         self.stop_preview_audio()
