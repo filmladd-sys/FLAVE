@@ -24,6 +24,10 @@ import math
 
 # (label, width, height) in drop-down order
 PRESETS = (
+    # BUILD 322: 480p presets, square pixels (Wide: 480 * 16 / 9 = 853.33,
+    # rounded to the even 854 the encoders need; aspect 1.779 vs 1.778)
+    ("NTSC 480p (640x480)", 640, 480),
+    ("Wide 480p (854x480)", 854, 480),
     ("1K Horizontal (1920x1080)", 1920, 1080),
     ("2K Horizontal (2560x1440)", 2560, 1440),
     ("3K Horizontal (3200x1800)", 3200, 1800),
