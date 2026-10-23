@@ -531,11 +531,17 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     from keyframe import collect_move_clips
     move_x_clips, move_y_clips = collect_move_clips(
         tl.clips_by_track, track_order)
+    # BUILD 295: crop_xy keyframe clips, x (snapshot[22]) and y
+    # (snapshot[23]) (keyframe.collect_crop_xy_clips)
+    from keyframe import collect_crop_xy_clips
+    crop_xy_x_clips, crop_xy_y_clips = collect_crop_xy_clips(
+        tl.clips_by_track, track_order)
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
             gamma_clips, brightness_clips, contrast_clips, rotate_clips,
             outline_clips) + tuple(outline_rgba_clips) + (
-                fps_conform, move_x_clips, move_y_clips)
+                fps_conform, move_x_clips, move_y_clips,
+                crop_xy_x_clips, crop_xy_y_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -939,6 +945,11 @@ class SequencePlayer(QWindow):
         move_x_clips = snapshot[20] if len(snapshot) > 20 else []
         move_y_clips = snapshot[21] if len(snapshot) > 21 else []
         from keyframe import move_offset_for_link
+        # BUILD 295: crop_xy keyframes (snapshot[22] x, [23] y); their
+        # values are added to the crop_x / crop_y values
+        crop_xy_x_clips = snapshot[22] if len(snapshot) > 22 else []
+        crop_xy_y_clips = snapshot[23] if len(snapshot) > 23 else []
+        from keyframe import crop_xy_for_link
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -992,6 +1003,12 @@ class SequencePlayer(QWindow):
                         crop_x_clips, link_id, frame, clip_order)
                     crop_y = crop_offset_for_link(
                         crop_y_clips, link_id, frame, clip_order)
+                    crop_xy = crop_xy_for_link(
+                        crop_xy_x_clips, crop_xy_y_clips, link_id, frame,
+                        clip_order)
+                    if crop_xy is not None:
+                        crop_x = (crop_x or 0.0) + crop_xy[0]
+                        crop_y = (crop_y or 0.0) + crop_xy[1]
                     gamma = color_value_for_link(
                         gamma_clips, link_id, frame, clip_order)
                     brightness = color_value_for_link(

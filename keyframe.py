@@ -25,9 +25,11 @@ from PySide6.QtWidgets import (
 # outline_r / _g / _b / _a types, which are no longer offered.
 # BUILD 294: move (layer center X and Y in sequence px in one key, CUDA
 # blend only). Its keys are keyframe_move rows (see MOVE_TYPE).
+# BUILD 295: crop_xy (crop_x and crop_y in source pixels in one key, CUDA
+# blend only). Its keys are keyframe_crop rows (see CROP_XY_TYPE).
 KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
                        "crop_x", "crop_y", "gamma", "brightness", "contrast",
-                       "rotate", "border", "move")
+                       "rotate", "border", "move", "crop_xy")
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -39,6 +41,7 @@ KEYFRAME_TYPE_CHOICES = (
     ("Opacity", "opacity"),
     ("X Crop", "crop_x"),     # BUILD 147
     ("Y Crop", "crop_y"),     # BUILD 147
+    ("XY Crop", "crop_xy"),           # BUILD 295
     ("Gamma", "gamma"),               # BUILD 154
     ("Brightness", "brightness"),     # BUILD 154
     ("Contrast", "contrast"),         # BUILD 154
@@ -58,7 +61,8 @@ KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0),
 # turn, so keys like 0 -> 720 spin twice). Its Add / Edit Key spin box
 # steps 1 degree; BUILD 222: border px steps 1 (whole pixels; its R, G, B,
 # A fields also step 1); BUILD 294: move X and Y step 1 (unbounded);
-# every other type steps 0.1.
+# every other type steps 0.1 (BUILD 295: crop_xy X and Y too, unbounded
+# like crop_x / crop_y).
 KEY_VALUE_STEPS = {"rotate": 1.0, "border": 1.0, "move": 1.0}
 
 # BUILD 222: a "border" clip's keys live in keyframe_border (id,
@@ -73,15 +77,23 @@ KEY_VALUE_STEPS = {"rotate": 1.0, "border": 1.0, "move": 1.0}
 # keyframe_clip_id, frame, x, y; x / y the absolute layer center in
 # sequence px like position X / Y). In memory its keys stay (key_id,
 # frame, x) in entry[9] and entry[11] maps key_id -> y.
+# BUILD 295: a "crop_xy" clip's keys live in keyframe_crop (same columns;
+# x / y the crop_x / crop_y values in source pixels, 0 = no crop), in
+# memory the same way as move. XY_KEY_TYPES are the types with an x and y
+# per key.
 BORDER_TYPE = "border"
 MOVE_TYPE = "move"
+CROP_XY_TYPE = "crop_xy"
+XY_KEY_TYPES = (MOVE_TYPE, CROP_XY_TYPE)
 BORDER_RGBA_LABELS = ("R", "G", "B", "A")
 KEY_TABLE_COLS = (("keyframes", ("value",)),
                   ("keyframe_border", ("px", "r", "g", "b", "a")),
-                  ("keyframe_move", ("x", "y")))
+                  ("keyframe_move", ("x", "y")),
+                  ("keyframe_crop", ("x", "y")))
 # Stored type -> its key table; every type not listed uses keyframes
 KEY_TABLE_BY_TYPE = {BORDER_TYPE: "keyframe_border",
-                     MOVE_TYPE: "keyframe_move"}
+                     MOVE_TYPE: "keyframe_move",
+                     CROP_XY_TYPE: "keyframe_crop"}
 
 
 def key_table_for_type(stored_type):
@@ -90,8 +102,8 @@ def key_table_for_type(stored_type):
 
 def key_tables(cur):
     # Key tables present in this project (new_project.py creates all of
-    # them; project_manager creates keyframe_border / keyframe_move in an
-    # older project on open)
+    # them; project_manager creates keyframe_border / keyframe_move /
+    # keyframe_crop in an older project on open)
     names = [t for t, _c in KEY_TABLE_COLS]
     cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND "
                 "name IN (%s)" % ",".join("?" for _ in names), names)
@@ -122,9 +134,10 @@ def border_rgba(clip, key_id):
     return extra.get(key_id, (255.0, 255.0, 255.0, 255.0))
 
 
-def move_y(clip, key_id):
-    # BUILD 294: y of a move clip's key (None if unknown or not a move clip)
-    if len(clip) <= 10 or clip[10] != MOVE_TYPE:
+def key_y(clip, key_id):
+    # BUILD 294: y of a move (BUILD 295: or crop_xy) clip's key (None if
+    # unknown or another type)
+    if len(clip) <= 10 or clip[10] not in XY_KEY_TYPES:
         return None
     extra = clip[11] if len(clip) > 11 and isinstance(clip[11], dict) else {}
     return extra.get(key_id)
@@ -191,7 +204,8 @@ def load_keyframe_clips(cur, sequence_id, clips):
     # BUILD 222: a border clip's entry also has [11] = {key_id: (r, g, b,
     # a)}; its keys come from keyframe_border with value = px
     # BUILD 294: a move clip's entry has [11] = {key_id: y}; its keys come
-    # from keyframe_move with value = x
+    # from keyframe_move with value = x. BUILD 295: crop_xy the same from
+    # keyframe_crop
     by_db = {}
     try:
         cur.execute(
@@ -209,7 +223,7 @@ def load_keyframe_clips(cur, sequence_id, clips):
         length = max(1, out_f - in_f)
         entry = [mem_id_from_db(db_id), None, in_f, length,
                  clip_title(name, ktype), 1, 0, 0, link_id, [], ktype]
-        if ktype in (BORDER_TYPE, MOVE_TYPE):
+        if ktype in (BORDER_TYPE,) + XY_KEY_TYPES:
             entry.append({})
         clips.setdefault(track_id, []).append(entry)
         by_db[int(db_id)] = entry
@@ -241,12 +255,15 @@ def load_keyframe_clips(cur, sequence_id, clips):
                 entry[9].append((int(key_id), int(frame), float(px)))
                 entry[11][int(key_id)] = (float(r), float(g), float(b),
                                           float(a))
-    if "keyframe_move" in tables:
+    for xy_table in ("keyframe_move", "keyframe_crop"):
+        if xy_table not in tables:
+            continue
         cur.execute(
             "SELECT k.id, k.keyframe_clip_id, k.frame, k.x, k.y "
-            "FROM keyframe_move k JOIN keyframe_clips c "
+            "FROM %s k JOIN keyframe_clips c "
             "ON c.id = k.keyframe_clip_id "
-            "WHERE c.sequence_id = ? ORDER BY k.frame, k.id", (sequence_id,))
+            "WHERE c.sequence_id = ? ORDER BY k.frame, k.id" % xy_table,
+            (sequence_id,))
         for key_id, db_id, frame, x, y in cur.fetchall():
             entry = by_db.get(int(db_id))
             if entry is not None and len(entry) > 11:
@@ -256,7 +273,7 @@ def load_keyframe_clips(cur, sequence_id, clips):
 
 def format_key_value(value, stored_type, y=None):
     # Position X/Y, scale and volume: two decimal places. BUILD 294: a move
-    # key with its y given shows "x, y"
+    # (BUILD 295: or crop_xy) key with its y given shows "x, y"
     if y is not None:
         return "%.2f, %.2f" % (float(value), float(y))
     return "%.2f" % float(value)
@@ -369,15 +386,37 @@ def move_offset_for_link(move_x_clips, move_y_clips, clip_link_id, frame,
     # their x / y values (collect_move_clips), so both axes pick the same
     # clip. The caller adds this to the position X / Y offsets. None when
     # there is no move key.
-    xkeys = _pick_above_keyframe(move_x_clips, clip_link_id, frame, clip_order)
-    ykeys = _pick_above_keyframe(move_y_clips, clip_link_id, frame, clip_order)
+    xy = _xy_for_link(move_x_clips, move_y_clips, clip_link_id, frame,
+                      clip_order)
+    if xy is None:
+        return None
+    return (xy[0] - float(seq_w) / 2.0, xy[1] - float(seq_h) / 2.0)
+
+
+def crop_xy_for_link(crop_x_clips, crop_y_clips, clip_link_id, frame,
+                     clip_order):
+    # BUILD 295: linked type-crop_xy keyframe clip above this clip (same
+    # rule as crop_x / crop_y): (crop_x, crop_y) in source pixels of the
+    # original footage, 0 = no crop (the same neutral as the crop_x /
+    # crop_y types), each axis linear between its keys and flat outside
+    # them. The caller adds this to the crop_x / crop_y values. None when
+    # there is no crop_xy key.
+    return _xy_for_link(crop_x_clips, crop_y_clips, clip_link_id, frame,
+                        clip_order)
+
+
+def _xy_for_link(x_clips, y_clips, clip_link_id, frame, clip_order):
+    # (x, y) of the linked x / y keyframe clip above this clip
+    # (collect_xy_clips), or None
+    xkeys = _pick_above_keyframe(x_clips, clip_link_id, frame, clip_order)
+    ykeys = _pick_above_keyframe(y_clips, clip_link_id, frame, clip_order)
     if xkeys is None or ykeys is None:
         return None
     x = evaluate_keyframes(xkeys, frame)
     y = evaluate_keyframes(ykeys, frame)
     if x is None or y is None:
         return None
-    return (float(x) - float(seq_w) / 2.0, float(y) - float(seq_h) / 2.0)
+    return (float(x), float(y))
 
 
 def opacity_for_link(opacity_clips, clip_link_id, frame, clip_order):
@@ -570,10 +609,21 @@ def collect_outline_clips(clips_by_track, track_order=None):
 
 
 def collect_move_clips(clips_by_track, track_order=None):
-    # BUILD 294: (x_clips, y_clips) from the linked move clips: the same
-    # (link_id, in, out, keys, order) entries, keys (key_id, frame, x) and
-    # (key_id, frame, y) with y from entry[11]. The snapshot keeps them at
-    # [20] and [21].
+    # BUILD 294: the move clips' (x_clips, y_clips); the snapshot keeps
+    # them at [20] and [21]
+    return collect_xy_clips(clips_by_track, track_order, MOVE_TYPE)
+
+
+def collect_crop_xy_clips(clips_by_track, track_order=None):
+    # BUILD 295: the crop_xy clips' (x_clips, y_clips); the snapshot keeps
+    # them at [22] and [23]
+    return collect_xy_clips(clips_by_track, track_order, CROP_XY_TYPE)
+
+
+def collect_xy_clips(clips_by_track, track_order, stored_type):
+    # BUILD 294: (x_clips, y_clips) from the linked clips of an x / y type
+    # (XY_KEY_TYPES): the same (link_id, in, out, keys, order) entries,
+    # keys (key_id, frame, x) and (key_id, frame, y) with y from entry[11]
     x_clips = []
     y_clips = []
     for track_id, track_clips in (clips_by_track or {}).items():
@@ -583,7 +633,7 @@ def collect_move_clips(clips_by_track, track_order=None):
         for c in track_clips:
             if not is_keyframe_clip_id(c[0]) or len(c) <= 11:
                 continue
-            if c[10] != MOVE_TYPE or c[8] is None:
+            if c[10] != stored_type or c[8] is None:
                 continue
             in_f = max(0, int(c[2]))
             out_f = in_f + max(1, int(c[3]))
@@ -769,7 +819,7 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
     length = int(round(clip_rect.width() / float(ppf))) if ppf > 0 else 0
     ys = None
     graphs = [(keys, None, QColor(255, 210, 90))]
-    if stored_type == MOVE_TYPE and isinstance(extra, dict):
+    if stored_type in XY_KEY_TYPES and isinstance(extra, dict):
         ys = extra
         ykeys = [(k[0], k[1], ys.get(k[0], 0.0)) for k in keys if len(k) >= 3]
         both = [float(k[2]) for k in keys if len(k) >= 3]
@@ -1041,16 +1091,19 @@ class AddKeyDialog(QDialog):
     # fields (0..255, step 1; rgba = their initial values, default 255);
     # border_rgba() reads them. Other types hide the R, G, B, A row.
     # BUILD 294: type move shows the value as "X:" plus a "Y:" field
-    # (unbounded, step 1; y = its initial value); move_y() reads it. Other
-    # types hide the Y row.
+    # (unbounded, step 1; y = its initial value); key_y() reads it. Other
+    # types hide the Y row. BUILD 295: type crop_xy shows "X Crop:" and
+    # "Y Crop:" (unbounded, step 0.1 like crop_x / crop_y). y_defaults:
+    # callable stored_type -> initial Y when the type is changed.
     def __init__(self, parent, type_label, initial=None, title="Add Key",
                  stored_type=None, choose_type=False, defaults=None,
-                 rgba=None, y=None):
+                 rgba=None, y=None, y_defaults=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
         self.type_combo = None
         self._defaults = defaults
+        self._y_defaults = y_defaults
         if choose_type:
             trow = QHBoxLayout()
             trow.addWidget(QLabel("Type:"))
@@ -1093,11 +1146,12 @@ class AddKeyDialog(QDialog):
         self.y_row = QWidget()
         yrow = QHBoxLayout(self.y_row)
         yrow.setContentsMargins(0, 0, 0, 0)
-        yrow.addWidget(QLabel("Y:"))
+        self.y_label = QLabel("Y:")
+        yrow.addWidget(self.y_label)
         self.y_spin = QDoubleSpinBox()
         self.y_spin.setDecimals(2)
         self.y_spin.setRange(-1000000000.0, 1000000000.0)
-        self.y_spin.setSingleStep(1.0)
+        self.y_spin.setSingleStep(KEY_VALUE_STEPS.get(stored_type or "", 0.1))
         if y is not None:
             self.y_spin.setValue(float(y))
         yrow.addWidget(self.y_spin)
@@ -1120,27 +1174,38 @@ class AddKeyDialog(QDialog):
         self.spin.setRange(lo, hi)
         self.spin.setSingleStep(KEY_VALUE_STEPS.get(stored, 0.1))
         self._show_border(stored)
+        self.y_spin.setSingleStep(KEY_VALUE_STEPS.get(stored, 0.1))
         if self._defaults is not None:
             try:
                 self.spin.setValue(float(self._defaults(stored)))
+            except Exception:
+                pass
+        if self._y_defaults is not None and stored in XY_KEY_TYPES:
+            try:
+                self.y_spin.setValue(float(self._y_defaults(stored)))
             except Exception:
                 pass
 
     def _show_border(self, stored):
         # BUILD 222: R, G, B, A row only for type border; value label
         # "Border px:" there. BUILD 294: Y row only for type move; value
-        # label "X:" there
+        # label "X:" there. BUILD 295: also for crop_xy, labels "X Crop:" /
+        # "Y Crop:"
         border = stored == BORDER_TYPE
         self.rgba_row.setVisible(border)
         if border:
             self.value_label.setText("Border px:")
-        move = stored == MOVE_TYPE
-        self.y_row.setVisible(move)
-        if move:
+        xy = stored in XY_KEY_TYPES
+        self.y_row.setVisible(xy)
+        if stored == CROP_XY_TYPE:
+            self.value_label.setText("X Crop:")
+            self.y_label.setText("Y Crop:")
+        elif xy:
             self.value_label.setText("X:")
+            self.y_label.setText("Y:")
 
-    def move_y(self):
-        # BUILD 294: y from the Y field
+    def key_y(self):
+        # BUILD 294: y from the Y field (move, crop_xy)
         return float(self.y_spin.value())
 
     def border_rgba(self):
@@ -1214,7 +1279,16 @@ def default_key_value(timeline, stored_type):
     if stored_type == BORDER_TYPE:
         return 4.0
     # BUILD 147: crop_x / crop_y = 0 (no crop); BUILD 219: rotate = 0
-    # (upright); others 0 as before
+    # (upright); BUILD 295: crop_xy X = 0 (no crop); others 0 as before
+    return 0.0
+
+
+def default_key_y(timeline, stored_type):
+    # BUILD 294: the Y field default: move = sequence center Y; BUILD 295:
+    # crop_xy = 0 (no crop)
+    if stored_type == MOVE_TYPE:
+        _w, h = timeline._sequence_size()
+        return float(h) / 2.0
     return 0.0
 
 
@@ -1285,11 +1359,11 @@ def add_key(timeline, clip, click_frame):
         QMessageBox.warning(timeline, "Add Key", "Could not read clip: %s" % e)
         return
     initial = default_key_value(timeline, stored_type)
-    _w, seq_h = timeline._sequence_size()
     dlg = AddKeyDialog(timeline, type_label, initial=initial,
                        stored_type=stored_type, choose_type=no_keys,
                        defaults=lambda t: default_key_value(timeline, t),
-                       y=float(seq_h) / 2.0)
+                       y=default_key_y(timeline, stored_type),
+                       y_defaults=lambda t: default_key_y(timeline, t))
     if dlg.exec() != QDialog.Accepted:
         return
     new_type = dlg.chosen_type() if no_keys else stored_type
@@ -1314,11 +1388,13 @@ def add_key(timeline, clip, click_frame):
                 "INSERT INTO keyframe_border (keyframe_clip_id, frame, px, "
                 "r, g, b, a) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (db_id, frame, value) + dlg.border_rgba())
-        elif new_type == MOVE_TYPE:
-            # BUILD 294: a move key is a keyframe_move row
+        elif new_type in XY_KEY_TYPES:
+            # BUILD 294: a move key is a keyframe_move row (BUILD 295:
+            # crop_xy a keyframe_crop row)
             cur.execute(
-                "INSERT INTO keyframe_move (keyframe_clip_id, frame, x, y) "
-                "VALUES (?, ?, ?, ?)", (db_id, frame, value, dlg.move_y()))
+                "INSERT INTO %s (keyframe_clip_id, frame, x, y) "
+                "VALUES (?, ?, ?, ?)" % key_table_for_type(new_type),
+                (db_id, frame, value, dlg.key_y()))
         else:
             cur.execute(
                 "INSERT INTO keyframes (keyframe_clip_id, frame, value) "
@@ -1366,7 +1442,7 @@ def edit_key(timeline, clip, key_id, frame, value):
             except Exception:
                 pass
     rgba = border_rgba(clip, key_id) if stored_type == BORDER_TYPE else None
-    ky = move_y(clip, key_id)
+    ky = key_y(clip, key_id)
     dlg = AddKeyDialog(timeline, type_label,
                        initial=clamp_key_value(stored_type, value),
                        title="Edit Key", stored_type=stored_type, rgba=rgba,
@@ -1388,10 +1464,12 @@ def edit_key(timeline, clip, key_id, frame, value):
                 "UPDATE keyframe_border SET px = ?, r = ?, g = ?, b = ?, "
                 "a = ? WHERE id = ?",
                 (new_val,) + dlg.border_rgba() + (int(key_id),))
-        elif stored_type == MOVE_TYPE:
-            # BUILD 294: x and y of the keyframe_move row
-            cur.execute("UPDATE keyframe_move SET x = ?, y = ? WHERE id = ?",
-                        (new_val, dlg.move_y(), int(key_id)))
+        elif stored_type in XY_KEY_TYPES:
+            # BUILD 294: x and y of the keyframe_move (BUILD 295: or
+            # keyframe_crop) row
+            cur.execute("UPDATE %s SET x = ?, y = ? WHERE id = ?"
+                        % key_table_for_type(stored_type),
+                        (new_val, dlg.key_y(), int(key_id)))
         else:
             persist_keyframe_value(cur, key_id, new_val)
         conn.commit()
@@ -1446,7 +1524,7 @@ def hit_test_key(timeline, pos):
                 continue
             _text, sq, _cx, _bt = key_mark_layout(
                 clip_rect, frame, value, start, ppf, stored_type, fm,
-                move_y(clip, key_id))
+                key_y(clip, key_id))
             if sq.contains(pos):
                 return {
                     "clip": clip,
@@ -1695,8 +1773,9 @@ def copy_key(timeline, key_hit):
     clip = key_hit["clip"]
     stored_type = clip[10] if len(clip) > 10 else ""
     rgba = border_rgba(clip, key_hit["key_id"]) if stored_type == BORDER_TYPE else None
-    # BUILD 294: a move key's y (None for other types)
-    ky = move_y(clip, key_hit["key_id"])
+    # BUILD 294: a move (BUILD 295: or crop_xy) key's y (None for other
+    # types)
+    ky = key_y(clip, key_hit["key_id"])
     _key_clipboard = {"type": stored_type, "value": float(key_hit["value"]),
                       "rgba": rgba, "y": ky}
     timeline.status_bar.showMessage(
@@ -1763,18 +1842,20 @@ def paste_key(timeline, clip, frame):
                     "INSERT INTO keyframe_border (keyframe_clip_id, frame, px, "
                     "r, g, b, a) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (db_id, int(frame), data["value"]) + rgba)
-        elif stored_type == MOVE_TYPE:
-            # BUILD 294: x and y (y = sequence center if unknown)
+        elif stored_type in XY_KEY_TYPES:
+            # BUILD 294: x and y (y = its default_key_y if unknown); BUILD
+            # 295: crop_xy in keyframe_crop
             ky = data.get("y")
             if ky is None:
-                ky = float(timeline._sequence_size()[1]) / 2.0
+                ky = default_key_y(timeline, stored_type)
             if row is not None:
-                cur.execute("UPDATE keyframe_move SET x = ?, y = ? "
-                            "WHERE id = ?", (data["value"], ky, row[0]))
+                cur.execute("UPDATE %s SET x = ?, y = ? "
+                            "WHERE id = ?" % table, (data["value"], ky, row[0]))
             else:
                 cur.execute(
-                    "INSERT INTO keyframe_move (keyframe_clip_id, frame, x, y) "
-                    "VALUES (?, ?, ?, ?)", (db_id, int(frame), data["value"], ky))
+                    "INSERT INTO %s (keyframe_clip_id, frame, x, y) "
+                    "VALUES (?, ?, ?, ?)" % table,
+                    (db_id, int(frame), data["value"], ky))
         elif row is not None:
             cur.execute("UPDATE keyframes SET value = ? WHERE id = ?",
                         (data["value"], row[0]))

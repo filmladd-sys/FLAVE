@@ -52,7 +52,7 @@ class _Effect(object):
     # One effect type (scale / position X / position Y / opacity / crop_x /
     # crop_y, BUILD 147; gamma / brightness / contrast, BUILD 154; rotate,
     # BUILD 219; border px and r / g / b / a channels, BUILD 222; move x and
-    # y, BUILD 294): linked
+    # y, BUILD 294; crop_xy x and y, BUILD 295): linked
     # keyframe clips indexed by link_id, as keyframe._pick_above_keyframe
     def __init__(self, clips):
         self.by_link = {}
@@ -110,9 +110,10 @@ class SnapshotIndex(object):
         # BUILD 222: + border px and r / g / b / a (snap[14] .. [18]), so
         # a border key edit (any channel) refreshes the frames it changes
         # BUILD 294: + move x and y (snap[20], [21])
+        # BUILD 295: + crop_xy x and y (snap[22], [23])
         self.effects = [_Effect(snap[i] if len(snap) > i else [])
                         for i in (2, 3, 5, 7, 8, 9, 10, 11, 12, 13,
-                                  14, 15, 16, 17, 18, 20, 21)]
+                                  14, 15, 16, 17, 18, 20, 21, 22, 23)]
         any_solo = any(solo for _t, _e, solo, _k in rows)
         self.tracks = []    # bottom first: (kind, order, starts, clips, sorted)
         for track_id, enabled, solo, kind in reversed(rows):
