@@ -134,11 +134,6 @@ def _open(path, timeout):
         if not has_dirty_table:
             conn.execute("CREATE TABLE IF NOT EXISTS DirtyImage "
                          "(frame INTEGER PRIMARY KEY)")
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(preview)")]
-            if "dirty" in cols:
-                # Older file: its dirty marks move to DirtyImage once
-                conn.execute("INSERT OR IGNORE INTO DirtyImage (frame) "
-                             "SELECT frame FROM preview WHERE dirty != 0")
             conn.commit()
     except Exception:
         conn.close()
@@ -743,7 +738,7 @@ def FrameSave(project_path, sequence_id, frame_num, jpeg_blob, dirty):
 def _clean_rows(project_path, sequence_id, first, last):
     # Sorted list of clean frames in first..last, one query. A missing
     # preview file means no clean frames (not created). An existing file is
-    # opened with _connect, so an older file gets its DirtyImage table here
+    # opened with _connect, so a file gets its DirtyImage table here
     # (clean_set reads this first, before any other reader). A damaged
     # file is discarded (no clean frames); busy raises
     # sqlite3.OperationalError.

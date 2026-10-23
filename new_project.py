@@ -18,8 +18,7 @@ PROJECT_EXT = ".db"
 # Icon lookups (Sequence Timeline and Footage Manager) filter on footage_id,
 # frame_number, is_original and height (width too for the bin), and
 # deletes on footage_id; this one index serves all of them. Created with the
-# schema and, for older projects, on project open
-# (footage_manager_display.ensure_icons_index).
+# schema (_init_db).
 ICONS_INDEX_NAME = "idx_icons_lookup"
 ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
                    "ON icons (footage_id, frame_number, is_original, height)")
@@ -31,8 +30,7 @@ ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
 # values in source pixels). BUILD 296: keys of type-crop_edges keyframe
 # clips (absolute sequence frame, top, bottom, left, right crop in source
 # pixels). Other types keep their keys in
-# keyframes. Also run on project open for older projects (project_manager
-# _ensure_key_tables_for).
+# keyframes. Run by _init_db.
 KEYFRAME_BORDER_SQL = """
     CREATE TABLE IF NOT EXISTS keyframe_border (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,9 +79,7 @@ KEYFRAME_CROP_EDGES_SQL = """
 # shadow_blur (blur radius, sequence px), shadow_angle (direction the
 # shadow falls, degrees clockwise from straight up, like the Premiere /
 # After Effects Drop Shadow direction: 90 = right, 135 = down-right,
-# 180 = down) and shadow_offset (distance, sequence px).
-# Also run on project open for older projects (project_manager
-# _ensure_text_clips_for, which also adds TEXT_SHADOW_COLUMNS).
+# 180 = down) and shadow_offset (distance, sequence px). Run by _init_db.
 TEXT_CLIPS_SQL = """
     CREATE TABLE IF NOT EXISTS text_clips (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,15 +102,6 @@ TEXT_CLIPS_SQL = """
         shadow_offset INTEGER DEFAULT 6
     )
 """
-# BUILD 311: the shadow columns of TEXT_CLIPS_SQL as (name, declaration),
-# added by ALTER TABLE to text_clips tables made before BUILD 311
-TEXT_SHADOW_COLUMNS = (
-    ("shadow_on", "INTEGER NOT NULL DEFAULT 0"),
-    ("shadow_color", "TEXT DEFAULT '#000000B4'"),
-    ("shadow_blur", "INTEGER DEFAULT 6"),
-    ("shadow_angle", "INTEGER DEFAULT 135"),
-    ("shadow_offset", "INTEGER DEFAULT 6"),
-)
 # Characters Windows does not allow in a file name, plus control characters
 _BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = set(["CON", "PRN", "AUX", "NUL"] +

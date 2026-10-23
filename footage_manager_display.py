@@ -102,8 +102,7 @@ def _ensure_icons_table(conn):
 
 
 # Project db path -> True once its icons table is known to exist. Checked
-# once per project (on open, or on the first icon lookup) instead of on
-# every lookup.
+# once per project (on the first icon lookup) instead of on every lookup.
 _ICONS_TABLE_OK = {}
 
 
@@ -127,31 +126,6 @@ def icons_table_ready(project_db, conn=None):
     if ok:
         _ICONS_TABLE_OK[key] = True
     return ok
-
-
-def ensure_icons_index(project_db):
-    # Project open: check the icons table once and add the icon lookup
-    # index to projects made before it was in the schema. Prints one line
-    # when the index is created, with the time it took.
-    from new_project import ICONS_INDEX_NAME, ICONS_INDEX_SQL
-    if not project_db or not os.path.isfile(project_db):
-        return
-    conn = sqlite3.connect(project_db)
-    try:
-        if not icons_table_ready(project_db, conn):
-            return
-        have = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' "
-                            "AND name = ?", (ICONS_INDEX_NAME,)).fetchone()
-        if have is not None:
-            return
-        t0 = time.perf_counter()
-        conn.execute(ICONS_INDEX_SQL)
-        conn.commit()
-        n = conn.execute("SELECT COUNT(*) FROM icons").fetchone()[0]
-        print("[icons] created index %s on %d rows in %s ms"
-              % (ICONS_INDEX_NAME, n, _ms(t0)))
-    finally:
-        conn.close()
 
 
 JPEG_QUALITY = 90

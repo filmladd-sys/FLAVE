@@ -5,7 +5,6 @@
 
 import sys
 import os
-import sqlite3
 
 # Hugging Face downloads (the faster-whisper model used by Generate Captions)
 # cache in a "models" folder next to these .py files, wherever FLAVE runs
@@ -85,22 +84,6 @@ def _ensure_audiotmp_for(project_db):
         pass
 
 
-def _ensure_keyframe_tables_for(project_db):
-    # keyframe_clips + keyframes on the project DB (open / create / autoload)
-    if not project_db:
-        return
-    try:
-        from keyframe import ensure_keyframe_tables
-        conn = sqlite3.connect(project_db)
-        try:
-            ensure_keyframe_tables(conn)
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception:
-        pass
-
-
 def _prune_proxies_for(project_db):
     # Proxies rows whose file is missing are removed (proxy_manager)
     if not project_db:
@@ -110,84 +93,6 @@ def _prune_proxies_for(project_db):
         prune_missing_proxies(project_db)
     except Exception as e:
         print("Proxy check failed: %s" % e)
-
-
-def _ensure_icons_index_for(project_db):
-    # Icons table check and lookup index for older projects
-    # (footage_manager_display)
-    try:
-        from footage_manager_display import ensure_icons_index
-        ensure_icons_index(project_db)
-    except Exception as e:
-        print("Icon index check failed: %s" % e)
-
-
-def _ensure_key_tables_for(project_db):
-    # BUILD 294: keyframe_border and keyframe_move tables (BUILD 295: and
-    # keyframe_crop; BUILD 296: and keyframe_crop_edges) (CREATE TABLE IF
-    # NOT EXISTS, new_project.py SQL) in a project made before they existed.
-    # TEMPORARY older-project check: remove it in the future, once every
-    # project in use has these tables from new_project.py.
-    if not project_db:
-        return
-    try:
-        import new_project
-        conn = sqlite3.connect(project_db)
-        try:
-            conn.execute(new_project.KEYFRAME_BORDER_SQL)
-            conn.execute(new_project.KEYFRAME_MOVE_SQL)
-            conn.execute(new_project.KEYFRAME_CROP_SQL)
-            conn.execute(new_project.KEYFRAME_CROP_EDGES_SQL)
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as e:
-        print("Key table check failed: %s" % e)
-
-
-def _ensure_text_clips_for(project_db):
-    # BUILD 308: text_clips table (WYSIWYG Text clips; CREATE TABLE IF NOT
-    # EXISTS, new_project.TEXT_CLIPS_SQL) in a project made before it
-    # existed. BUILD 311: also adds the drop shadow columns
-    # (new_project.TEXT_SHADOW_COLUMNS) missing from an older text_clips
-    # table. TEMPORARY older-project check: remove it in the future, once
-    # every project in use has the table and columns from new_project.py.
-    if not project_db:
-        return
-    try:
-        import new_project
-        conn = sqlite3.connect(project_db)
-        try:
-            conn.execute(new_project.TEXT_CLIPS_SQL)
-            have = {r[1] for r in conn.execute("PRAGMA table_info(text_clips)")}
-            for name, decl in new_project.TEXT_SHADOW_COLUMNS:
-                if name not in have:
-                    conn.execute("ALTER TABLE text_clips ADD COLUMN %s %s"
-                                 % (name, decl))
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as e:
-        print("Text clip table check failed: %s" % e)
-
-
-def _ensure_speed_columns_for(project_db):
-    # BUILD 303: clip speed column (speed_percent) on clips, captions and
-    # keyframe_clips (clip_speed.ensure_speed_columns) in a project made
-    # before it existed. TEMPORARY older-project check: remove it in the
-    # future, once every project in use has the column from new_project.py.
-    if not project_db:
-        return
-    try:
-        from clip_speed import ensure_speed_columns
-        conn = sqlite3.connect(project_db)
-        try:
-            ensure_speed_columns(conn)
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as e:
-        print("Speed column check failed: %s" % e)
 
 
 def _ensure_undo_db_for(project_db):
@@ -359,13 +264,8 @@ class ProjectManager(QMainWindow):
             self.status_label.setText(f"Project: {path}")
             self.status_bar.showMessage("Project loaded")
             _ensure_audiotmp_for(path)
-            _ensure_keyframe_tables_for(path)
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
-            _ensure_icons_index_for(path)
-            _ensure_key_tables_for(path)
-            _ensure_text_clips_for(path)     # TEMPORARY (BUILD 308)
-            _ensure_speed_columns_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -418,7 +318,6 @@ class ProjectManager(QMainWindow):
             _set_global_setting("last_project_folder", folder)
         _set_global_setting("current_project", db_path)
         _ensure_audiotmp_for(db_path)
-        _ensure_keyframe_tables_for(db_path)
         _ensure_undo_db_for(db_path)
         self._update_windows_menu()
 
@@ -436,13 +335,8 @@ class ProjectManager(QMainWindow):
                 _set_global_setting("last_project_folder", folder)
             _set_global_setting("current_project", path)
             _ensure_audiotmp_for(path)
-            _ensure_keyframe_tables_for(path)
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
-            _ensure_icons_index_for(path)
-            _ensure_key_tables_for(path)
-            _ensure_text_clips_for(path)     # TEMPORARY (BUILD 308)
-            _ensure_speed_columns_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

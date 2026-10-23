@@ -2,8 +2,7 @@
 # Clip speed (BUILD 303): one integer percent per timeline clip, 1 .. 1000,
 # default 100, stored in speed_percent on clips, captions, keyframe_clips and
 # text_clips
-# (new_project.py; ensure_speed_columns adds it to an older project on
-# open). The timeline keeps {timeline clip id: speed} for clips whose speed
+# (new_project.py). The timeline keeps {timeline clip id: speed} for clips whose speed
 # is not 100 (tl._clip_speeds, load_clip_speeds); the player snapshot copies
 # it (snapshot[28]).
 #
@@ -31,17 +30,6 @@ SPEED_DEFAULT = 100
 SPEED_COLUMN = "speed_percent"
 # Tables whose rows are timeline clips
 SPEED_TABLES = ("clips", "captions", "keyframe_clips", "text_clips")
-
-
-def ensure_speed_columns(conn):
-    # TEMPORARY older-project check (BUILD 303): add speed_percent to each
-    # clip table that lacks it (new_project.py creates it). Remove in the
-    # future, once every project in use has the column.
-    for table in SPEED_TABLES:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)]
-        if cols and SPEED_COLUMN not in cols:
-            conn.execute("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL "
-                         "DEFAULT %d" % (table, SPEED_COLUMN, SPEED_DEFAULT))
 
 
 def has_speed_column(cur, table):

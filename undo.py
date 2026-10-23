@@ -52,11 +52,8 @@ def ensure_undo_db(project_path):
         conn.execute(
             "CREATE TABLE IF NOT EXISTS snapshot_tables ("
             "snap_id INTEGER NOT NULL, tbl TEXT NOT NULL, "
-            "copy_table TEXT, cols TEXT)")
+            "copy_table TEXT, cols TEXT, scope TEXT)")
         # scope: NULL = whole table, else "footage_id=1,2" (only those rows)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(snapshot_tables)")]
-        if "scope" not in cols:
-            conn.execute("ALTER TABLE snapshot_tables ADD COLUMN scope TEXT")
         conn.commit()
     finally:
         conn.close()

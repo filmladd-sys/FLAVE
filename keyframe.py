@@ -119,8 +119,7 @@ def key_table_for_type(stored_type):
 
 def key_tables(cur):
     # Key tables present in this project (new_project.py creates all of
-    # them; project_manager creates keyframe_border / keyframe_move /
-    # keyframe_crop / keyframe_crop_edges in an older project on open)
+    # them)
     names = [t for t, _c in KEY_TABLE_COLS]
     cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND "
                 "name IN (%s)" % ",".join("?" for _ in names), names)
