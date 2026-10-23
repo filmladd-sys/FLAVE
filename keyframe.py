@@ -34,6 +34,12 @@ KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
                        "crop_x", "crop_y", "gamma", "brightness", "contrast",
                        "rotate", "border", "move", "crop_xy",
                        "crop_edges")
+# BUILD 305: a new keyframe clip is created untyped: type = UNTYPED (""),
+# which is in no KEYFRAME_CLIP_TYPES, so no effect collector or volume
+# loader picks it up. The first Add Key (or Paste Key) sets its type.
+UNTYPED = ""
+# Timeline title marker for a keyframe clip with no link_id
+UNLINKED_MARK = "(unlinked)"
 
 # Combo display label -> stored type
 KEYFRAME_TYPE_CHOICES = (
@@ -209,13 +215,24 @@ def type_display_label(stored_type):
     return stored_type or ""
 
 
-def clip_title(name, stored_type):
-    return "%s: %s" % ((name or ""), type_display_label(stored_type))
+def keyframe_clip_title(name, linked, n_keys):
+    # Timeline title: "<name> (unlinked) <N> keys". "(unlinked)" only when
+    # the clip has no link_id; "1 key" singular; an empty name starts with
+    # the count. n_keys is the in-memory key count (entry[9], all key
+    # tables), so painting needs no DB query.
+    parts = []
+    if (name or "").strip():
+        parts.append(name.strip())
+    if not linked:
+        parts.append(UNLINKED_MARK)
+    n = int(n_keys or 0)
+    parts.append("%d %s" % (n, "key" if n == 1 else "keys"))
+    return " ".join(parts)
 
 
 def load_keyframe_clips(cur, sequence_id, clips):
     # Into clips_by_track like captions: list
-    # [mem_id, None, start, length, title, enabled, solo, in_src, link_id,
+    # [mem_id, None, start, length, name, enabled, solo, in_src, link_id,
     #  keys, type] where keys is [(key_id, absolute_frame, value), ...]
     # BUILD 222: a border clip's entry also has [11] = {key_id: (r, g, b,
     # a)}; its keys come from keyframe_border with value = px
@@ -240,7 +257,7 @@ def load_keyframe_clips(cur, sequence_id, clips):
         out_f = max(in_f + 1, int(out_f or (in_f + 1)))
         length = max(1, out_f - in_f)
         entry = [mem_id_from_db(db_id), None, in_f, length,
-                 clip_title(name, ktype), 1, 0, 0, link_id, [], ktype]
+                 name, 1, 0, 0, link_id, [], ktype]
         if ktype in (BORDER_TYPE, CROP_EDGES_TYPE) + XY_KEY_TYPES:
             entry.append({})
         clips.setdefault(track_id, []).append(entry)
@@ -754,13 +771,6 @@ def key_mark_layout(clip_rect, frame, value, clip_start, ppf, stored_type,
     return text, sq, x, body_top
 
 
-NOT_LINKED_SUFFIX = " (not linked yet)"
-
-
-def title_with_link_state(title, linked):
-    return (title or "") + ("" if linked else NOT_LINKED_SUFFIX)
-
-
 def graph_value_range(stored_type, values):
     # (low, high) for the value graph: 0..100 for percent types, else min..max
     rng = KEY_VALUE_RANGES.get(stored_type or "")
@@ -886,8 +896,9 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
     h = min(TITLE_BAR_H, max(1, clip_rect.height()))
     title_rect = clip_rect.adjusted(0, 0, 0, -(clip_rect.height() - h))
     # BUILD 127 / 128: shared title bar painter (unchanged look)
-    paint_title_bar(painter, title_rect, title_with_link_state(title, linked),
-                    visible_rect)
+    # title is the full caller-built text (keyframe_clip_title + speed);
+    # it already carries the link state, so linked is not drawn here
+    paint_title_bar(painter, title_rect, title or "", visible_rect)
     if not keys or ppf <= 0:
         return
     body_h = max(0, clip_rect.height() - h)
@@ -1085,8 +1096,7 @@ def persist_keyframe_link_id(cur, clip_mem_id, link_id):
 
 
 class AddKeyframeClipDialog(QDialog):
-    # Name + type (X / Y / Scale / ... / X Crop / Y Crop / ... / Rotate /
-    # Border Outline / Outline R / G / B / A) + Add
+    # Name + Add. The type is chosen on the clip's first Add Key.
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Keyframe Clip")
@@ -1096,29 +1106,19 @@ class AddKeyframeClipDialog(QDialog):
         self.name_edit = QLineEdit()
         row.addWidget(self.name_edit)
         layout.addLayout(row)
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Type:"))
-        self.type_combo = QComboBox()
-        for label, _stored in KEYFRAME_TYPE_CHOICES:
-            self.type_combo.addItem(label)
-        row2.addWidget(self.type_combo)
-        layout.addLayout(row2)
         add_btn = QPushButton("Add")
         add_btn.clicked.connect(self.accept)
         layout.addWidget(add_btn)
 
     def values(self):
+        # (name, UNTYPED): new clips start untyped
         name = (self.name_edit.text() or "").strip()
-        idx = self.type_combo.currentIndex()
-        if idx < 0 or idx >= len(KEYFRAME_TYPE_CHOICES):
-            return None
-        stored = KEYFRAME_TYPE_CHOICES[idx][1]
-        return name, stored
+        return name, UNTYPED
 
 
 def add_keyframe_clip(timeline, track_id, click_frame):
-    # Dialog then insert, any type on any keyframe track (the dialog lists
-    # every type; nothing on the track limits it). out_frame = in_frame +
+    # Name dialog then insert an untyped clip (type UNTYPED; its first Add
+    # Key picks the type) on any keyframe track. out_frame = in_frame +
     # 30 * fps, shortened to end at the next keyframe clip on the track when
     # that one starts sooner, so the new clip fills the free gap. Refused
     # only when click_frame lies inside a clip (clips on a track never
@@ -1277,6 +1277,9 @@ class AddKeyDialog(QDialog):
         layout.addWidget(ok_btn)
         if self.type_combo is not None:
             self.type_combo.currentIndexChanged.connect(self._type_changed)
+            # An untyped clip (UNTYPED) takes the drop-down's shown type
+            if stored_type not in [c[1] for c in KEYFRAME_TYPE_CHOICES]:
+                self._type_changed(self.type_combo.currentIndex())
 
     def _type_changed(self, idx):
         # BUILD 147: new type: its label, value range and default value

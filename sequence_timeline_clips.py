@@ -120,9 +120,17 @@ class ClipDelegate(QStyledItemDelegate):
             if collapsed:
                 # BUILD 126: bar + outline + name only (no icons, waveform,
                 # key boxes or markers)
+                # BUILD 305: keyframe clips use their timeline title
+                if track_type == "keyframe":
+                    from keyframe import keyframe_clip_title
+                    cname = keyframe_clip_title(
+                        filename, len(clip) > 8 and clip[8] is not None,
+                        len(clip[9] or []) if len(clip) > 9 else 0)
+                else:
+                    cname = filename or ""
                 paint_collapsed_clip(painter, clip_rect, track_type,
                                      clip_id in tl._selected_clip_ids,
-                                     ((filename or "")
+                                     (cname
                                       + speed_label(speed_of(speeds, clip_id))
                                       + (" [S]" if clip_solo else ""))
                                      if detail else "",
@@ -130,16 +138,20 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.setOpacity(1.0)
                 continue
             if track_type == "keyframe":
-                from keyframe import paint_keyframe_clip
+                from keyframe import paint_keyframe_clip, keyframe_clip_title
                 keys = clip[9] if len(clip) > 9 else []
                 ktype = clip[10] if len(clip) > 10 else ""
+                linked = len(clip) > 8 and clip[8] is not None
+                # BUILD 305: "<name> (unlinked) <N> keys" from the entry's
+                # name, link_id and in-memory keys, plus the speed suffix
                 paint_keyframe_clip(
                     painter, clip_rect,
-                    ((filename or "") + speed_label(speed_of(speeds, clip_id)))
+                    (keyframe_clip_title(filename, linked, len(keys or []))
+                     + speed_label(speed_of(speeds, clip_id)))
                     if detail else "",
                     keys=keys if detail else None,
                     clip_start=start_frame, ppf=ppf, stored_type=ktype,
-                    linked=(len(clip) > 8 and clip[8] is not None),
+                    linked=linked,
                     visible_rect=rect,
                     selected_key_id=getattr(tl, "_menu_key_id", None),
                     extra=clip[11] if len(clip) > 11 else None)
