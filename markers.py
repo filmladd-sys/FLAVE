@@ -5,7 +5,7 @@
 # frame = clip start + (frame - clip in_frame); markers outside the clip's
 # visible range are hidden. Markers are only for video / audio / image
 # clips (clips.id > 0); rows with a negative clip_id (old caption markers)
-# are skipped everywhere (BUILD 96). Older DBs without Marker load no markers and refuse adds. ASCII only.
+# are skipped everywhere (BUILD 96). ASCII only.
 # Clip speed (BUILD 303, clip_speed.py): a sped clip shows source
 # in + floor(rel * speed / 100) at timeline offset rel, so a marker sits at
 # the first offset showing its source frame (timeline_offset); the speed
@@ -24,7 +24,7 @@ def line_width(marker_id, hover_id):
 
 
 def load_markers(project_db):
-    # {clip_id: [(marker_id, rel_frame, (r, g, b), name)]}; {} if no table
+    # {clip_id: [(marker_id, rel_frame, (r, g, b), name)]}; {} on a read error
     out = {}
     if not project_db:
         return out
@@ -86,63 +86,48 @@ def delete_markers(cur, mem_ids):
     ids = [int(i) for i in mem_ids if int(i) > 0]
     if not ids:
         return
-    try:
-        cur.execute("DELETE FROM Marker WHERE clip_id IN (%s)" %
-                    ",".join("?" for _ in ids), ids)
-    except sqlite3.OperationalError:
-        pass
+    cur.execute("DELETE FROM Marker WHERE clip_id IN (%s)" %
+                ",".join("?" for _ in ids), ids)
 
 
 def move_markers(cur, old_mem, new_mem, lo, hi, delta=0):
     # Slice: markers with lo <= frame < hi go to new_mem (frame += delta)
-    try:
-        cur.execute(
-            "UPDATE Marker SET clip_id = ?, frame = frame + ? "
-            "WHERE clip_id = ? AND frame >= ? AND frame < ?",
-            (int(new_mem), int(delta), int(old_mem), int(lo), int(hi)))
-    except sqlite3.OperationalError:
-        pass
+    cur.execute(
+        "UPDATE Marker SET clip_id = ?, frame = frame + ? "
+        "WHERE clip_id = ? AND frame >= ? AND frame < ?",
+        (int(new_mem), int(delta), int(old_mem), int(lo), int(hi)))
 
 
 def marker_rows(cur, mem_id):
     # [(name, frame, r, g, b)] for copy / paste (clips only)
     if int(mem_id) <= 0:
         return []
-    try:
-        return cur.execute(
-            "SELECT name, frame, r, g, b FROM Marker WHERE clip_id = ? ORDER BY id",
-            (int(mem_id),)).fetchall()
-    except sqlite3.OperationalError:
-        return []
+    return cur.execute(
+        "SELECT name, frame, r, g, b FROM Marker WHERE clip_id = ? ORDER BY id",
+        (int(mem_id),)).fetchall()
 
 
 def insert_marker_rows(cur, mem_id, rows):
     if int(mem_id) <= 0:
         return
     for name, frame, r, g, b in rows or ():
-        try:
-            cur.execute(
-                "INSERT INTO Marker (name, clip_id, frame, r, g, b) "
-                "VALUES (?, ?, ?, ?, ?, ?)", (name, int(mem_id), frame, r, g, b))
-        except sqlite3.OperationalError:
-            return
+        cur.execute(
+            "INSERT INTO Marker (name, clip_id, frame, r, g, b) "
+            "VALUES (?, ?, ?, ?, ?, ?)", (name, int(mem_id), frame, r, g, b))
 
 
 def add_marker(project_db, clip, frame, name="", speed=100):
     # Insert at absolute timeline frame (clamped into the clip). Returns the
-    # new id, or None when the Marker table is missing (older project).
+    # new id, or None for a clip id <= 0 (markers are clips only).
     if int(clip[0]) <= 0:
         return None
     src = marker_to_source(clip, frame, speed)
     conn = sqlite3.connect(project_db)
     try:
-        try:
-            cur = conn.execute(
-                "INSERT INTO Marker (name, clip_id, frame, r, g, b) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, int(clip[0]), src) + DEFAULT_RGB)
-        except sqlite3.OperationalError:
-            return None
+        cur = conn.execute(
+            "INSERT INTO Marker (name, clip_id, frame, r, g, b) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, int(clip[0]), src) + DEFAULT_RGB)
         conn.commit()
         return cur.lastrowid
     finally:

@@ -417,7 +417,7 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
     # existing file (PROXY_MODE_PREFERENCE at that percent). render_deint
     # (BUILD 119, final render with use_proxies False): MKV clips whose
     # footage has a 100% deinterlaced / IVTC proxy decode it, nothing else
-    # (never another percent). Anything else (0, no row, no file, old DB,
+    # (never another percent). Anything else (0, no row, no file,
     # unknown original size) is absent and the clip decodes its original;
     # so is a video proxy below the decoder minimum (_proxy_decodable).
     # ratio: proxy_frame_ratio (None = same frame count).
@@ -426,13 +426,8 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
     try:
         conn = sqlite3.connect(project_db)
         try:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
-            modes = all(c in cols for c in ("deinterlace", "proxy_mode", "proxy_fps",
-                                            "proxy_frames", "source_fps"))
-            if render_deint and not use_proxies and not modes:
-                return {}
             extra = ("COALESCE(p.proxy_mode, 'normal'), p.proxy_fps, p.proxy_frames, "
-                     "p.source_fps" if modes else "'normal', NULL, NULL, NULL")
+                     "p.source_fps")
             marks = ",".join("?" for _ in track_ids)
             if use_proxies:
                 cond = ("p.percentage = c.proxy_percent "

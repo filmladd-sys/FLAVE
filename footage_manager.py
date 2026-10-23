@@ -369,20 +369,15 @@ class FootageManager(QMainWindow):
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
 
     def _media_info(self):
-        # {footage_id: (height, width, codec, fps)}; older DBs without
-        # codec: {}. BUILD 272: video footage imported before fps was stored
-        # is probed once here (ffprobe) and its fps saved.
+        # {footage_id: (height, width, codec, fps)}; {} on a read error.
+        # BUILD 272: video footage imported before fps was stored is probed
+        # once here (ffprobe) and its fps saved.
         try:
             conn = sqlite3.connect(self.project_db)
             try:
-                try:
-                    rows = conn.execute(
-                        "SELECT id, height, width, codec, fps, file_type, "
-                        "original_path FROM footage").fetchall()
-                except sqlite3.OperationalError:
-                    # footage table without fps: no FPS column values
-                    rows = [r + (None, "", "") for r in conn.execute(
-                        "SELECT id, height, width, codec FROM footage")]
+                rows = conn.execute(
+                    "SELECT id, height, width, codec, fps, file_type, "
+                    "original_path FROM footage").fetchall()
             finally:
                 conn.close()
         except Exception:
@@ -454,15 +449,9 @@ class FootageManager(QMainWindow):
         if chosen is None or chosen not in actions:
             return
         try:
-            ok = set_footage_proxy_percent(self.project_db, fid, actions[chosen])
+            set_footage_proxy_percent(self.project_db, fid, actions[chosen])
         except Exception as e:
             QMessageBox.warning(self, "Proxy Default", f"Could not save: {e}")
-            return
-        if not ok:
-            QMessageBox.information(
-                self, "Proxy Default",
-                "Proxy Default is not available in this project because it was "
-                "created with an older version.")
             return
         self.refresh()
 
@@ -568,9 +557,7 @@ class FootageManager(QMainWindow):
         try:
             conn = sqlite3.connect(self.project_db)
             cur = conn.cursor()
-            cur.execute("PRAGMA table_info(icons)")
-            if cur.fetchall():
-                cur.execute("DELETE FROM icons WHERE footage_id = ?", (footage_id,))
+            cur.execute("DELETE FROM icons WHERE footage_id = ?", (footage_id,))
             cur.execute("DELETE FROM footage WHERE id = ?", (footage_id,))
             removed = delete_footage_clips(cur, footage_id)
             conn.commit()

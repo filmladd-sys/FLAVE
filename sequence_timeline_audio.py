@@ -102,9 +102,6 @@ def _add_audio_track(self):
 def _peaks_seconds(self, cur, footage_id):
     # Stored peaks duration_seconds for footage_id, 0.0 if none
     try:
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peaks'")
-        if cur.fetchone() is None:
-            return 0.0
         cur.execute("SELECT duration_seconds FROM peaks WHERE footage_id = ?", (footage_id,))
         row = cur.fetchone()
         return float(row[0]) if row and row[0] else 0.0
@@ -126,13 +123,11 @@ def _first_audio_track_id(self, cur):
 def _audio_length_frames(self, cur, footage_id):
     seconds = 0.0
     try:
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peaks'")
-        if cur.fetchone() is not None:
-            cur.execute("SELECT duration_seconds FROM peaks WHERE footage_id = ?",
-                        (footage_id,))
-            row = cur.fetchone()
-            if row and row[0]:
-                seconds = float(row[0])
+        cur.execute("SELECT duration_seconds FROM peaks WHERE footage_id = ?",
+                    (footage_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            seconds = float(row[0])
         if seconds <= 0:
             cur.execute("SELECT duration FROM footage WHERE id = ?", (footage_id,))
             row = cur.fetchone()

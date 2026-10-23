@@ -55,18 +55,15 @@ def import_footage(project_db, media_path):
         store_footage_fps(project_db, new_id, media_path)
 
     # BUILD 119: MKV field order (progressive / interlaced / telecine /
-    # unknown) into footage.field_order. Other files stay NULL. Older
-    # footage tables without the column: skipped.
+    # unknown) into footage.field_order. Other files stay NULL.
     if ext == "mkv":
         try:
             order = probe_field_order(media_path)
             conn = sqlite3.connect(project_db)
             try:
-                cols = [r[1] for r in conn.execute("PRAGMA table_info(footage)")]
-                if "field_order" in cols:
-                    conn.execute("UPDATE footage SET field_order = ? WHERE id = ?",
-                                 (order, new_id))
-                    conn.commit()
+                conn.execute("UPDATE footage SET field_order = ? WHERE id = ?",
+                             (order, new_id))
+                conn.commit()
             finally:
                 conn.close()
         except Exception:

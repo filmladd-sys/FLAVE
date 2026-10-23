@@ -69,13 +69,10 @@ def default_font_size(seq_h):
 def load_text_clips(cur, sequence_id, clips):
     # Text clips into clips ({track_id: [entry]}): entries like captions,
     # [mem id, None, start, length, first line of text, 1, 0, 0, link_id]
-    try:
-        cur.execute(
-            "SELECT id, track_id, start_frame, length_frames, text, link_id "
-            "FROM text_clips WHERE sequence_id = ? ORDER BY start_frame, id",
-            (sequence_id,))
-    except sqlite3.OperationalError:
-        return      # project without the table
+    cur.execute(
+        "SELECT id, track_id, start_frame, length_frames, text, link_id "
+        "FROM text_clips WHERE sequence_id = ? ORDER BY start_frame, id",
+        (sequence_id,))
     for tid, track_id, start, length, text, link_id in cur.fetchall():
         clips.setdefault(track_id, []).append(
             [text_mem_id(tid), None, max(0, int(start or 0)),
@@ -126,7 +123,7 @@ def load_text_styles(project_db, sequence_id):
     # shadow_on, shadow_color, shadow_blur, shadow_angle, shadow_offset)} of
     # every text clip of the sequence (TEXT_STYLE_KEYS order), the
     # compositor's text layers (timeline_snapshot index [29]). {} on any
-    # failure or a project without the table.
+    # failure.
     out = {}
     if not project_db or sequence_id is None:
         return out

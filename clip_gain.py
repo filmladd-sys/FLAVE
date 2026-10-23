@@ -1,7 +1,6 @@
 # clip_gain.py
 # Gain... for audio / video clips: one dB value stored in clips.gain_db
-# (REAL DEFAULT 0, new tables only). Older clips tables without the column
-# read as 0 and cannot be edited. ASCII only.
+# (REAL DEFAULT 0, new_project.py). ASCII only.
 
 import sqlite3
 
@@ -14,30 +13,21 @@ GAIN_MIN_DB = -96.0
 GAIN_MAX_DB = 12.0
 
 
-def _has_gain_column(cur):
-    cur.execute("PRAGMA table_info(clips)")
-    return "gain_db" in [r[1] for r in cur.fetchall()]
-
-
 def read_clip_gain(project_db, clip_id):
-    # (gain_db, editable). Missing column or row: (0.0, column present)
+    # gain_db of the clip; 0.0 if the row is missing
     conn = sqlite3.connect(project_db)
     try:
         cur = conn.cursor()
-        if not _has_gain_column(cur):
-            return 0.0, False
         row = cur.execute("SELECT COALESCE(gain_db, 0) FROM clips WHERE id = ?",
                           (int(clip_id),)).fetchone()
-        return (float(row[0]) if row else 0.0), True
+        return float(row[0]) if row else 0.0
     finally:
         conn.close()
 
 
 def load_clip_gains(cur, sequence_id):
     # BUILD 165: {clip_id: gain_db} for this sequence's clips with a
-    # non-zero gain (title bar label, waveform scale). No column: {}
-    if not _has_gain_column(cur):
-        return {}
+    # non-zero gain (title bar label, waveform scale)
     cur.execute("SELECT c.id, c.gain_db FROM clips c JOIN tracks t ON t.id = c.track_id "
                 "WHERE t.sequence_id = ? AND COALESCE(c.gain_db, 0) != 0",
                 (sequence_id,))
@@ -78,15 +68,9 @@ def edit_clip_gain(timeline, clip):
     if not project_db or clip is None or int(clip[0]) <= 0:
         return
     try:
-        current, editable = read_clip_gain(project_db, clip[0])
+        current = read_clip_gain(project_db, clip[0])
     except Exception as e:
         QMessageBox.warning(timeline, "Gain", "Could not read gain: %s" % e)
-        return
-    if not editable:
-        QMessageBox.information(
-            timeline, "Gain",
-            "Gain is not available in this project because it was created "
-            "with an older version. Create a new project to use Gain.")
         return
     dlg = GainDialog(timeline, current)
     if dlg.exec() != QDialog.Accepted:

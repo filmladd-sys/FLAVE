@@ -9,11 +9,6 @@ CAPTION_LANGUAGES = ["eng", "spa", "fra", "deu", "ita", "por", "jpn", "kor",
                      "zho", "rus", "ara", "hin"]
 
 
-def ensure_captions_table(project_db):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
 def is_caption_id(clip_id):
     # Caption clips use negative in-memory ids (not keyframe or text clip
     # negatives)
@@ -62,15 +57,11 @@ def mem_id_for(table, row_id):
 
 def load_captions(cur, sequence_id, clips):
     # Caption clips: captions table, negative in-memory ids; link_id for groups
-    try:
-        cur.execute(
-            "SELECT id, track_id, start_frame, length_frames, text, link_id "
-            "FROM captions WHERE sequence_id = ? ORDER BY start_frame, id",
-            (sequence_id,)
-        )
-    except sqlite3.OperationalError:
-        # Old scratch DB without captions.link_id: skip caption rows
-        return
+    cur.execute(
+        "SELECT id, track_id, start_frame, length_frames, text, link_id "
+        "FROM captions WHERE sequence_id = ? ORDER BY start_frame, id",
+        (sequence_id,)
+    )
     for row in cur.fetchall():
         cap_id, track_id, start_frame, length_frames, text, link_id = row
         clips.setdefault(track_id, []).append(
@@ -828,11 +819,8 @@ def _finish_generate(self, clip_id, result, error):
                 "language) VALUES (?, ?, 'caption', 0, ?)",
                 (self.sequence_id, name, result.get("language") or "eng"))
             new_track = cur.lastrowid
-            try:
-                cur.execute("UPDATE tracks SET caption_type = ? WHERE id = ?",
-                            (DEFAULT_CAPTION_TYPE, new_track))
-            except sqlite3.OperationalError:
-                pass   # old DB without caption_type
+            cur.execute("UPDATE tracks SET caption_type = ? WHERE id = ?",
+                        (DEFAULT_CAPTION_TYPE, new_track))
             i = ids.index(info["track_id"]) if info["track_id"] in ids else 0
             ids.insert(i, new_track)
             for order, tid in enumerate(ids):

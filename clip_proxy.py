@@ -1,10 +1,8 @@
 # clip_proxy.py
 # Proxy percent choice for footage (Footage Manager 'Proxy Default') and
 # for clips (timeline 'Proxy' submenu). Values: 0 = None, else a percent
-# that has a Proxies row for the footage. Columns footage.proxy_percent and
-# clips.proxy_percent exist only in projects made by new_project.py BUILD 89+;
-# older DBs read 0 and writes are refused.
-# ASCII only.
+# that has a Proxies row for the footage, stored in footage.proxy_percent
+# and clips.proxy_percent (new_project.py). ASCII only.
 
 import os
 import sqlite3
@@ -29,13 +27,10 @@ def proxy_label(pct, kind=None):
 
 
 def proxy_kinds(project_db, footage_id):
-    # {pct: mode the composite uses at that percent}; {} on older tables
+    # {pct: mode the composite uses at that percent}; {} on a read error
     try:
         conn = sqlite3.connect(project_db)
         try:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
-            if "proxy_mode" not in cols:
-                return {}
             rows = conn.execute(
                 "SELECT percentage, COALESCE(proxy_mode, 'normal') FROM Proxies "
                 "WHERE footage_id = ?", (int(footage_id),)).fetchall()
@@ -91,23 +86,9 @@ def clip_proxy_percent(project_db, clip_id):
     return _read_percent(project_db, "clips", clip_id)
 
 
-def _has_column(project_db, table, column):
-    try:
-        conn = sqlite3.connect(project_db)
-        try:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)]
-        finally:
-            conn.close()
-        return column in cols
-    except Exception:
-        return False
-
-
 def _write_percent(project_db, table, row_id, pct, label):
-    # Undoable (undo.py snapshot covers footage and clips). False if the
-    # column is missing (older project).
-    if not _has_column(project_db, table, "proxy_percent"):
-        return False
+    # Undoable (undo.py snapshot covers footage and clips). Returns True
+    # once written (a failed write raises).
     try:
         from undo import push_undo
         push_undo(project_db, label)
@@ -153,10 +134,7 @@ def add_clip_proxy_submenu(timeline, menu, clip):
 
 def apply_clip_proxy(timeline, clip, pct):
     db = timeline._project_db()
-    if not set_clip_proxy_percent(db, clip[0], pct):
-        timeline.status_bar.showMessage(
-            "Proxy not available in this project (older version)", 3000)
-        return
+    set_clip_proxy_percent(db, clip[0], pct)
     # The preview composite uses the clip's proxy: rebuild its frames
     try:
         timeline._mark_preview_dirty(timeline._ranges_for_clips([clip]))

@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from sequence_timeline_sql import (
     DEFAULT_TRACK_HEIGHT, COLLAPSE_COL, COLLAPSE_COL_WIDTH, COLLAPSED_ROW_HEIGHT,
-    ROLE_COLLAPSED, ROLE_OPEN_HEIGHT, track_has_collapsed,
+    ROLE_COLLAPSED, ROLE_OPEN_HEIGHT,
 )
 
 
@@ -207,9 +207,6 @@ def _set_selected_tracks_collapsed(self, mode):
     try:
         conn = sqlite3.connect(self._project_db())
         cur = conn.cursor()
-        if not track_has_collapsed(cur):
-            conn.close()
-            return
         cur.executemany(f"UPDATE tracks SET collapsed = {value} WHERE id = ?",
                         [(t,) for t in ids])
         conn.commit()

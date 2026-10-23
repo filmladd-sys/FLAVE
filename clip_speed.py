@@ -32,11 +32,6 @@ SPEED_COLUMN = "speed_percent"
 SPEED_TABLES = ("clips", "captions", "keyframe_clips", "text_clips")
 
 
-def has_speed_column(cur, table):
-    cur.execute("PRAGMA table_info(%s)" % table)
-    return SPEED_COLUMN in [r[1] for r in cur.fetchall()]
-
-
 def clamp_speed(value):
     try:
         v = int(value)
@@ -66,16 +61,11 @@ def load_clip_speeds(cur, sequence_id):
                        "AND %s != %d", text_mem_id),
     )
     for table, sql, to_mem in queries:
-        try:
-            if not has_speed_column(cur, table):
-                continue
-            cur.execute(sql % (SPEED_COLUMN, SPEED_COLUMN, SPEED_DEFAULT),
-                        (sequence_id,))
-            for row_id, speed in cur.fetchall():
-                if speed is not None and int(speed) != SPEED_DEFAULT:
-                    out[to_mem(int(row_id))] = clamp_speed(speed)
-        except sqlite3.Error:
-            continue
+        cur.execute(sql % (SPEED_COLUMN, SPEED_COLUMN, SPEED_DEFAULT),
+                    (sequence_id,))
+        for row_id, speed in cur.fetchall():
+            if speed is not None and int(speed) != SPEED_DEFAULT:
+                out[to_mem(int(row_id))] = clamp_speed(speed)
     return out
 
 
@@ -173,23 +163,17 @@ def label_for(tl, clip_id):
 
 
 def row_speed(cur, table, row_id):
-    # Stored speed of one row (100 when the column or row is missing)
-    try:
-        row = cur.execute("SELECT %s FROM %s WHERE id = ?" % (SPEED_COLUMN, table),
-                          (int(row_id),)).fetchone()
-    except sqlite3.Error:
-        return SPEED_DEFAULT
+    # Stored speed of one row (100 when the row is missing or NULL)
+    row = cur.execute("SELECT %s FROM %s WHERE id = ?" % (SPEED_COLUMN, table),
+                      (int(row_id),)).fetchone()
     return clamp_speed(row[0]) if row and row[0] is not None else SPEED_DEFAULT
 
 
 def copy_speed(cur, table, src_id, dst_id):
     # A new row made from another (slice) keeps its speed
-    try:
-        cur.execute("UPDATE %s SET %s = (SELECT %s FROM %s WHERE id = ?) "
-                    "WHERE id = ?" % (table, SPEED_COLUMN, SPEED_COLUMN, table),
-                    (int(src_id), int(dst_id)))
-    except sqlite3.Error:
-        pass
+    cur.execute("UPDATE %s SET %s = (SELECT %s FROM %s WHERE id = ?) "
+                "WHERE id = ?" % (table, SPEED_COLUMN, SPEED_COLUMN, table),
+                (int(src_id), int(dst_id)))
 
 
 # Audio (tape style, no pitch preservation): output sample i of a clip

@@ -325,20 +325,13 @@ def _load_mix_rows(project_db, sequence_id):
     conn = sqlite3.connect(project_db)
     try:
         cur = conn.cursor()
-        # gain_db is new in BUILD 74; an older clips table reads it as 0
-        cur.execute("PRAGMA table_info(clips)")
-        clip_cols = [r[1] for r in cur.fetchall()]
-        gain_sql = "COALESCE(c.gain_db, 0)" if "gain_db" in clip_cols else "0"
-        # speed_percent is new in BUILD 303; an older clips table reads 100
-        speed_sql = ("COALESCE(c.speed_percent, 100)"
-                     if "speed_percent" in clip_cols else "100")
         cur.execute(
             "SELECT t.id, LOWER(COALESCE(t.track_type, '')), "
             "COALESCE(t.enabled, 1), COALESCE(t.solo, 0), "
             "c.footage_id, c.start_frame, c.length_frames, "
             "COALESCE(c.in_frame, 0), COALESCE(c.enabled, 1), "
             "COALESCE(c.solo, 0), f.original_path, f.filename, c.link_id, "
-            + gain_sql + ", " + speed_sql + " "
+            "COALESCE(c.gain_db, 0), COALESCE(c.speed_percent, 100) "
             "FROM clips c "
             "JOIN tracks t ON t.id = c.track_id "
             "LEFT JOIN footage f ON f.id = c.footage_id "
@@ -389,21 +382,18 @@ def _track_order(project_db, sequence_id):
 
 def _load_volume_clips(project_db, sequence_id, track_order):
     # Linked 'volume' keyframe clips: [(link_id, in, out, [(frame, value)],
-    # order)], keys sorted by frame and clamped 0..100. Missing tables = [].
+    # order)], keys sorted by frame and clamped 0..100.
     conn = sqlite3.connect(project_db)
     try:
-        try:
-            clips = conn.execute(
-                "SELECT id, track_id, link_id, in_frame, out_frame FROM keyframe_clips "
-                "WHERE sequence_id = ? AND type = 'volume' AND link_id IS NOT NULL "
-                "ORDER BY id", (int(sequence_id),)).fetchall()
-            keys = conn.execute(
-                "SELECT k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
-                "JOIN keyframe_clips c ON c.id = k.keyframe_clip_id "
-                "WHERE c.sequence_id = ? AND c.type = 'volume' "
-                "ORDER BY k.frame, k.id", (int(sequence_id),)).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        clips = conn.execute(
+            "SELECT id, track_id, link_id, in_frame, out_frame FROM keyframe_clips "
+            "WHERE sequence_id = ? AND type = 'volume' AND link_id IS NOT NULL "
+            "ORDER BY id", (int(sequence_id),)).fetchall()
+        keys = conn.execute(
+            "SELECT k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
+            "JOIN keyframe_clips c ON c.id = k.keyframe_clip_id "
+            "WHERE c.sequence_id = ? AND c.type = 'volume' "
+            "ORDER BY k.frame, k.id", (int(sequence_id),)).fetchall()
     finally:
         conn.close()
     by_id = {}

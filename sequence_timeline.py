@@ -23,7 +23,7 @@ from sequence_timeline_audio import (
     _first_audio_track_id, _audio_length_frames, peaks_for,
 )
 from sequence_timeline_captions import (
-    CAPTION_LANGUAGES, ensure_captions_table, is_caption_id, clip_table_and_id,
+    CAPTION_LANGUAGES, is_caption_id, clip_table_and_id,
     load_captions, paint_caption_bar, caption_label,
     _add_caption_track, _sequence_size, add_caption, edit_caption,
 )
@@ -35,8 +35,8 @@ from sequence_timeline_sql import (
     _global_db_path, _get_global_setting, _set_global_setting, _read_open_ids,
     _write_open_ids, _add_open_id, _remove_open_id, get_open_timeline_ids,
     _write_open_player_ids, get_open_player_ids,
-    sequence_exists, _load_sequence_name, ensure_tracks_table, ensure_clips_table,
-    _load_sequence_duration, _latest_clip_end, sequence_length_seconds, _load_sequence_fps,
+    sequence_exists, _load_sequence_name,
+    _latest_clip_end, sequence_length_seconds, _load_sequence_fps,
     _add_track, refresh, _save_track_display, _move_track, _move_track_to,
     _toggle_track_flag, drop_footage, _range_overlaps, delete_selected_clip,
     drop_sequence, sequence_id_from_mime, delete_track,
@@ -1071,13 +1071,9 @@ class SequenceTimeline(QMainWindow):
     def _read_icon_blob(self, footage_id, frame_number, height):
         # Stored resized icon for footage_id at frame_number that is exactly
         # height tall (real stored size, width follows aspect), as a QPixmap
-        from footage_manager_display import icons_table_ready
         project_db = self._project_db()
         conn = sqlite3.connect(project_db)
         try:
-            # Table check is done once per project (on open or here)
-            if not icons_table_ready(project_db, conn):
-                return None
             cur = conn.cursor()
             cur.execute(
                 "SELECT data FROM icons WHERE footage_id = ? AND frame_number = ? "
@@ -1471,7 +1467,7 @@ class SequenceTimeline(QMainWindow):
             return
         if new_id is None:
             self.status_bar.showMessage(
-                "Markers are not available in this project (older version)", 3000)
+                "Markers are only for video / audio / image clips", 3000)
             return
         self._after_clip_change(f"Marker at frame {frame}")
 

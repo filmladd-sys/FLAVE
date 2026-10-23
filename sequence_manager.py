@@ -14,11 +14,10 @@ from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtGui import QAction
 
 try:
-    from sequence_add import add_sequence, edit_sequence, ensure_sequences_table
+    from sequence_add import add_sequence, edit_sequence
 except ImportError:
     add_sequence = None
     edit_sequence = None
-    ensure_sequences_table = None
 
 try:
     from sequence_timeline import SequenceTimeline, open_timeline, _open_windows
@@ -30,11 +29,6 @@ except ImportError:
 
 # Global settings store (globalsettings.db): owned by global_settings.py
 from global_settings import _get_global_setting, _set_global_setting
-
-
-def _ensure_children_table(project_db):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
 
 
 SEQUENCE_MIME = "application/x-ladd-sequence-id"
@@ -88,48 +82,33 @@ def sequence_stats(cur):
                                          "audio": 0, "caption": 0})
     # BUILD 105: sequence clips (sequence_id_ref set) count toward length
     # but not toward Video / Image / Audio; Sequences is sequence_children
-    _q = ("SELECT t.sequence_id, LOWER(COALESCE(t.track_type, '')), "
-          "SUM(CASE WHEN %s THEN 0 ELSE 1 END), "
-          "MAX(c.start_frame + c.length_frames) FROM clips c "
-          "JOIN tracks t ON t.id = c.track_id GROUP BY t.sequence_id, 2")
-    rows = None
-    for cond in ("c.sequence_id_ref IS NOT NULL", "0"):
-        try:
-            rows = cur.execute(_q % cond).fetchall()
-            break
-        except sqlite3.OperationalError:
-            rows = None
-    for sid, ttype, n, end in (rows or []):
+    rows = cur.execute(
+        "SELECT t.sequence_id, LOWER(COALESCE(t.track_type, '')), "
+        "SUM(CASE WHEN c.sequence_id_ref IS NOT NULL THEN 0 ELSE 1 END), "
+        "MAX(c.start_frame + c.length_frames) FROM clips c "
+        "JOIN tracks t ON t.id = c.track_id GROUP BY t.sequence_id, 2").fetchall()
+    for sid, ttype, n, end in rows:
         st = get(sid)
         if ttype in CLIP_COUNT_TYPES:
             st[ttype] += int(n or 0)
         st["frames"] = max(st["frames"], int(end or 0))
-    try:
-        for sid, n, end in cur.execute(
-                "SELECT sequence_id, COUNT(*), MAX(start_frame + length_frames) "
-                "FROM captions GROUP BY sequence_id").fetchall():
-            st = get(sid)
-            st["caption"] = int(n)
-            st["frames"] = max(st["frames"], int(end or 0))
-    except sqlite3.OperationalError:
-        pass
-    try:
-        for sid, end in cur.execute(
-                "SELECT sequence_id, MAX(out_frame) FROM keyframe_clips "
-                "GROUP BY sequence_id").fetchall():
-            st = get(sid)
-            st["frames"] = max(st["frames"], int(end or 0))
-    except sqlite3.OperationalError:
-        pass
+    for sid, n, end in cur.execute(
+            "SELECT sequence_id, COUNT(*), MAX(start_frame + length_frames) "
+            "FROM captions GROUP BY sequence_id").fetchall():
+        st = get(sid)
+        st["caption"] = int(n)
+        st["frames"] = max(st["frames"], int(end or 0))
+    for sid, end in cur.execute(
+            "SELECT sequence_id, MAX(out_frame) FROM keyframe_clips "
+            "GROUP BY sequence_id").fetchall():
+        st = get(sid)
+        st["frames"] = max(st["frames"], int(end or 0))
     # BUILD 308: WYSIWYG Text clips count toward length only
-    try:
-        for sid, end in cur.execute(
-                "SELECT sequence_id, MAX(start_frame + length_frames) "
-                "FROM text_clips GROUP BY sequence_id").fetchall():
-            st = get(sid)
-            st["frames"] = max(st["frames"], int(end or 0))
-    except sqlite3.OperationalError:
-        pass
+    for sid, end in cur.execute(
+            "SELECT sequence_id, MAX(start_frame + length_frames) "
+            "FROM text_clips GROUP BY sequence_id").fetchall():
+        st = get(sid)
+        st["frames"] = max(st["frames"], int(end or 0))
     return out
 
 
@@ -247,9 +226,6 @@ class SequenceManager(QMainWindow):
         self.add_action.setEnabled(add_sequence is not None)
 
         try:
-            if ensure_sequences_table is not None:
-                ensure_sequences_table(self.project_db)
-            _ensure_children_table(self.project_db)
             conn = sqlite3.connect(self.project_db)
             cur = conn.cursor()
             cur.execute("SELECT id, name, width, height, fps FROM sequences ORDER BY id")
@@ -403,7 +379,6 @@ class SequenceManager(QMainWindow):
         if reply != QMessageBox.Yes:
             return
         try:
-            _ensure_children_table(self.project_db)
             conn = sqlite3.connect(self.project_db)
             cur = conn.cursor()
             cur.execute(

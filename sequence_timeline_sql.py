@@ -13,10 +13,10 @@ from sequence_timeline_image import IMAGE_EXTENSIONS
 from sequence_timeline_video import VIDEO_EXTENSIONS, out_frame_for
 from sequence_timeline_audio import AUDIO_EXTENSIONS
 from sequence_timeline_captions import (
-    ensure_captions_table, is_caption_id, clip_table_and_id, load_captions,
+    is_caption_id, clip_table_and_id, load_captions,
 )
 from keyframe import (
-    ensure_keyframe_tables, load_keyframe_clips, is_keyframe_clip_id,
+    load_keyframe_clips, is_keyframe_clip_id,
     keyframe_range_overlaps, persist_keyframe_clip_time,
 )
 from text_clip import is_text_clip_id, text_mem_id
@@ -149,55 +149,12 @@ def _load_sequence_name(sequence_id):
     return row[0] if row and row[0] else None
 
 
-def ensure_tracks_table(project_db):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
-def ensure_clips_table(project_db):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
-def _load_sequence_duration(sequence_id):
-    # Returns duration in seconds if sequences has a duration column with a value > 0
-    project_db = _get_global_setting("current_project", "")
-    if not project_db or not os.path.isfile(project_db):
-        return None
-    try:
-        conn = sqlite3.connect(project_db)
-        cur = conn.cursor()
-        cur.execute("PRAGMA table_info(sequences)")
-        cols = [row[1] for row in cur.fetchall()]
-        value = None
-        if "duration" in cols:
-            cur.execute("SELECT duration FROM sequences WHERE id = ?", (sequence_id,))
-            row = cur.fetchone()
-            value = row[0] if row else None
-        conn.close()
-    except Exception:
-        return None
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
-
-
 def _latest_clip_end(project_db, sequence_id, fps=DEFAULT_FPS):
     # End time in seconds of the latest clip on this sequence, or None.
     # end frame = start_frame + length_frames; seconds = end frame / fps.
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        cur.execute("PRAGMA table_info(clips)")
-        clip_cols = [row[1] for row in cur.fetchall()]
-        cur.execute("PRAGMA table_info(tracks)")
-        track_cols = [row[1] for row in cur.fetchall()]
-        if ("start_frame" not in clip_cols or "length_frames" not in clip_cols
-                or "sequence_id" not in track_cols):
-            conn.close()
-            return None
         cur.execute(
             "SELECT MAX(COALESCE(c.start_frame, 0) + COALESCE(c.length_frames, 0)) "
             "FROM clips c JOIN tracks t ON t.id = c.track_id WHERE t.sequence_id = ?",
@@ -213,11 +170,8 @@ def _latest_clip_end(project_db, sequence_id, fps=DEFAULT_FPS):
 
 
 def sequence_length_seconds(sequence_id):
-    # Greatest of: sequence duration, latest clip end, empty default. No upper limit.
+    # Greatest of: latest clip end, empty default. No upper limit.
     candidates = [EMPTY_LENGTH_SECONDS]
-    duration = _load_sequence_duration(sequence_id)
-    if duration:
-        candidates.append(duration)
     project_db = _get_global_setting("current_project", "")
     if project_db and os.path.isfile(project_db):
         clip_end = _latest_clip_end(project_db, sequence_id, _load_sequence_fps(sequence_id))
@@ -261,7 +215,6 @@ def _add_track(self, track_type, title, name=None, language="", bg_color=None,
     if undo:
         push_undo(project_db, "Add track")
     try:
-        ensure_tracks_table(project_db)
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         cur.execute(
@@ -302,28 +255,15 @@ def refresh(self):
     if not project_db or not os.path.isfile(project_db):
         return
     try:
-        ensure_tracks_table(project_db)
-        ensure_clips_table(project_db)
-        ensure_captions_table(project_db)
         conn = sqlite3.connect(project_db)
-        try:
-            ensure_keyframe_tables(conn)
-            conn.commit()
-        except Exception:
-            pass
         cur = conn.cursor()
-        _tsel = ("SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
-                 "COALESCE(height_px, 64), COALESCE(bg_color, ''), "
-                 "COALESCE(language, ''), %s, %s "
-                 "FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id")
-        # BUILD 126: collapsed; a DB without the column reads 0 (open)
-        has_collapsed = track_has_collapsed(cur)
-        coll = "COALESCE(collapsed, 0)" if has_collapsed else "0"
-        try:
-            cur.execute(_tsel % ("caption_type", coll), (self.sequence_id,))
-        except sqlite3.OperationalError:
-            # Old DB without caption_type (BUILD 101): NULL shows as WebVTT
-            cur.execute(_tsel % ("NULL", coll), (self.sequence_id,))
+        # caption_type (BUILD 101; NULL shows as WebVTT), collapsed (BUILD 126)
+        cur.execute(
+            "SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
+            "COALESCE(height_px, 64), COALESCE(bg_color, ''), "
+            "COALESCE(language, ''), caption_type, COALESCE(collapsed, 0) "
+            "FROM tracks WHERE sequence_id = ? ORDER BY sort_order, id",
+            (self.sequence_id,))
         rows = cur.fetchall()
         cur.execute(
             "SELECT c.id, c.track_id, c.footage_id, c.start_frame, c.length_frames, "
@@ -561,16 +501,8 @@ def track_row_height(open_height, collapsed):
     return h if h > 0 else DEFAULT_TRACK_HEIGHT
 
 
-def track_has_collapsed(cur):
-    try:
-        return "collapsed" in [r[1] for r in cur.execute("PRAGMA table_info(tracks)")]
-    except Exception:
-        return False
-
-
 def _toggle_track_flag(self, track_id, column):
-    # BUILD 126: 'collapsed' too (no undo, like enabled / solo); an older
-    # DB without the column refuses quietly
+    # BUILD 126: 'collapsed' too (no undo, like enabled / solo)
     if column not in ("enabled", "solo", "collapsed"):
         return
     default = 1 if column == "enabled" else 0
@@ -578,9 +510,6 @@ def _toggle_track_flag(self, track_id, column):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        if column == "collapsed" and not track_has_collapsed(cur):
-            conn.close()
-            return
         cur.execute(
             f"UPDATE tracks SET {column} = CASE WHEN COALESCE({column}, ?) = 0 "
             "THEN 1 ELSE 0 END WHERE id = ?",
@@ -614,8 +543,6 @@ def drop_footage(self, footage_id, row, x_in_clips):
     start_frame = max(0, self.view_start_frame + int(x_in_clips / self.pixels_per_frame))
     length_frames = max(1, int(round(self.fps)))
     try:
-        ensure_clips_table(project_db)
-        ensure_captions_table(project_db)
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         cur.execute("SELECT filename, original_path FROM footage WHERE id = ?", (footage_id,))
@@ -667,14 +594,10 @@ def drop_footage(self, footage_id, row, x_in_clips):
         )
         if track_type in ("video", "image"):
             # New video / image clip takes the footage Proxy Default
-            # (older DBs without proxy_percent: skipped)
-            try:
-                cur.execute(
-                    "UPDATE clips SET proxy_percent = (SELECT COALESCE(proxy_percent, 0) "
-                    "FROM footage WHERE id = ?) WHERE id = ?",
-                    (footage_id, cur.lastrowid))
-            except sqlite3.OperationalError:
-                pass
+            cur.execute(
+                "UPDATE clips SET proxy_percent = (SELECT COALESCE(proxy_percent, 0) "
+                "FROM footage WHERE id = ?) WHERE id = ?",
+                (footage_id, cur.lastrowid))
         if audio_track_id is not None:
             # link_id is the video clip id, shared by both clips
             link_id = cur.lastrowid
@@ -891,9 +814,6 @@ def slice_members_db(self, cur, members, split_frame, linked):
     # (slice_clip, and the Shift+drag insert in sequence_timeline_insert.py).
     right_ids = []
     right_other = []   # BUILD 132: right caption / keyframe mem ids
-    has_gain = None
-    has_seq_ref = None
-    has_proxy = False
     for c in members:
         c_start, c_len, c_in = c[2], c[3], c[7]
         if not (c_start < split_frame < c_start + c_len):
@@ -967,28 +887,17 @@ def slice_members_db(self, cur, members, split_frame, linked):
         move_markers(cur, c[0], right_ids[-1], right_in,
                      right_in + source_span(right_length, speed))
         copy_speed(cur, "clips", c[0], right_ids[-1])
-        # Right piece keeps the clip gain (gain_db; older tables lack it)
-        if has_gain is None:
-            cur.execute("PRAGMA table_info(clips)")
-            clip_cols = [r[1] for r in cur.fetchall()]
-            has_gain = "gain_db" in clip_cols
-            has_proxy = "proxy_percent" in clip_cols
-        if has_gain:
-            cur.execute(
-                "UPDATE clips SET gain_db = (SELECT gain_db FROM clips WHERE id = ?) "
-                "WHERE id = ?", (c[0], right_ids[-1]))
-        if has_proxy:
-            cur.execute(
-                "UPDATE clips SET proxy_percent = (SELECT proxy_percent FROM clips "
-                "WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
+        # Right piece keeps the clip gain and proxy percent
+        cur.execute(
+            "UPDATE clips SET gain_db = (SELECT gain_db FROM clips WHERE id = ?) "
+            "WHERE id = ?", (c[0], right_ids[-1]))
+        cur.execute(
+            "UPDATE clips SET proxy_percent = (SELECT proxy_percent FROM clips "
+            "WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
         # BUILD 105: right piece of a sequence clip stays a sequence clip
-        if has_seq_ref is None:
-            cur.execute("PRAGMA table_info(clips)")
-            has_seq_ref = "sequence_id_ref" in [r[1] for r in cur.fetchall()]
-        if has_seq_ref:
-            cur.execute(
-                "UPDATE clips SET sequence_id_ref = (SELECT sequence_id_ref "
-                "FROM clips WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
+        cur.execute(
+            "UPDATE clips SET sequence_id_ref = (SELECT sequence_id_ref "
+            "FROM clips WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
     if linked and (right_ids or right_other):
         # New link_id for the right pieces: the first right clip's id,
         # else (no footage piece) the first right caption / keyframe
@@ -1139,16 +1048,13 @@ def sequence_id_from_mime(mime):
 
 def load_sequence_refs(cur, sequence_id):
     # {clip_id: (child_sequence_id, child_name)} for this sequence's
-    # sequence clips; {} on an old DB without sequence_id_ref
-    try:
-        rows = cur.execute(
-            "SELECT c.id, c.sequence_id_ref, COALESCE(s.name, '') FROM clips c "
-            "JOIN tracks t ON t.id = c.track_id "
-            "LEFT JOIN sequences s ON s.id = c.sequence_id_ref "
-            "WHERE t.sequence_id = ? AND c.sequence_id_ref IS NOT NULL",
-            (int(sequence_id),)).fetchall()
-    except sqlite3.OperationalError:
-        return {}
+    # sequence clips
+    rows = cur.execute(
+        "SELECT c.id, c.sequence_id_ref, COALESCE(s.name, '') FROM clips c "
+        "JOIN tracks t ON t.id = c.track_id "
+        "LEFT JOIN sequences s ON s.id = c.sequence_id_ref "
+        "WHERE t.sequence_id = ? AND c.sequence_id_ref IS NOT NULL",
+        (int(sequence_id),)).fetchall()
     return {int(cid): (int(ref), name or ("Sequence #%d" % int(ref)))
             for cid, ref, name in rows}
 
@@ -1165,13 +1071,10 @@ def sequence_contains(cur, ancestor, target):
         if sid in seen:
             continue
         seen.add(sid)
-        try:
-            for (child,) in cur.execute(
-                    "SELECT child_id FROM sequence_children WHERE parent_id = ?",
-                    (sid,)).fetchall():
-                stack.append(int(child))
-        except sqlite3.OperationalError:
-            return False
+        for (child,) in cur.execute(
+                "SELECT child_id FROM sequence_children WHERE parent_id = ?",
+                (sid,)).fetchall():
+            stack.append(int(child))
     return False
 
 
@@ -1184,14 +1087,11 @@ def child_sequence_info(cur, child_id):
     st = sequence_stats(cur).get(int(child_id), {})
     frames = int(st.get("frames", 0) or 0)
     kinds = set()
-    try:
-        for (tt,) in cur.execute(
-                "SELECT DISTINCT LOWER(COALESCE(t.track_type, '')) FROM clips c "
-                "JOIN tracks t ON t.id = c.track_id WHERE t.sequence_id = ?",
-                (int(child_id),)).fetchall():
-            kinds.add(tt)
-    except sqlite3.OperationalError:
-        pass
+    for (tt,) in cur.execute(
+            "SELECT DISTINCT LOWER(COALESCE(t.track_type, '')) FROM clips c "
+            "JOIN tracks t ON t.id = c.track_id WHERE t.sequence_id = ?",
+            (int(child_id),)).fetchall():
+        kinds.add(tt)
     return frames, bool(kinds & {"video", "image"}), "audio" in kinds
 
 
@@ -1450,14 +1350,11 @@ def sequence_pairs_for(cur, mem_ids):
     if not ids:
         return set()
     marks = ",".join("?" for _ in ids)
-    try:
-        rows = cur.execute(
-            "SELECT t.sequence_id, c.sequence_id_ref FROM clips c "
-            "JOIN tracks t ON t.id = c.track_id "
-            "WHERE c.sequence_id_ref IS NOT NULL AND c.id IN (%s)" % marks,
-            ids).fetchall()
-    except sqlite3.OperationalError:
-        return set()
+    rows = cur.execute(
+        "SELECT t.sequence_id, c.sequence_id_ref FROM clips c "
+        "JOIN tracks t ON t.id = c.track_id "
+        "WHERE c.sequence_id_ref IS NOT NULL AND c.id IN (%s)" % marks,
+        ids).fetchall()
     return {(int(p), int(ch)) for p, ch in rows}
 
 
@@ -1489,12 +1386,9 @@ def delete_track_rows(cur, track_id):
     tid = int(track_id)
     ranges = []
 
-    def _try(sql, args=()):
-        try:
-            return cur.execute(sql, args).fetchall()
-        except sqlite3.OperationalError:
-            return []
-    clip_rows = _try("SELECT id, start_frame, length_frames FROM clips "
+    def _rows(sql, args=()):
+        return cur.execute(sql, args).fetchall()
+    clip_rows = _rows("SELECT id, start_frame, length_frames FROM clips "
                      "WHERE track_id = ?", (tid,))
     clip_ids = [int(r[0]) for r in clip_rows]
     ranges += [(int(s), int(s) + max(1, int(n)) - 1) for _i, s, n in clip_rows]
@@ -1504,7 +1398,7 @@ def delete_track_rows(cur, track_id):
         prune_sequence_children(cur, pairs)
         from markers import delete_markers
         delete_markers(cur, clip_ids)
-    kf_rows = _try("SELECT id, in_frame, out_frame FROM keyframe_clips "
+    kf_rows = _rows("SELECT id, in_frame, out_frame FROM keyframe_clips "
                    "WHERE track_id = ?", (tid,))
     if kf_rows:
         marks = ",".join("?" for _ in kf_rows)
@@ -1513,12 +1407,12 @@ def delete_track_rows(cur, track_id):
         delete_clip_keys(cur, [int(r[0]) for r in kf_rows])
         cur.execute("DELETE FROM keyframe_clips WHERE track_id = ?", (tid,))
         ranges += [(int(a), max(int(a), int(b) - 1)) for _i, a, b in kf_rows]
-    cap_rows = _try("SELECT start_frame, length_frames FROM captions "
+    cap_rows = _rows("SELECT start_frame, length_frames FROM captions "
                     "WHERE track_id = ?", (tid,))
     if cap_rows:
         cur.execute("DELETE FROM captions WHERE track_id = ?", (tid,))
     # BUILD 308: WYSIWYG Text clips (picture: their ranges go dirty)
-    txt_rows = _try("SELECT start_frame, length_frames FROM text_clips "
+    txt_rows = _rows("SELECT start_frame, length_frames FROM text_clips "
                     "WHERE track_id = ?", (tid,))
     if txt_rows:
         cur.execute("DELETE FROM text_clips WHERE track_id = ?", (tid,))

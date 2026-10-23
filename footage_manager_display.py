@@ -96,38 +96,6 @@ def get_display_rows(project_db, id_list):
     return rows
 
 
-def _ensure_icons_table(conn):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
-# Project db path -> True once its icons table is known to exist. Checked
-# once per project (on the first icon lookup) instead of on every lookup.
-_ICONS_TABLE_OK = {}
-
-
-def icons_table_ready(project_db, conn=None):
-    # True if project_db has an icons table. A found table is remembered;
-    # a missing one is checked again next time.
-    if not project_db:
-        return False
-    key = os.path.normcase(os.path.abspath(project_db))
-    if _ICONS_TABLE_OK.get(key):
-        return True
-    own = conn is None
-    if own:
-        conn = sqlite3.connect(project_db)
-    try:
-        ok = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
-                          "AND name = 'icons'").fetchone() is not None
-    finally:
-        if own:
-            conn.close()
-    if ok:
-        _ICONS_TABLE_OK[key] = True
-    return ok
-
-
 JPEG_QUALITY = 90
 
 
@@ -255,7 +223,6 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
           # f"max={max_w}x{max_h} path={path}")
     conn = sqlite3.connect(project_db)
     try:
-        _ensure_icons_table(conn)
         if path is None or ftype is None:
             cur = conn.cursor()
             cur.execute("SELECT original_path, file_type FROM footage WHERE id = ?", (footage_id,))
@@ -393,15 +360,9 @@ def _icon_proxy(conn, footage_id, frame_number, need_h=None):
     # footage index; a rate-changing proxy (double rate, IVTC) is read at
     # the player's proxy index (proxy_frame_ratio, map_source_frame).
     try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
-        if not cols:
-            return None
-        extra = ("COALESCE(proxy_mode, 'normal'), proxy_fps, proxy_frames, source_fps"
-                 if all(c in cols for c in ("proxy_mode", "proxy_fps", "proxy_frames",
-                                            "source_fps"))
-                 else "'normal', NULL, NULL, NULL")
         rows = conn.execute(
-            "SELECT percentage, " + extra + ", path FROM Proxies "
+            "SELECT percentage, COALESCE(proxy_mode, 'normal'), proxy_fps, "
+            "proxy_frames, source_fps, path FROM Proxies "
             "WHERE footage_id = ? ORDER BY percentage, id",
             (int(footage_id),)).fetchall()
     except sqlite3.Error:

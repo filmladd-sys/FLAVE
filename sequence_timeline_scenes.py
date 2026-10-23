@@ -227,14 +227,12 @@ def _clip_info(tl, clip):
     db = tl._project_db()
     conn = sqlite3.connect(db)
     try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(footage)")]
-        fps_col = "f.fps" if "fps" in cols else "NULL"
         row = conn.execute(
             "SELECT c.track_id, c.start_frame, c.length_frames, "
-            "COALESCE(c.in_frame, 0), f.original_path, %s, f.width, f.height, "
+            "COALESCE(c.in_frame, 0), f.original_path, f.fps, f.width, f.height, "
             "LOWER(COALESCE(t.track_type, '')), c.footage_id "
             "FROM clips c JOIN tracks t ON t.id = c.track_id "
-            "LEFT JOIN footage f ON f.id = c.footage_id WHERE c.id = ?" % fps_col,
+            "LEFT JOIN footage f ON f.id = c.footage_id WHERE c.id = ?",
             (int(clip[0]),)).fetchone()
     finally:
         conn.close()

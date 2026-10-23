@@ -1,7 +1,7 @@
 # proxy_manager.py
 # Proxies for footage: ProxyPath setting and a read-only Proxies list
-# window. The Proxies table and the ProxyPath setting are created only in
-# new_project.py _init_db; older project DBs without them read as empty.
+# window. The Proxies table and the ProxyPath setting are created by
+# new_project.py _init_db.
 # The window's 'Set All Clips' box sets the proxy of every clip of the
 # footage in every sequence (set_all_clips_proxy).
 # ASCII only.
@@ -57,10 +57,6 @@ def prune_missing_proxies(db_path):
         return 0
     removed = 0
     try:
-        tables = set(r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"))
-        if "Proxies" not in tables:
-            return 0
         rows = conn.execute(
             "SELECT id, footage_id, path, percentage FROM Proxies").fetchall()
         gone, kept_dirs = [], set()
@@ -82,10 +78,6 @@ def prune_missing_proxies(db_path):
             print("Proxy check: %d entr%s, none removed" % (
                 len(rows), "y" if len(rows) == 1 else "ies"))
             return 0
-        cols = {}
-        for t in ("footage", "clips"):
-            if t in tables:
-                cols[t] = [r[1] for r in conn.execute("PRAGMA table_info(%s)" % t)]
         with conn:
             for pid, fid, path, pct in gone:
                 conn.execute("DELETE FROM Proxies WHERE id = ?", (int(pid),))
@@ -96,12 +88,10 @@ def prune_missing_proxies(db_path):
                     "LIMIT 1", (fid, pct)).fetchone()
                 if left:
                     continue
-                if "proxy_percent" in cols.get("footage", []):
-                    conn.execute("UPDATE footage SET proxy_percent = 0 WHERE id = ? "
-                                 "AND proxy_percent = ?", (fid, pct))
-                if "proxy_percent" in cols.get("clips", []):
-                    conn.execute("UPDATE clips SET proxy_percent = 0 WHERE "
-                                 "footage_id = ? AND proxy_percent = ?", (fid, pct))
+                conn.execute("UPDATE footage SET proxy_percent = 0 WHERE id = ? "
+                             "AND proxy_percent = ?", (fid, pct))
+                conn.execute("UPDATE clips SET proxy_percent = 0 WHERE "
+                             "footage_id = ? AND proxy_percent = ?", (fid, pct))
         removed = len(gone)
     except Exception as e:
         print("Proxy check failed: %s: %s" % (type(e).__name__, e))
@@ -114,7 +104,7 @@ def prune_missing_proxies(db_path):
 
 
 def proxy_counts(db_path):
-    # {footage_id: number of Proxies rows}; {} if the table is missing
+    # {footage_id: number of Proxies rows}; {} on a read error
     if not db_path:
         return {}
     try:
@@ -131,7 +121,7 @@ def proxy_counts(db_path):
 
 
 def proxy_rows(db_path, footage_id):
-    # [(id, path, percentage)] for footage_id; [] if the table is missing
+    # [(id, path, percentage)] for footage_id; [] on a read error
     if not db_path:
         return []
     try:
@@ -158,30 +148,13 @@ MODE_LABELS = {"normal": "Normal", "deint": "Deinterlace",
                "ivtc": "Inverse telecine"}
 MODE_SHORT = {"normal": "normal", "deint": "deint", "deint2x": "deint 2x",
               "ivtc": "IVTC"}
-_MODE_COLS = ("deinterlace", "proxy_mode", "proxy_fps", "proxy_frames", "source_fps")
-
-
-def proxies_have_modes(db_path):
-    # Proxies table made by BUILD 119+ _init_db (mode columns present)
-    try:
-        conn = sqlite3.connect(db_path)
-        try:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(Proxies)")]
-        finally:
-            conn.close()
-    except Exception:
-        return False
-    return all(c in cols for c in _MODE_COLS)
 
 
 def proxy_rows_full(db_path, footage_id):
-    # [(id, path, pct, mode, deinterlace, proxy_fps, proxy_frames)]; older
-    # tables read mode 'normal', deinterlace 0, fps / frames None
+    # [(id, path, pct, mode, deinterlace, proxy_fps, proxy_frames)]; [] on
+    # a read error
     if not db_path:
         return []
-    if not proxies_have_modes(db_path):
-        return [(r[0], r[1], r[2], "normal", 0, None, None)
-                for r in proxy_rows(db_path, footage_id)]
     try:
         conn = sqlite3.connect(db_path)
         try:
@@ -200,9 +173,6 @@ def footage_field_order(db_path, footage_id):
     try:
         conn = sqlite3.connect(db_path)
         try:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(footage)")]
-            if "field_order" not in cols:
-                return None
             row = conn.execute("SELECT field_order FROM footage WHERE id = ?",
                                (int(footage_id),)).fetchone()
         finally:
@@ -216,12 +186,11 @@ def is_mkv_path(path):
     return os.path.splitext(path or "")[1].lower() == ".mkv"
 
 
-def valid_modes(src_path, field_order, have_modes=True):
+def valid_modes(src_path, field_order):
     # Modes offered for a footage: Normal always; MKV interlaced adds
     # Deinterlace and double rate; MKV telecine adds Inverse telecine.
-    # Only with the BUILD 119 Proxies columns (else mode cannot be stored).
     out = ["normal"]
-    if have_modes and is_mkv_path(src_path):
+    if is_mkv_path(src_path):
         if field_order == "interlaced":
             out += ["deint", "deint2x"]
         elif field_order == "telecine":
@@ -245,19 +214,6 @@ def mode_text(mode, fps, frames):
 VIDEO_PROXY_EXT = "mp4"     # video footage proxies
 IMAGE_PROXY_EXT = "jpg"     # image footage proxies
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
-
-
-def proxies_table_exists(db_path):
-    try:
-        conn = sqlite3.connect(db_path)
-        try:
-            row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
-                               "AND name='Proxies'").fetchone()
-        finally:
-            conn.close()
-        return row is not None
-    except Exception:
-        return False
 
 
 def footage_source(db_path, footage_id):
@@ -293,7 +249,7 @@ def set_default_after_generate(db_path, footage_id, percentage, ok, out_path=Non
     # BUILD 122: after a successful generate, footage.proxy_percent (the
     # Footage Manager 'Proxy Default') = the new percent, written through
     # clip_proxy.set_footage_proxy_percent (same path as the Proxy Default
-    # menu: undo snapshot 'Proxy default', refused on older projects).
+    # menu: undo snapshot 'Proxy default').
     # Video: ok and the proxy file exists. Image: ok (placeholder row, no
     # file). Clips keep their own proxy_percent. Only the percent is stored;
     # with Normal and Deinterlace at that percent the composite and the
@@ -645,47 +601,28 @@ def probe_rate_frames(path):
 
 def save_proxy_row(db_path, footage_id, path, percentage, mode="normal",
                    proxy_fps=None, proxy_frames=None, source_fps=None):
-    # Update the path of an existing row for footage + pct (+ mode with the
-    # BUILD 119 columns), else insert
-    if proxies_have_modes(db_path):
-        deint = 0 if mode == "normal" else 1
-        conn = sqlite3.connect(db_path)
-        try:
-            row = conn.execute(
-                "SELECT id FROM Proxies WHERE footage_id = ? AND percentage = ? "
-                "AND COALESCE(proxy_mode, 'normal') = ? ORDER BY id LIMIT 1",
-                (int(footage_id), int(percentage), mode)).fetchone()
-            vals = (path, deint, mode, proxy_fps, proxy_frames, source_fps)
-            if row:
-                conn.execute(
-                    "UPDATE Proxies SET path = ?, deinterlace = ?, proxy_mode = ?, "
-                    "proxy_fps = ?, proxy_frames = ?, source_fps = ? WHERE id = ?",
-                    vals + (row[0],))
-                rid = row[0]
-            else:
-                rid = conn.execute(
-                    "INSERT INTO Proxies (path, deinterlace, proxy_mode, proxy_fps, "
-                    "proxy_frames, source_fps, footage_id, percentage) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    vals + (int(footage_id), int(percentage))).lastrowid
-            conn.commit()
-            return rid
-        finally:
-            conn.close()
-    if mode != "normal":
-        raise RuntimeError("this project's Proxies table has no mode columns")
+    # Update the path (and mode columns) of an existing row for footage +
+    # pct + mode, else insert
+    deint = 0 if mode == "normal" else 1
     conn = sqlite3.connect(db_path)
     try:
         row = conn.execute(
             "SELECT id FROM Proxies WHERE footage_id = ? AND percentage = ? "
-            "ORDER BY id LIMIT 1", (int(footage_id), int(percentage))).fetchone()
+            "AND COALESCE(proxy_mode, 'normal') = ? ORDER BY id LIMIT 1",
+            (int(footage_id), int(percentage), mode)).fetchone()
+        vals = (path, deint, mode, proxy_fps, proxy_frames, source_fps)
         if row:
-            conn.execute("UPDATE Proxies SET path = ? WHERE id = ?", (path, row[0]))
+            conn.execute(
+                "UPDATE Proxies SET path = ?, deinterlace = ?, proxy_mode = ?, "
+                "proxy_fps = ?, proxy_frames = ?, source_fps = ? WHERE id = ?",
+                vals + (row[0],))
             rid = row[0]
         else:
             rid = conn.execute(
-                "INSERT INTO Proxies (footage_id, path, percentage) VALUES (?, ?, ?)",
-                (int(footage_id), path, int(percentage))).lastrowid
+                "INSERT INTO Proxies (path, deinterlace, proxy_mode, proxy_fps, "
+                "proxy_frames, source_fps, footage_id, percentage) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                vals + (int(footage_id), int(percentage))).lastrowid
         conn.commit()
         return rid
     finally:
@@ -747,9 +684,6 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="norma
     if size is None:
         return False, "Could not read the source width and height (ffprobe)."
     w, h = scaled_size(size[0], size[1], percentage)
-    if mode != "normal" and not proxies_have_modes(db_path):
-        return False, ("Deinterlace / inverse telecine proxies need a project "
-                       "created with BUILD 119 or later.")
     source_fps = probe_rate_frames(src)[0] if mode != "normal" else None
     ok, msg = nvenc_available(choose_encoder(w, h), w, h)
     if not ok:
@@ -790,10 +724,8 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="norma
         print("WORKER proxy: %s done in %.1fs" % (os.path.basename(out),
                                                   time.perf_counter() - t0))
     try:
-        pfps = pframes = sfps = None
-        if mode != "normal" or proxies_have_modes(db_path):
-            pfps, pframes = probe_rate_frames(out)
-            sfps = source_fps if source_fps else probe_rate_frames(src)[0]
+        pfps, pframes = probe_rate_frames(out)
+        sfps = source_fps if source_fps else probe_rate_frames(src)[0]
         save_proxy_row(db_path, footage_id, out, percentage, mode, pfps, pframes, sfps)
     except Exception as e:
         return False, "Proxy file written but the row could not be saved: %s" % e
@@ -811,13 +743,9 @@ _ALL_CLIPS_WHERE = (
 def set_all_clips_proxy(db_path, footage_id, pct):
     # BUILD 291: clips.proxy_percent = pct for every video / image clip of
     # footage_id in every sequence (0 = None: the original). One undo step, taken only
-    # when some clip changes. Returns the number of clips changed, or None
-    # when the project has no clips.proxy_percent column (older version).
+    # when some clip changes. Returns the number of clips changed.
     conn = sqlite3.connect(db_path)
     try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(clips)")]
-        if "proxy_percent" not in cols:
-            return None
         n = conn.execute(
             "SELECT COUNT(*) FROM clips WHERE " + _ALL_CLIPS_WHERE,
             (int(footage_id), int(pct))).fetchone()[0]
@@ -955,8 +883,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 self.table.setItem(i, 2, QTableWidgetItem(str(pct)))
                 self.table.setItem(i, 3, QTableWidgetItem(mode_text(mode, pfps, pframes)))
             src_path, _n = footage_source(db_path, footage_id)
-            self._modes = valid_modes(src_path, footage_field_order(db_path, footage_id),
-                                      proxies_have_modes(db_path))
+            self._modes = valid_modes(src_path, footage_field_order(db_path, footage_id))
             self._have = set((int(r[2]), r[3] or "normal") for r in rows)
             self.combo.blockSignals(True)
             self.combo.clear()
@@ -994,10 +921,6 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             except Exception as e:
                 show_message(self, "Proxy Manager", "Could not set clips: %s" % e)
                 return
-            if n is None:
-                self.all_status.setText(
-                    "Proxy not available in this project (older version)")
-                return
             self.all_status.setText("%d clip(s) set to %s" % (n, text))
             if n:
                 refresh_open_timelines(
@@ -1024,13 +947,6 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             pct = self.combo.currentData()
             mode = self.mode_combo.currentData() or "normal"
             if pct is None or getattr(self, "_generating", False):
-                return
-            if not proxies_table_exists(db_path):
-                show_message(
-                    self, "Proxy Manager",
-                    "Proxies are not available in this project because it was "
-                    "created with an older version. Create a new project to use "
-                    "proxies.")
                 return
             src_path, _n = footage_source(db_path, footage_id)
             if is_video_path(src_path):

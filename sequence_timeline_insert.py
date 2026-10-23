@@ -72,16 +72,12 @@ def ripple_insert_db(tl, cur, at, span, cuts, rows=None):
         "UPDATE captions SET start_frame = start_frame + ? "
         "WHERE start_frame >= ? AND sequence_id = ?" + sql,
         [span, at, seq] + extra)
-    # BUILD 308: WYSIWYG Text clips (text_clips; projects without the
-    # table skip it)
+    # BUILD 308: WYSIWYG Text clips (text_clips)
     sql, extra = _not_in("id", rows.get("text_clips", ()))
-    try:
-        cur.execute(
-            "UPDATE text_clips SET start_frame = start_frame + ? "
-            "WHERE start_frame >= ? AND sequence_id = ?" + sql,
-            [span, at, seq] + extra)
-    except sqlite3.OperationalError:
-        pass
+    cur.execute(
+        "UPDATE text_clips SET start_frame = start_frame + ? "
+        "WHERE start_frame >= ? AND sequence_id = ?" + sql,
+        [span, at, seq] + extra)
     sql, extra = _not_in("id", rows.get("keyframe_clips", ()))
     cur.execute(
         "SELECT id FROM keyframe_clips WHERE in_frame >= ? AND sequence_id = ?" + sql,

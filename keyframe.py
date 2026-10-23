@@ -117,14 +117,9 @@ def key_table_for_type(stored_type):
     return KEY_TABLE_BY_TYPE.get(stored_type, "keyframes")
 
 
-def key_tables(cur):
-    # Key tables present in this project (new_project.py creates all of
-    # them)
-    names = [t for t, _c in KEY_TABLE_COLS]
-    cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND "
-                "name IN (%s)" % ",".join("?" for _ in names), names)
-    have = set(r[0] for r in cur.fetchall())
-    return [t for t in names if t in have]
+def key_tables(cur=None):
+    # Every key table (new_project.py creates all of them); cur is unused
+    return [t for t, _c in KEY_TABLE_COLS]
 
 
 def shift_clip_keys(cur, db_id, delta):
@@ -176,21 +171,6 @@ TITLE_BAR_H = 15
 KEY_MARK_SIZE = 20
 
 
-def ensure_keyframe_clips_table(conn):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
-def ensure_keyframes_table(conn):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
-def ensure_keyframe_tables(conn):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
 def is_keyframe_clip_id(clip_id):
     # Below this range (<= -text_clip.TEXT_ID_BASE) are text clip ids
     from text_clip import TEXT_ID_BASE
@@ -240,15 +220,12 @@ def load_keyframe_clips(cur, sequence_id, clips):
     # {key_id: (bottom, left, right)}; its keys come from
     # keyframe_crop_edges with value = top
     by_db = {}
-    try:
-        cur.execute(
-            "SELECT id, track_id, type, link_id, in_frame, out_frame, "
-            "COALESCE(name, '') FROM keyframe_clips "
-            "WHERE sequence_id = ? ORDER BY in_frame, id",
-            (sequence_id,)
-        )
-    except sqlite3.OperationalError:
-        return
+    cur.execute(
+        "SELECT id, track_id, type, link_id, in_frame, out_frame, "
+        "COALESCE(name, '') FROM keyframe_clips "
+        "WHERE sequence_id = ? ORDER BY in_frame, id",
+        (sequence_id,)
+    )
     for row in cur.fetchall():
         db_id, track_id, ktype, link_id, in_f, out_f, name = row
         in_f = max(0, int(in_f or 0))
@@ -262,35 +239,28 @@ def load_keyframe_clips(cur, sequence_id, clips):
         by_db[int(db_id)] = entry
     if not by_db:
         return
-    try:
-        cur.execute(
-            "SELECT k.id, k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
-            "JOIN keyframe_clips c ON c.id = k.keyframe_clip_id "
-            "WHERE c.sequence_id = ? ORDER BY k.frame, k.id",
-            (sequence_id,)
-        )
-    except sqlite3.OperationalError:
-        return
+    cur.execute(
+        "SELECT k.id, k.keyframe_clip_id, k.frame, k.value FROM keyframes k "
+        "JOIN keyframe_clips c ON c.id = k.keyframe_clip_id "
+        "WHERE c.sequence_id = ? ORDER BY k.frame, k.id",
+        (sequence_id,)
+    )
     for key_id, db_id, frame, value in cur.fetchall():
         entry = by_db.get(int(db_id))
         if entry is not None:
             entry[9].append((int(key_id), int(frame), float(value)))
-    tables = key_tables(cur)
-    if "keyframe_border" in tables:
-        cur.execute(
-            "SELECT k.id, k.keyframe_clip_id, k.frame, k.px, k.r, k.g, k.b, "
-            "k.a FROM keyframe_border k JOIN keyframe_clips c "
-            "ON c.id = k.keyframe_clip_id "
-            "WHERE c.sequence_id = ? ORDER BY k.frame, k.id", (sequence_id,))
-        for key_id, db_id, frame, px, r, g, b, a in cur.fetchall():
-            entry = by_db.get(int(db_id))
-            if entry is not None and len(entry) > 11:
-                entry[9].append((int(key_id), int(frame), float(px)))
-                entry[11][int(key_id)] = (float(r), float(g), float(b),
-                                          float(a))
+    cur.execute(
+        "SELECT k.id, k.keyframe_clip_id, k.frame, k.px, k.r, k.g, k.b, "
+        "k.a FROM keyframe_border k JOIN keyframe_clips c "
+        "ON c.id = k.keyframe_clip_id "
+        "WHERE c.sequence_id = ? ORDER BY k.frame, k.id", (sequence_id,))
+    for key_id, db_id, frame, px, r, g, b, a in cur.fetchall():
+        entry = by_db.get(int(db_id))
+        if entry is not None and len(entry) > 11:
+            entry[9].append((int(key_id), int(frame), float(px)))
+            entry[11][int(key_id)] = (float(r), float(g), float(b),
+                                      float(a))
     for xy_table in ("keyframe_move", "keyframe_crop"):
-        if xy_table not in tables:
-            continue
         cur.execute(
             "SELECT k.id, k.keyframe_clip_id, k.frame, k.x, k.y "
             "FROM %s k JOIN keyframe_clips c "
@@ -302,18 +272,17 @@ def load_keyframe_clips(cur, sequence_id, clips):
             if entry is not None and len(entry) > 11:
                 entry[9].append((int(key_id), int(frame), float(x)))
                 entry[11][int(key_id)] = float(y)
-    if "keyframe_crop_edges" in tables:
-        cur.execute(
-            "SELECT k.id, k.keyframe_clip_id, k.frame, k.top, k.bottom, "
-            "k.left, k.right FROM keyframe_crop_edges k JOIN keyframe_clips c "
-            "ON c.id = k.keyframe_clip_id "
-            "WHERE c.sequence_id = ? ORDER BY k.frame, k.id", (sequence_id,))
-        for key_id, db_id, frame, top, bottom, left, right in cur.fetchall():
-            entry = by_db.get(int(db_id))
-            if entry is not None and len(entry) > 11:
-                entry[9].append((int(key_id), int(frame), float(top)))
-                entry[11][int(key_id)] = (float(bottom), float(left),
-                                          float(right))
+    cur.execute(
+        "SELECT k.id, k.keyframe_clip_id, k.frame, k.top, k.bottom, "
+        "k.left, k.right FROM keyframe_crop_edges k JOIN keyframe_clips c "
+        "ON c.id = k.keyframe_clip_id "
+        "WHERE c.sequence_id = ? ORDER BY k.frame, k.id", (sequence_id,))
+    for key_id, db_id, frame, top, bottom, left, right in cur.fetchall():
+        entry = by_db.get(int(db_id))
+        if entry is not None and len(entry) > 11:
+            entry[9].append((int(key_id), int(frame), float(top)))
+            entry[11][int(key_id)] = (float(bottom), float(left),
+                                      float(right))
 
 
 def format_key_value(value, stored_type, y=None):
@@ -1155,7 +1124,6 @@ def add_keyframe_clip(timeline, track_id, click_frame):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        ensure_keyframe_tables(conn)
         cur.execute(
             "SELECT MIN(in_frame) FROM keyframe_clips WHERE track_id = ? "
             "AND in_frame > ?", (int(track_id), in_frame))
@@ -1484,7 +1452,6 @@ def add_key(timeline, clip, click_frame):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        ensure_keyframe_tables(conn)
         stored_type = clip_type_from_db(cur, db_id)
         type_label = type_display_label(stored_type) or "Value"
         # BUILD 147: no keys yet = the type may be chosen with this key
@@ -1508,7 +1475,6 @@ def add_key(timeline, clip, click_frame):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        ensure_keyframe_tables(conn)
         # BUILD 147: one type per clip. A different type is set only while
         # the clip has no keys (checked again in this transaction).
         if new_type != stored_type and not set_clip_type(cur, db_id, new_type):
@@ -1972,7 +1938,6 @@ def paste_key(timeline, clip, frame):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        ensure_keyframe_tables(conn)
         if not set_clip_type(cur, db_id, stored_type):
             conn.close()
             timeline.status_bar.showMessage(

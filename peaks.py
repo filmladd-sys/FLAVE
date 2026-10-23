@@ -31,11 +31,6 @@ AUDIO_TMP_CREATE_SQL = """
 """
 
 
-def ensure_peaks_table(conn):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
 def audiotmp_db_path(project_db):
     # BUILD 223: LaddTest.db -> LaddTest_AudioTmp.db in the same folder
     # (per project; sequence_preview.temp_file_path)
@@ -217,7 +212,6 @@ def store_peaks_for_footage(project_db, footage_id, path):
         data, duration, pcm = result
         conn = sqlite3.connect(project_db)
         try:
-            ensure_peaks_table(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO peaks (footage_id, peaks_per_second, "
                 "duration_seconds, data) VALUES (?, ?, ?, ?)",
@@ -241,11 +235,6 @@ def backfill_audiotmp(project_db):
         conn = sqlite3.connect(project_db)
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='footage'"
-            )
-            if cur.fetchone() is None:
-                return
             cur.execute("SELECT original_path FROM footage")
             rows = cur.fetchall()
         finally:
@@ -290,9 +279,6 @@ def load_peaks(project_db, footage_id):
         conn = sqlite3.connect(project_db)
         try:
             cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='peaks'")
-            if cur.fetchone() is None:
-                return None
             cur.execute("SELECT peaks_per_second, duration_seconds, data FROM peaks "
                         "WHERE footage_id = ?", (footage_id,))
             row = cur.fetchone()

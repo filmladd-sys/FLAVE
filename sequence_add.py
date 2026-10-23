@@ -15,11 +15,6 @@ from PySide6.QtWidgets import (
 from global_settings import _get_global_setting
 
 
-def ensure_sequences_table(project_db):
-    # Schema lives in new_project.py (BUILD 78); kept as a no-op for callers
-    return None
-
-
 def next_sequence_name(project_db):
     # Sequence01, Sequence02, ...: lowest NN not used by a sequence name
     used = set()
@@ -125,7 +120,6 @@ class SequenceAddDialog(QDialog):
             return
 
         try:
-            ensure_sequences_table(self.project_db)
             conn = sqlite3.connect(self.project_db)
             cur = conn.cursor()
             if self.edit_mode:
