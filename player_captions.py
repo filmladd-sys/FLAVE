@@ -14,6 +14,12 @@
 # window leaves them NULL unless set). Per axis (BUILD 103): a set X
 # centers the box on that X, blank X is horizontal center; a set Y centers
 # the box on that Y, blank Y uses the default bottom stack. font_size is in sequence pixels, times scale.
+# Font size, wrap width, padding and position all scale with the displayed
+# picture (sequence px times picture height / sequence height), so a
+# windowed player shows a scaled-down copy of the full screen layout.
+# BUILD 298: text is measured with the painter that draws it (the overlay
+# image) and laid out in the same wrap-width rect, so the wrapping drawn is
+# the wrapping measured and no line falls outside its box.
 
 import sqlite3
 
@@ -101,7 +107,7 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
                    seq_w, seq_h):
     # pic_* is the letterboxed picture rect in device-independent pixels
     from PySide6.QtCore import QRectF
-    from PySide6.QtGui import QFont, QFontMetricsF, QColor
+    from PySide6.QtGui import QFont, QColor
     caps = captions_at(snap, frame)
     if not caps or pic_w <= 0 or pic_h <= 0:
         return 0
@@ -121,9 +127,11 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
             fpx = seq_h * DEFAULT_SIZE_FRAC * sc * k
         font = QFont(fam or DEFAULT_FONT_FAMILY)
         font.setPixelSize(max(6, int(round(fpx))))
-        fm = QFontMetricsF(font)
-        br = fm.boundingRect(QRectF(0, 0, wrap_w, 100000), flags,
-                             str(text).replace("\r\n", "\n"))
+        # BUILD 298: measured on the painter's own device (not the screen's
+        # QFontMetricsF, whose widths can differ from what the image draws)
+        painter.setFont(font)
+        br = painter.boundingRect(QRectF(0, 0, wrap_w, 100000), flags,
+                                  str(text).replace("\r\n", "\n"))
         pad = max(2.0, fpx * 0.25)
         bw, bh = br.width() + 2 * pad, br.height() + 2 * pad
         custom = py is not None      # Y set: placed, not stacked
@@ -155,7 +163,14 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
         painter.fillRect(r, box)
         painter.setFont(font)
         painter.setPen(white)
-        painter.drawText(r.adjusted(pad, pad, -pad, -pad), flags,
+        # BUILD 298: lines laid out in the wrap-width rect they were
+        # measured in, centered on the box (the box is the measured text
+        # plus pad), never clipped. The tight box rect used before re-wrapped
+        # the last word onto a hidden line when drawn text came out a
+        # fraction wider than measured (e.g. 'Called FLAVE,' -> 'Called').
+        painter.drawText(QRectF(cx - wrap_w / 2.0, top + pad, wrap_w,
+                                bh - 2 * pad),
+                         flags | int(Qt.TextDontClip),
                          str(c[3]).replace("\r\n", "\n"))
     painter.restore()
     return len(laid)
