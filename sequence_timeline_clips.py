@@ -650,12 +650,14 @@ def _no_source_floor(self, clip):
 
 
 # BUILD 238: edge auto-scroll while a clip / selection / link group is
-# moved (not trims), with the scrub's rule and margin
+# moved or (BUILD 300) edge-trimmed, left or right edge, with the scrub's
+# rule and margin
 # (sequence_timeline_ruler.scrub_edge, SCRUB_EDGE_PX, SCRUB_TICK_MS timer):
 # in a margin the view pans by the mouse travel into it plus a timer tick
 # while held there, stopping at frame 0 / the end. The tick re-runs the
-# move at the last mouse position, so the clips follow the frame under the
-# cursor as the view scrolls. Stops when the mouse leaves the margin or on
+# move or trim at the last mouse position, so the clips (or the trimmed
+# edge, within the usual trim clamps) follow the frame under the cursor as
+# the view scrolls. Stops when the mouse leaves the margin or on
 # release (the panned view is saved then).
 def _move_pan(self, drag, pos, tick=False):
     # Pans the view if pos is in a margin; True while it is in one
@@ -665,9 +667,16 @@ def _move_pan(self, drag, pos, tick=False):
                        self.table.viewport().width() - left))
     xc = pos.x() - left
     last = xc if tick else drag.get("pan_x")
+    # BUILD 300: the scroll limit is the sequence end or the dragged group's
+    # live end, whichever is later, so a clip moved or trimmed past the end
+    # keeps the view scrolling (the end's right pad stays ahead of it)
+    total = self.total_frames()
+    for m in drag.get("group") or []:
+        c = m["clip"]
+        total = max(total, int(c[2]) + int(c[3]))
     view, _frame, rem = scrub_edge(
         xc, last, width, self.view_start_frame, self.pixels_per_frame,
-        self.total_frames(), self.visible_frames(), drag.get("pan_rem", 0.0), tick)
+        total, self.visible_frames(), drag.get("pan_rem", 0.0), tick)
     drag["pan_x"] = xc
     drag["pan_rem"] = rem
     if view != self.view_start_frame:
@@ -695,7 +704,7 @@ def _move_pan_timer(self):
 
 def _move_pan_tick(self):
     drag = getattr(self, "_edge_drag", None)
-    if drag is None or drag.get("edge") != "move" or drag.get("pan_pos") is None:
+    if drag is None or drag.get("pan_pos") is None:
         _move_pan_timer(self).stop()
         return
     self._edge_drag_move(drag["pan_pos"], tick=True)
@@ -723,16 +732,15 @@ def _edge_drag_move(self, pos, tick=False):
     group = drag.get("group") or self._drag_group(clip)
     drag["group"] = group
     edge = drag["edge"]
-    if edge == "move":
-        # BUILD 238: pan at the edges first, then use the frame under the
-        # cursor in the (possibly scrolled) view
-        drag["pan_pos"] = pos
-        timer = _move_pan_timer(self)
-        if _move_pan(self, drag, pos, tick):
-            if not timer.isActive():
-                timer.start()
-        elif timer.isActive():
-            timer.stop()
+    # BUILD 238 (moves) / BUILD 300 (trims): pan at the edges first, then
+    # use the frame under the cursor in the (possibly scrolled) view
+    drag["pan_pos"] = pos
+    timer = _move_pan_timer(self)
+    if _move_pan(self, drag, pos, tick):
+        if not timer.isActive():
+            timer.start()
+    elif timer.isActive():
+        timer.stop()
     frame = self._frame_at_clips_x(self._x_in_clips(pos))
     if edge == "move":
         target = self._move_target_track(pos, drag)
