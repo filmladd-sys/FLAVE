@@ -982,10 +982,14 @@ def slice_members_db(self, cur, members, split_frame, linked):
                 persist_keyframe_link_id(cur, mid, None)
 
 
-def ripple_delete(self, track_id, click_frame):
-    # Close the gap at click_frame on one track by moving the clips to its
-    # right left until the first one hits the previous clip's end (or 0).
-    # Linked partners (same link_id) move by the same delta.
+def ripple_gap(self, track_id, click_frame):
+    # BUILD 297: the gap Ripple Delete at click_frame on one track, without
+    # changing anything. The gap runs from the end of the previous clip on
+    # the track (or 0) to the start of the next one; the clips from that
+    # one on move left, with their linked partners, by the gap clamped by
+    # ripple_moving. Returns (moving {id: clip}, delta < 0), or (None,
+    # status message) when there is nothing to close. The track menu
+    # greys out its Ripple Delete on (None, ...).
     track_clips = self.clips_by_track.get(track_id, [])
     wall = 0
     for c in track_clips:
@@ -995,12 +999,22 @@ def ripple_delete(self, track_id, click_frame):
     right = sorted([c for c in track_clips if c[2] >= click_frame],
                    key=lambda c: c[2])
     if not right:
-        self.status_bar.showMessage("Ripple Delete: no clips to the right", 3000)
-        return
-    delta = wall - right[0][2]
-    moving, delta = ripple_moving(self, right, delta)
+        return None, "Ripple Delete: no clips to the right"
+    moving, delta = ripple_moving(self, right, wall - right[0][2])
     if delta >= 0:
-        self.status_bar.showMessage("Ripple Delete: no gap to close", 3000)
+        return None, "Ripple Delete: no gap to close"
+    return moving, delta
+
+
+def ripple_delete(self, track_id, click_frame):
+    # Close the gap at click_frame on one track by moving the clips to its
+    # right left until the first one hits the previous clip's end (or 0)
+    # (ripple_gap). Linked partners (same link_id) move by the same delta.
+    # Footage, caption and keyframe clips (BUILD 297: the keyframe track
+    # menu lists it again) all move; one undo step.
+    moving, delta = ripple_gap(self, track_id, click_frame)
+    if moving is None:
+        self.status_bar.showMessage(delta, 3000)
         return
     from undo import push_undo
     push_undo(self._project_db(), "Ripple delete")

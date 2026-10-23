@@ -40,7 +40,7 @@ from sequence_timeline_sql import (
     _toggle_track_flag, drop_footage, _range_overlaps, delete_selected_clip,
     drop_sequence, sequence_id_from_mime, delete_track,
     slice_clip, ripple_delete, _toggle_clip_flag,
-    ripple_delete_clips,
+    ripple_delete_clips, ripple_gap,
 )
 # BUILD 161: track parts of the window (same names, re-exported here)
 from sequence_timeline_tracks import (
@@ -889,14 +889,24 @@ class SequenceTimeline(QMainWindow):
         add_keyframe_action = None
         x_in_clips = self._x_in_clips(pos)
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower()
+        # BUILD 297: Ripple Delete (close the gap under the mouse,
+        # ripple_gap) on every edit track again, keyframe tracks included
+        # (lost when BUILD 53 split Add Keyframe Clip off); greyed out when
+        # there is no gap to close.
         if x_in_clips >= 0 and track_type == "keyframe":
             menu.addSeparator()
             add_keyframe_action = menu.addAction("Add Keyframe Clip")
+            ripple_action = menu.addAction("Ripple Delete")
         elif x_in_clips >= 0 and track_type in EDIT_TRACK_TYPES:
             menu.addSeparator()
             if track_type == "caption":
                 add_caption_action = menu.addAction("Add Caption")
             ripple_action = menu.addAction("Ripple Delete")
+        if ripple_action is not None:
+            gap_frame = max(0.0, self.view_start_frame
+                            + x_in_clips / self.pixels_per_frame)
+            ripple_action.setEnabled(
+                ripple_gap(self, track_id, gap_frame)[0] is not None)
         # BUILD 123: empty clip area of a track row (not a clip body or
         # edge; key boxes / markers / clips returned above) also lists the
         # Tracks menu items. The Name / Type header cells do not.
