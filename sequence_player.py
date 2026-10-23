@@ -271,8 +271,8 @@ def proxy_frame_ratio(source_fps, proxy_fps):
 
 def map_source_frame(src_idx, ratio, proxy_frames=None):
     # Read index floor(src_idx * ratio + eps), clamped to proxy_frames - 1
-    # when given. ratio None = src_idx as is. A rate-changing proxy alone
-    # uses ratio = proxy_fps / source_fps (see clip_source_frame).
+    # when given. ratio None = floor(src_idx) (src_idx >= 0, so int()).
+    # A rate-changing proxy alone uses ratio = proxy_fps / source_fps (see clip_source_frame).
     if not ratio:
         return int(src_idx)
     idx = int(math.floor(float(src_idx) * ratio + FRAME_MAP_EPS))
@@ -341,10 +341,12 @@ def clip_source_frame(seq_src, conform=None, proxy_ratio=None,
     # is relative to the footage rate, so both together map sequence time
     # to footage time to the proxy index in one step:
     # floor(seq_src * footage_fps / seq_fps * proxy_fps / source_fps + eps).
+    # seq_src may be fractional (clip speed, BUILD 303: in + rel * speed /
+    # 100); it is floored once, here or inside that mapping.
     ratio = proxy_ratio
     if conform:
         ratio = conform * (proxy_ratio or 1.0)
-    return map_source_frame(max(0, int(seq_src)), ratio, proxy_frames)
+    return map_source_frame(max(0, seq_src), ratio, proxy_frames)
 
 
 # BUILD 241: out-of-range source frames (BUILD 240) are learned from the
@@ -582,12 +584,16 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # (snapshot[24] .. [27]) (keyframe.collect_crop_edge_clips)
     from keyframe import collect_crop_edge_clips
     crop_edge_clips = collect_crop_edge_clips(tl.clips_by_track, track_order)
+    # BUILD 303: clip speed percent by clip id, only clips != 100
+    # (snapshot[28], clip_speed.load_clip_speeds; _layer_items)
+    clip_speeds = dict(getattr(tl, "_clip_speeds", None) or {})
     return (rows, clips, scale_clips, pos_x_clips, track_order, pos_y_clips,
             proxies, opacity_clips, crop_x_clips, crop_y_clips,
             gamma_clips, brightness_clips, contrast_clips, rotate_clips,
             outline_clips) + tuple(outline_rgba_clips) + (
                 fps_conform, move_x_clips, move_y_clips,
-                crop_xy_x_clips, crop_xy_y_clips) + tuple(crop_edge_clips)
+                crop_xy_x_clips, crop_xy_y_clips) + tuple(crop_edge_clips) + (
+                clip_speeds,)
 
 
 # ---------------------------------------------------------------- window
@@ -1001,6 +1007,9 @@ class SequencePlayer(QWindow):
         crop_edge_clips = tuple(snapshot[i] if len(snapshot) > i else []
                                 for i in (24, 25, 26, 27))
         from keyframe import crop_edges_for_link
+        # BUILD 303: clip speed (snapshot[28], {clip id: percent != 100})
+        speeds = snapshot[28] if len(snapshot) > 28 else {}
+        from clip_speed import source_pos
         from keyframe import color_value_for_link
         from keyframe import crop_offset_for_link
         from keyframe import opacity_for_link
@@ -1030,10 +1039,12 @@ class SequencePlayer(QWindow):
                 if path:
                     src = 0
                     if kind == "video":
-                        # Sequence index -> footage (conform) -> proxy index
+                        # Sequence index (speed scaled, clip_speed
+                        # source_pos) -> footage (conform) -> proxy index
                         src = clip_source_frame(
-                            clip[7] + frame - start, fps_conform.get(clip[1]),
-                            ratio, pframes)
+                            source_pos(clip[7], frame - start,
+                                       speeds.get(clip[0], 100)),
+                            fps_conform.get(clip[1]), ratio, pframes)
                     link_id = clip[8] if len(clip) > 8 else None
                     scale = scale_percent_for_link(
                         scale_clips, link_id, frame, clip_order,

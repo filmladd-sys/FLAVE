@@ -28,6 +28,7 @@ import bisect
 import math
 
 from peaks import PEAKS_SAMPLE_RATE
+from clip_speed import speed_take
 from sequence_preview_diff import SnapshotIndex, _segments, _merge, subtract, WHOLE
 
 SAMPLE_RATE = PEAKS_SAMPLE_RATE      # 48000, as sequence_preview_audio
@@ -180,7 +181,7 @@ def _keys_at(pts, frame):
 class _Row(object):
     __slots__ = ("idx", "track", "basename", "ident", "gain", "link", "start",
                  "in_f", "length", "a0", "a1", "reach", "src0", "count",
-                 "fend", "cands")
+                 "fend", "cands", "speed")
 
 
 class AudioIndex(object):
@@ -191,6 +192,9 @@ class AudioIndex(object):
     # gain, same written footprint inside the frame, same volume segment
     # for the frame and for its first sample, which the volume mask may
     # count in the frame before), so equal descriptors = equal samples.
+    # BUILD 303: a row may carry a 10th element, its clip speed (older
+    # layouts: 100); a speed other than 100 joins the source offset, since
+    # sample a0 + i reads source position src0 + i * speed / 100.
     def __init__(self, layout):
         self.fps = float(layout["fps"])
         self.total = int(layout["total"])
@@ -208,7 +212,8 @@ class AudioIndex(object):
         by_track = {}
         marks = set([0])
         for i, r in enumerate(layout.get("rows") or []):
-            track_id, footage_id, basename, start, in_f, length, link, gain, ident = r
+            track_id, footage_id, basename, start, in_f, length, link, gain, ident = r[:9]
+            speed = int(r[9]) if len(r) > 9 and r[9] is not None else 100
             start, in_f, length = int(start), int(in_f), int(length)
             if length <= 0 or not basename:
                 continue
@@ -221,7 +226,7 @@ class AudioIndex(object):
                 slen = int(str(ident).split(":")[1]) // 2
             except Exception:
                 slen = None
-            take = count if slen is None else min(count, slen - src0)
+            take = count if slen is None else speed_take(count, slen, src0, speed)
             if take <= 0:
                 continue
             a1 = min(n, a0 + take)
@@ -238,6 +243,7 @@ class AudioIndex(object):
             row.a0, row.a1 = a0, a1
             row.reach = min(n, a0 + count)
             row.src0, row.count = src0, count
+            row.speed = speed
             row.fend = self.frame_of(a1 - 1)
             clip_order = order.get(int(track_id))
             row.cands = []
@@ -313,7 +319,8 @@ class AudioIndex(object):
         for r in self.present(g):
             lo, hi = max(r.a0, fs), min(r.a1, fe)
             part = None if (lo == fs and hi == fe) else (lo - fs, hi - fs)
-            out.append((r.basename, r.ident, r.gain, r.src0 - r.a0, part,
+            off = r.src0 - r.a0 if r.speed == 100 else (r.src0, r.a0, r.speed)
+            out.append((r.basename, r.ident, r.gain, off, part,
                         self.vol_state(r, g)))
         return tuple(out)
 
@@ -325,12 +332,14 @@ class AudioIndex(object):
         for r in self.present(g):
             if self.vol_state(r, g) is not None:
                 return None
-            out.append((r.basename, r.ident, r.gain, r.src0, r.count, g - r.start))
+            out.append((r.basename, r.ident, r.gain, r.src0, r.count, g - r.start)
+                       + ((r.speed,) if r.speed != 100 else ()))
         return tuple(out)
 
 
 def _ident(r):
-    return (r.basename, r.ident, r.gain, r.src0, r.count, r.length, r.in_f)
+    return (r.basename, r.ident, r.gain, r.src0, r.count, r.length, r.in_f,
+            r.speed)
 
 
 def _audio_pair(old, new, g_old, g_new, d):

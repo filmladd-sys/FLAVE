@@ -1036,6 +1036,9 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (seq_id, track_id, ktype, link_id, split, int(out_f), name))
     new_db = cur.lastrowid
+    # BUILD 303: the new piece keeps the clip speed
+    from clip_speed import copy_speed
+    copy_speed(cur, "keyframe_clips", db_id, new_db)
     cur.execute("UPDATE keyframe_clips SET out_frame = ? WHERE id = ?",
                 (split, db_id))
     for table in key_tables(cur):

@@ -365,6 +365,10 @@ def refresh(self):
         # BUILD 165: clip gain (dB) for the title bar and waveform scale
         from clip_gain import load_clip_gains
         self._clip_gains = load_clip_gains(cur, self.sequence_id)
+        # BUILD 303: clip speed percent by clip id (only != 100), for
+        # labels, trims, icons and the player snapshot (clip_speed.py)
+        from clip_speed import load_clip_speeds
+        self._clip_speeds = load_clip_speeds(cur, self.sequence_id)
         # Frame rate conform by footage id, for the clip icons
         # (sequence_timeline_video.icon_source_frame)
         from sequence_player import load_fps_conform
@@ -899,7 +903,12 @@ def slice_members_db(self, cur, members, split_frame, linked):
             continue
         left_length = split_frame - c_start
         right_length = c_len - left_length
-        right_in = c_in + (split_frame - c_start)
+        # BUILD 303: at clip speed s the right piece starts on the source
+        # frame the left piece would show at split_frame (in + floor(rel *
+        # s / 100), clip_speed.source_offset); both pieces keep s
+        from clip_speed import source_offset, source_span, copy_speed, row_speed
+        speed = row_speed(cur, *clip_table_and_id(c[0]))
+        right_in = c_in + source_offset(split_frame - c_start, speed)
         if is_keyframe_clip_id(c[0]):
             from keyframe import slice_keyframe_clip_db
             new_mem = slice_keyframe_clip_db(cur, c[0], split_frame)
@@ -918,6 +927,7 @@ def slice_members_db(self, cur, members, split_frame, linked):
                 "pos_x, pos_y, scale FROM captions WHERE id = ?",
                 (split_frame, right_length, cap_id)
             )
+            copy_speed(cur, "captions", cap_id, cur.lastrowid)
             right_other.append(-cur.lastrowid)
             continue
         cur.execute("UPDATE clips SET length_frames = ? WHERE id = ?",
@@ -931,7 +941,9 @@ def slice_members_db(self, cur, members, split_frame, linked):
         right_ids.append(cur.lastrowid)
         # Markers on the right piece's source frames move to it
         from markers import move_markers
-        move_markers(cur, c[0], right_ids[-1], right_in, right_in + right_length)
+        move_markers(cur, c[0], right_ids[-1], right_in,
+                     right_in + source_span(right_length, speed))
+        copy_speed(cur, "clips", c[0], right_ids[-1])
         # Right piece keeps the clip gain (gain_db; older tables lack it)
         if has_gain is None:
             cur.execute("PRAGMA table_info(clips)")

@@ -145,6 +145,25 @@ def _ensure_key_tables_for(project_db):
         print("Key table check failed: %s" % e)
 
 
+def _ensure_speed_columns_for(project_db):
+    # BUILD 303: clip speed column (speed_percent) on clips, captions and
+    # keyframe_clips (clip_speed.ensure_speed_columns) in a project made
+    # before it existed. TEMPORARY older-project check: remove it in the
+    # future, once every project in use has the column from new_project.py.
+    if not project_db:
+        return
+    try:
+        from clip_speed import ensure_speed_columns
+        conn = sqlite3.connect(project_db)
+        try:
+            ensure_speed_columns(conn)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print("Speed column check failed: %s" % e)
+
+
 def _ensure_undo_db_for(project_db):
     # {ProjectName}_Undo.db next to the project, created if missing
     try:
@@ -319,6 +338,7 @@ class ProjectManager(QMainWindow):
             _prune_proxies_for(path)
             _ensure_icons_index_for(path)
             _ensure_key_tables_for(path)
+            _ensure_speed_columns_for(path)
             self._update_windows_menu()
 
     def _new_project(self):
@@ -394,6 +414,7 @@ class ProjectManager(QMainWindow):
             _prune_proxies_for(path)
             _ensure_icons_index_for(path)
             _ensure_key_tables_for(path)
+            _ensure_speed_columns_for(path)
             self._update_windows_menu()
 
     def _close_project(self):

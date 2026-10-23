@@ -20,6 +20,8 @@ except ImportError:
     _HAS_NP = False
 
 from peaks import PEAKS_SAMPLE_RATE, audiotmp_db_path, load_audiotmp
+from clip_speed import (clamp_speed, speed_take, speed_source_range,
+                        speed_resample, speed_sample)
 
 SAMPLE_RATE = PEAKS_SAMPLE_RATE  # 48000
 
@@ -325,15 +327,18 @@ def _load_mix_rows(project_db, sequence_id):
         cur = conn.cursor()
         # gain_db is new in BUILD 74; an older clips table reads it as 0
         cur.execute("PRAGMA table_info(clips)")
-        gain_sql = ("COALESCE(c.gain_db, 0)"
-                    if "gain_db" in [r[1] for r in cur.fetchall()] else "0")
+        clip_cols = [r[1] for r in cur.fetchall()]
+        gain_sql = "COALESCE(c.gain_db, 0)" if "gain_db" in clip_cols else "0"
+        # speed_percent is new in BUILD 303; an older clips table reads 100
+        speed_sql = ("COALESCE(c.speed_percent, 100)"
+                     if "speed_percent" in clip_cols else "100")
         cur.execute(
             "SELECT t.id, LOWER(COALESCE(t.track_type, '')), "
             "COALESCE(t.enabled, 1), COALESCE(t.solo, 0), "
             "c.footage_id, c.start_frame, c.length_frames, "
             "COALESCE(c.in_frame, 0), COALESCE(c.enabled, 1), "
             "COALESCE(c.solo, 0), f.original_path, f.filename, c.link_id, "
-            + gain_sql + " "
+            + gain_sql + ", " + speed_sql + " "
             "FROM clips c "
             "JOIN tracks t ON t.id = c.track_id "
             "LEFT JOIN footage f ON f.id = c.footage_id "
@@ -349,7 +354,7 @@ def _load_mix_rows(project_db, sequence_id):
     out = []
     for (track_id, track_type, track_en, track_solo, footage_id,
          start_frame, length_frames, in_frame, clip_en, clip_solo,
-         original_path, filename, link_id, gain_db) in rows:
+         original_path, filename, link_id, gain_db, speed) in rows:
         if not int(track_en) or not int(clip_en):
             continue
         if any_solo and not int(track_solo):
@@ -364,6 +369,7 @@ def _load_mix_rows(project_db, sequence_id):
             "basename": _basename_for_row(original_path, filename),
             "link_id": link_id,
             "gain_db": float(gain_db or 0.0),
+            "speed": clamp_speed(speed),
         })
     return out
 
@@ -516,6 +522,8 @@ def _signature_of(inputs, fps, total_frames):
                 r["start_frame"], r["in_frame"], r["length_frames"],
                 r["basename"],
             )
+            # BUILD 303: only a speed other than 100 changes the text
+            + (" speed=%d" % r["speed"] if r.get("speed", 100) != 100 else "")
         )
     # BUILD 135: the source PCM each row reads (AudioTmp row id + byte
     # length per basename: a re-import replaces the row) and the rate
@@ -620,7 +628,8 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
                 continue
             if src0 >= len(src):
                 continue
-            take = min(count, len(src) - src0)
+            speed = r.get("speed", 100)
+            take = speed_take(count, len(src), src0, speed)
             if take <= 0:
                 continue
             dst1 = min(n, dst0 + take)
@@ -634,7 +643,10 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
             # chunks (same arithmetic per sample as before: identical output)
             for a in range(0, use, MIX_CHUNK):
                 b = min(use, a + MIX_CHUNK)
-                seg = src[src0 + a:src0 + b].astype(np.float64)
+                if speed == 100:
+                    seg = src[src0 + a:src0 + b].astype(np.float64)
+                else:
+                    seg = speed_resample(np, src, src0, a, b, speed)
                 if gain is None:
                     if lin == 1.0:
                         acc[dst0 + a:dst0 + b] += seg
@@ -674,7 +686,8 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
         count = _frame_to_sample(r["length_frames"], fps)
         if count <= 0 or src0 >= len(src):
             continue
-        take = min(count, len(src) - src0)
+        speed = r.get("speed", 100)
+        take = speed_take(count, len(src), src0, speed)
         gain = volume_gain(vol_clips, r.get("link_id"),
                            track_order.get(r["track_id"]), dst0, take, fps)
         lin = db_to_linear(r.get("gain_db", 0.0))
@@ -683,7 +696,10 @@ def _mix_pcm(project_db, rows, fps, total_frames, vol_clips=None, track_order=No
             if d >= n:
                 break
             g = lin if gain is None else gain[i] * lin
-            acc[d] += float(src[src0 + i]) * g
+            if speed == 100:
+                acc[d] += float(src[src0 + i]) * g
+            else:
+                acc[d] += speed_sample(src, src0, i, speed) * g
     out = array.array("h")
     for v in acc:
         if v > 32767:
@@ -1091,7 +1107,7 @@ def _layout_of(inputs, fps, total_frames, sig):
     rows = [[int(r["track_id"]), int(r["footage_id"]), r["basename"],
              int(r["start_frame"]), int(r["in_frame"]), int(r["length_frames"]),
              r.get("link_id"), float(r.get("gain_db", 0.0) or 0.0),
-             idents.get(r["basename"], "")]
+             idents.get(r["basename"], ""), int(r.get("speed", 100))]
             for r in inputs["rows"]]
     vols = [[link_id, int(in_f), int(out_f),
              [[int(f), float(v)] for f, v in pts], inv.get(kf_order)]
@@ -1174,7 +1190,8 @@ def _footprint(row, fps, n):
     slen = _ident_samples(ident)
     if slen is None:
         return lo, hi, None, False
-    take = min(count, slen - _frame_to_sample(in_f, fps))
+    speed = int(row[9]) if len(row) > 9 else 100
+    take = speed_take(count, slen, _frame_to_sample(in_f, fps), speed)
     if take <= 0:
         return lo, hi, lo, True
     return lo, hi, min(n, dst0 + take), dst0 + take <= n
@@ -1457,7 +1474,8 @@ def _row_span(r, fps, n, ranges, hits, slen):
     src0 = _frame_to_sample(r["in_frame"], fps)
     if src0 >= slen:
         return None
-    take = min(count, slen - src0)
+    speed = r.get("speed", 100)
+    take = speed_take(count, slen, src0, speed)
     if take <= 0:
         return None
     dst1 = min(n, dst0 + take)
@@ -1467,6 +1485,11 @@ def _row_span(r, fps, n, ranges, hits, slen):
     spans = [(p, q) for p, q in spans if q > p]
     if not spans:
         return None
+    if speed != 100:
+        # BUILD 303: the source positions those samples read, plus the
+        # next sample for interpolation
+        return speed_source_range(src0, min(p for p, _q in spans) - dst0,
+                                  max(q for _p, q in spans) - dst0, speed, slen)
     return (src0 + min(p for p, _q in spans) - dst0,
             src0 + max(q for _p, q in spans) - dst0)
 
@@ -1664,7 +1687,8 @@ def _mix_ranges_pcm(rows, fps, n, vol_clips, track_order, srcs, ranges,
         src0 = _frame_to_sample(r["in_frame"], fps)
         if src0 >= slen:
             continue
-        take = min(count, slen - src0)
+        speed = r.get("speed", 100)
+        take = speed_take(count, slen, src0, speed)
         if take <= 0:
             continue
         dst1 = min(n, dst0 + take)
@@ -1682,7 +1706,12 @@ def _mix_ranges_pcm(rows, fps, n, vol_clips, track_order, srcs, ranges,
             s0 = src0 + (p - dst0) - base
             for c0 in range(0, q - p, MIX_CHUNK):
                 c1 = min(q - p, c0 + MIX_CHUNK)
-                seg = src[s0 + c0:s0 + c1].astype(np.float64)
+                if speed == 100:
+                    seg = src[s0 + c0:s0 + c1].astype(np.float64)
+                else:
+                    # BUILD 303: same samples as _mix_pcm (offsets from dst0)
+                    seg = speed_resample(np, src, src0, p - dst0 + c0,
+                                         p - dst0 + c1, speed, base, slen)
                 tgt = acc[p - a + c0:p - a + c1]
                 if gain is None:
                     if lin == 1.0:

@@ -84,9 +84,11 @@ def parse_showinfo_pts(line):
         return None
 
 
-def cut_sequence_frame(t_rel, clip_start, in_frame, seq_fps, footage_fps=None):
+def cut_sequence_frame(t_rel, clip_start, in_frame, seq_fps, footage_fps=None,
+                       speed=100):
     # Sequence frame of a cut found t_rel seconds into the clip's source
-    # range (see the module comment)
+    # range (see the module comment); at a clip speed other than 100 the
+    # first timeline frame showing that source frame (BUILD 303)
     seq_fps = float(seq_fps or 30.0)
     t = int(in_frame) / seq_fps + max(0.0, float(t_rel))
     from sequence_player import fps_conform_ratio
@@ -96,7 +98,8 @@ def cut_sequence_frame(t_rel, clip_start, in_frame, seq_fps, footage_fps=None):
         f_fps = float(footage_fps)
         k = int(round(t * f_fps))
         s = int(math.ceil(k * seq_fps / f_fps - 1e-6))
-    return int(clip_start) + (s - int(in_frame))
+    from clip_speed import timeline_offset
+    return int(clip_start) + timeline_offset(s - int(in_frame), speed)
 
 
 class CutFilter(object):
@@ -194,7 +197,8 @@ def run_detection(info, on_cut, on_progress, cancel, proc_box):
                     del tail[:-15]
                 continue
             f = cut_sequence_frame(pts, info["start"], info["in_frame"],
-                                   info["seq_fps"], info["footage_fps"])
+                                   info["seq_fps"], info["footage_fps"],
+                                   info.get("speed", 100))
             if flt.accept(f):
                 state["cuts"] += 1
                 on_cut(f)
@@ -264,9 +268,13 @@ def _clip_info(tl, clip):
         gpu = True
     seq_fps = float(getattr(tl, "fps", None) or 30.0)
     start, length, in_f = int(start), int(length), int(in_f)
+    # BUILD 303: the source range a sped clip covers (clip_speed)
+    from clip_speed import speed_of, source_span
+    speed = speed_of(getattr(tl, "_clip_speeds", None), int(clip[0]))
     return {"track_id": track_id, "start": start, "end": start + length,
             "in_frame": in_f, "src": path, "note": proxy_note,
-            "ss": in_f / seq_fps, "dur": length / seq_fps, "size": size,
+            "ss": in_f / seq_fps, "dur": source_span(length, speed) / seq_fps,
+            "speed": speed, "size": size,
             "gpu": gpu, "seq_fps": seq_fps,
             "footage_fps": float(ffps) if ffps else None,
             "name": os.path.basename(src)}

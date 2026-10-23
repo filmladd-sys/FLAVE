@@ -268,7 +268,9 @@ class NewProjectWindow(QMainWindow):
                 proxy_percent INTEGER NOT NULL DEFAULT 0,
                 -- BUILD 105: sequence clip = sequences.id of the nested child
                 -- (footage_id is NULL then); NULL for footage clips
-                sequence_id_ref INTEGER
+                sequence_id_ref INTEGER,
+                -- BUILD 303: clip speed percent, 1 .. 1000 (clip_speed.py)
+                speed_percent INTEGER NOT NULL DEFAULT 100
             )
         """)
 
@@ -286,7 +288,8 @@ class NewProjectWindow(QMainWindow):
                 pos_x INTEGER,
                 pos_y INTEGER,
                 scale REAL,
-                link_id INTEGER
+                link_id INTEGER,
+                speed_percent INTEGER NOT NULL DEFAULT 100
             )
         """)
 
@@ -310,7 +313,8 @@ class NewProjectWindow(QMainWindow):
                 link_id INTEGER,
                 in_frame INTEGER NOT NULL,
                 out_frame INTEGER NOT NULL,
-                name TEXT
+                name TEXT,
+                speed_percent INTEGER NOT NULL DEFAULT 100
             )
         """)
 

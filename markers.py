@@ -6,6 +6,10 @@
 # visible range are hidden. Markers are only for video / audio / image
 # clips (clips.id > 0); rows with a negative clip_id (old caption markers)
 # are skipped everywhere (BUILD 96). Older DBs without Marker load no markers and refuse adds. ASCII only.
+# Clip speed (BUILD 303, clip_speed.py): a sped clip shows source
+# in + floor(rel * speed / 100) at timeline offset rel, so a marker sits at
+# the first offset showing its source frame (timeline_offset); the speed
+# arguments default to 100 (1:1, as above).
 
 import sqlite3
 
@@ -46,14 +50,23 @@ def _clip_in(clip):
     return int(clip[7]) if len(clip) > 7 and clip[7] is not None else 0
 
 
-def visible_offset(clip, marker_frame):
+def _speed(tl, clip):
+    from clip_speed import speed_of
+    return speed_of(getattr(tl, "_clip_speeds", None), clip[0])
+
+
+def visible_offset(clip, marker_frame, speed=100):
     # Offset from the clip start, or None when outside the visible range
     off = int(marker_frame) - _clip_in(clip)
+    if speed != 100 and off >= 0:
+        from clip_speed import timeline_offset
+        off = timeline_offset(off, speed)
     return off if 0 <= off < max(1, int(clip[3])) else None
 
 
-def marker_frames(markers, clips_by_track, exclude_ids=()):
-    # Absolute timeline frames of visible markers
+def marker_frames(markers, clips_by_track, exclude_ids=(), speeds=None):
+    # Absolute timeline frames of visible markers (speeds: clip speed map,
+    # clip_speed.load_clip_speeds)
     out = set()
     if not markers:
         return []
@@ -62,7 +75,7 @@ def marker_frames(markers, clips_by_track, exclude_ids=()):
             if c[0] in exclude_ids or int(c[0]) <= 0:
                 continue
             for _mid, mframe, _rgb, _name in markers.get(c[0], ()):
-                off = visible_offset(c, mframe)
+                off = visible_offset(c, mframe, (speeds or {}).get(c[0], 100))
                 if off is not None:
                     out.add(int(c[2]) + off)
     return sorted(out)
@@ -115,14 +128,12 @@ def insert_marker_rows(cur, mem_id, rows):
             return
 
 
-def add_marker(project_db, clip, frame, name=""):
+def add_marker(project_db, clip, frame, name="", speed=100):
     # Insert at absolute timeline frame (clamped into the clip). Returns the
     # new id, or None when the Marker table is missing (older project).
     if int(clip[0]) <= 0:
         return None
-    start, length = int(clip[2]), max(1, int(clip[3]))
-    rel = max(0, min(length - 1, int(frame) - start))
-    src = _clip_in(clip) + rel
+    src = marker_to_source(clip, frame, speed)
     conn = sqlite3.connect(project_db)
     try:
         try:
@@ -138,7 +149,8 @@ def add_marker(project_db, clip, frame, name=""):
         conn.close()
 
 
-def paint_markers(painter, clip_rect, clip, markers, ppf, hover_id=None):
+def paint_markers(painter, clip_rect, clip, markers, ppf, hover_id=None,
+                  speed=100):
     # MARK_SIZE square at the clip top plus a full-height line, marker
     # color; the hovered marker's line is HOVER_LINE_W px wide
     from PySide6.QtGui import QColor, QPen
@@ -146,7 +158,7 @@ def paint_markers(painter, clip_rect, clip, markers, ppf, hover_id=None):
     if not items or ppf <= 0:
         return
     for mid, mframe, rgb, _name in items:
-        rel = visible_offset(clip, mframe)
+        rel = visible_offset(clip, mframe, speed)
         if rel is None:
             continue
         color = QColor(rgb[0], rgb[1], rgb[2])
@@ -184,7 +196,7 @@ def hit_test_marker(tl, pos):
         if int(clip[0]) <= 0:
             continue
         for m in markers.get(clip[0], ()):
-            off = visible_offset(clip, m[1])
+            off = visible_offset(clip, m[1], _speed(tl, clip))
             if off is None:
                 continue
             mx = (int(clip[2]) + off - tl.view_start_frame) * ppf
@@ -194,10 +206,11 @@ def hit_test_marker(tl, pos):
     return None if best is None else (best[1], best[2])
 
 
-def marker_to_source(clip, timeline_frame):
+def marker_to_source(clip, timeline_frame, speed=100):
     # Timeline frame (clamped to the visible range) -> stored source frame
+    from clip_speed import source_offset
     tf = clamp_to_visible(clip, timeline_frame)
-    return _clip_in(clip) + (tf - int(clip[2]))
+    return _clip_in(clip) + source_offset(tf - int(clip[2]), speed)
 
 
 def delete_marker(project_db, marker_id):
@@ -227,7 +240,8 @@ def edit_marker(tl, clip, marker):
                                    QDialogButtonBox, QMessageBox)
     mid, mframe, rgb, name = marker
     start, length = int(clip[2]), max(1, int(clip[3]))
-    off = visible_offset(clip, mframe)
+    speed = _speed(tl, clip)
+    off = visible_offset(clip, mframe, speed)
     dlg = QDialog(tl)
     dlg.setWindowTitle("Marker")
     form = QFormLayout(dlg)
@@ -258,7 +272,7 @@ def edit_marker(tl, clip, marker):
     except Exception:
         pass
     try:
-        update_marker(project_db, mid, marker_to_source(clip, frame_spin.value()),
+        update_marker(project_db, mid, marker_to_source(clip, frame_spin.value(), speed),
                       name_edit.text(), [s.value() for s in spins])
     except Exception as e:
         QMessageBox.warning(tl, "Marker", "Could not save marker: %s" % e)
@@ -315,7 +329,8 @@ def marker_drag_start(tl, hit, pos):
 def marker_drag_move(tl, pos):
     # Live: new source frame (clamped to the visible range), no snapping
     drag = tl._marker_drag
-    src = marker_to_source(drag["clip"], _timeline_frame_at(tl, pos))
+    src = marker_to_source(drag["clip"], _timeline_frame_at(tl, pos),
+                           _speed(tl, drag["clip"]))
     if src == drag["frame"]:
         return
     drag["frame"] = src

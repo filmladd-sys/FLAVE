@@ -1450,7 +1450,8 @@ class SequenceTimeline(QMainWindow):
         push_undo(project_db, "Add marker")
         from markers import add_marker
         try:
-            new_id = add_marker(project_db, clip, frame)
+            new_id = add_marker(project_db, clip, frame, speed=(
+                getattr(self, "_clip_speeds", None) or {}).get(clip[0], 100))
         except Exception as e:
             QMessageBox.warning(self, "Add Marker", f"Could not add marker: {e}")
             return
@@ -1737,7 +1738,8 @@ class SequenceTimeline(QMainWindow):
                 points.add(int(clip[2]) + int(clip[3]))
         # Marker frames are stops too
         from markers import marker_frames
-        points.update(marker_frames(getattr(self, "_markers", None), self.clips_by_track))
+        points.update(marker_frames(getattr(self, "_markers", None), self.clips_by_track,
+                                    speeds=getattr(self, "_clip_speeds", None)))
         return sorted(points)
 
     def _jump_to_frame(self, frame):

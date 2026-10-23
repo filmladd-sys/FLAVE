@@ -88,6 +88,10 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.fillRect(rect, color)
         ppf = tl.pixels_per_frame
         markers = getattr(tl, "_markers", None)
+        # BUILD 303: clip speed (clip_speed.py): label suffix, and the out
+        # icon / waveform cover the clip's source span
+        from clip_speed import speed_of, speed_label, source_span
+        speeds = getattr(tl, "_clip_speeds", None)
         tiny = _TinyRun(painter, rect.top(), rect.height())
         for clip in visible_clips(tl, tl.clips_by_track.get(track_id, []), rect, vis):
             (clip_id, footage_id, start_frame, length_frames, filename,
@@ -106,7 +110,8 @@ class ClipDelegate(QStyledItemDelegate):
                     from keyframe import split_title_rect
                     from markers import paint_markers
                     paint_markers(painter, split_title_rect(clip_rect)[1], clip, markers,
-                                  ppf, getattr(tl, "_hover_marker_id", None))
+                                  ppf, getattr(tl, "_hover_marker_id", None),
+                                  speed_of(speeds, clip_id))
                 continue
             tiny.flush()
             detail = w >= CLIP_DETAIL_MIN_W
@@ -117,7 +122,9 @@ class ClipDelegate(QStyledItemDelegate):
                 # key boxes or markers)
                 paint_collapsed_clip(painter, clip_rect, track_type,
                                      clip_id in tl._selected_clip_ids,
-                                     ((filename or "") + (" [S]" if clip_solo else ""))
+                                     ((filename or "")
+                                      + speed_label(speed_of(speeds, clip_id))
+                                      + (" [S]" if clip_solo else ""))
                                      if detail else "",
                                      visible_rect=rect)
                 painter.setOpacity(1.0)
@@ -127,7 +134,9 @@ class ClipDelegate(QStyledItemDelegate):
                 keys = clip[9] if len(clip) > 9 else []
                 ktype = clip[10] if len(clip) > 10 else ""
                 paint_keyframe_clip(
-                    painter, clip_rect, (filename or "") if detail else "",
+                    painter, clip_rect,
+                    ((filename or "") + speed_label(speed_of(speeds, clip_id)))
+                    if detail else "",
                     keys=keys if detail else None,
                     clip_start=start_frame, ppf=ppf, stored_type=ktype,
                     linked=(len(clip) > 8 and clip[8] is not None),
@@ -156,6 +165,7 @@ class ClipDelegate(QStyledItemDelegate):
                                  else VIDEO_CLIP_BG)
             text_rect = QRect(clip_rect)
             seq_ref = (getattr(tl, "_seq_refs", None) or {}).get(clip_id)
+            src_len = source_span(length_frames, speed_of(speeds, clip_id))
             if track_type == "caption":
                 # Caption: plain bar, no icon, no waveform. BUILD 236: with a
                 # title bar the text is drawn in the pane (word-wrapped);
@@ -184,7 +194,7 @@ class ClipDelegate(QStyledItemDelegate):
             elif track_type == "audio":
                 # Audio clips: waveform from stored peaks, no icons
                 self._draw_waveform(painter, tl, clip_rect, footage_id,
-                                    in_frame, length_frames,
+                                    in_frame, src_len,
                                     (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0))
             else:
                 # Video clips show the source frame at their left edge
@@ -214,10 +224,10 @@ class ClipDelegate(QStyledItemDelegate):
                     out_pix = None
                     if detail and 2 * (in_full_w if has_in else ch) <= w:
                         out_pix = video_out_pixmap(tl, footage_id, ch,
-                                                   in_frame, length_frames, clip_id)
+                                                   in_frame, src_len, clip_id)
                         if out_pix is None or out_pix.isNull():
                             out_src = icon_source_frame(
-                                tl, footage_id, out_frame_for(in_frame, length_frames))
+                                tl, footage_id, out_frame_for(in_frame, src_len))
                             out_failed = icon_failed(tl, footage_id, out_src, ch)
                             if queue_ok and not out_failed:
                                 request_icon(tl, footage_id, out_src, ch, clip, track_id)
@@ -260,7 +270,8 @@ class ClipDelegate(QStyledItemDelegate):
             from markers import paint_markers
             if track_type != "caption":
                 paint_markers(painter, clip_rect, clip, markers, ppf,
-                              getattr(tl, "_hover_marker_id", None))
+                              getattr(tl, "_hover_marker_id", None),
+                              speed_of(speeds, clip_id))
             # Outline: drawn after the title bar (below)
             label = ""
             if detail:
@@ -272,14 +283,16 @@ class ClipDelegate(QStyledItemDelegate):
                 if gain_db:
                     from clip_gain import gain_label
                     label += gain_label(gain_db)
+                # BUILD 303: speed != 100 after the name / gain (" 200%")
+                label += speed_label(speed_of(speeds, clip_id))
             if title_rect is not None:
                 # BUILD 128: the name lives in the title bar (sticky left,
                 # elided); no in-content name. BUILD 236: caption title =
                 # "Caption | For Clip | In - Out" (+ [S]), text in the pane
                 if track_type == "caption" and detail:
                     from sequence_timeline_captions import caption_title
-                    label = caption_title(tl, clip, track_id) + (
-                        " [S]" if clip_solo else "")
+                    label = caption_title(tl, clip, track_id) + speed_label(
+                        speed_of(speeds, clip_id)) + (" [S]" if clip_solo else "")
                 paint_title_bar(painter, title_rect, label, rect)
             elif clip_rect.width() > 0 and detail:
                 # Row too short for a bar: BUILD 127 in-content name
@@ -434,11 +447,12 @@ def paint_collapsed_clip(painter, clip_rect, track_type, selected, label,
     painter.restore()
 
 
-def moving_marker_frames(markers, group, drag_clip):
+def moving_marker_frames(markers, group, drag_clip, speeds=None):
     # BUILD 110: timeline frames, at delta 0, of the visible markers on the
     # clips of a move drag (group entries {"clip", "start", ...}; the
     # dragged clip itself if the group lacks it). Positive clip ids only
-    # (video / image / audio), like marker drawing.
+    # (video / image / audio), like marker drawing. speeds: clip speed map
+    # (clip_speed.load_clip_speeds).
     from markers import visible_offset
     out = []
     if not markers:
@@ -453,7 +467,7 @@ def moving_marker_frames(markers, group, drag_clip):
         except (TypeError, ValueError):
             continue
         for _mid, mframe, _rgb, _name in markers.get(c[0], ()):
-            off = visible_offset(c, mframe)
+            off = visible_offset(c, mframe, (speeds or {}).get(c[0], 100))
             if off is not None:
                 f = start0 + int(off)
                 if f not in out:
@@ -629,7 +643,9 @@ def _drag_group(self, clip, edge="move"):
         entry = {"clip": c, "start": c[2], "length": c[3], "in": c[7],
                  "prev_end": prev_end, "next_start": next_start,
                  "blocks": blocks,
-                 "free_in": _no_source_floor(self, c)}
+                 "free_in": _no_source_floor(self, c),
+                 # BUILD 303: clip speed percent (clip_speed.py)
+                 "speed": (getattr(self, "_clip_speeds", None) or {}).get(c[0], 100)}
         if is_keyframe_clip_id(c[0]) and len(c) > 9:
             entry["keys"] = list(c[9])
         group.append(entry)
@@ -826,9 +842,12 @@ def _edge_drag_move(self, pos, tick=False):
         elif edge == "left":
             # Start trim: keyframe keys keep their sequence frames (the
             # edge reveals or hides them); only a move shifts them
+            # BUILD 303: the in-point moves by the source frames delta
+            # timeline frames cover at the clip's speed
+            from clip_speed import source_offset
             c[2] = m["start"] + delta
             c[3] = m["length"] - delta
-            c[7] = m["in"] + delta
+            c[7] = m["in"] + source_offset(delta, m.get("speed", 100))
         else:
             c[3] = m["length"] + delta
     if edge == "move":
@@ -875,7 +894,8 @@ def _snap_drag_delta(self, drag, group, pos, delta):
             # are snap sources too, at their drag-start (delta 0)
             # frames. Listed after the edges so an edge wins a tie.
             edges += moving_marker_frames(
-                getattr(self, "_markers", None), group, drag["clip"])
+                getattr(self, "_markers", None), group, drag["clip"],
+                getattr(self, "_clip_speeds", None))
         elif edge == "left":
             raw = frame_f - start
             edges = [start]
@@ -886,7 +906,8 @@ def _snap_drag_delta(self, drag, group, pos, delta):
         ids.add(drag["clip"][0])
         from markers import marker_frames
         targets = sorted(set(snap_targets(self.clips_by_track, ids)) | set(
-            marker_frames(getattr(self, "_markers", None), self.clips_by_track, ids)))
+            marker_frames(getattr(self, "_markers", None), self.clips_by_track, ids,
+                          getattr(self, "_clip_speeds", None))))
         snapped, target = snap_delta_target(
             raw, edges, targets, ppf, snap_px)
     except Exception as e:
@@ -926,20 +947,30 @@ def _group_delta_range(self, group, edge):
             # clips with source media in + d >= 0. Keyframe, caption and
             # image clips (free_in) have no source floor, so a linked
             # stack is held only by its video / audio members' in-points.
+            # BUILD 303: at speed s the in-point moves by floor(d * s /
+            # 100), so in + that >= 0 is d >= -floor(in * 100 / s).
             lo = max(lo, max(0, prev_end) - start)
+            speed = m.get("speed", 100)
             if not m.get("free_in"):
-                lo = max(lo, -in_f)
+                lo = max(lo, -in_f if speed == 100 else -((in_f * 100) // speed))
             hi = min(hi, length - 1)
         else:
             # length + d >= 1; end + d <= next_start; BUILD 301: in +
             # length + d <= src_end (footage clips, _add_source_caps), so
             # the group stops at the tightest cap. A clip already past its
-            # cap may not grow but is not cut back.
+            # cap may not grow but is not cut back. BUILD 303: at speed s
+            # the source used is clip_speed.source_span(length, s), so the
+            # longest length is max_length_for_source(src_end - in, s).
             lo = max(lo, 1 - length)
             if next_start is not None:
                 hi = min(hi, next_start - (start + length))
-            if m.get("src_end"):
+            speed = m.get("speed", 100)
+            if m.get("src_end") and speed == 100:
                 hi = min(hi, max(0, m["src_end"] - (in_f + length)))
+            elif m.get("src_end"):
+                from clip_speed import max_length_for_source
+                hi = min(hi, max(0, max_length_for_source(
+                    m["src_end"] - in_f, speed) - length))
     return lo, hi
 
 
@@ -1404,6 +1435,8 @@ def _clip_context_menu(self, clip, pos):
         center_action = None
         if any(keys_beyond_horizon(c) for c in horizon_clips):
             center_action = key_menu.addAction("Center Key Beyond Event Horizon")
+        # BUILD 303: clip speed, whole link stack (clip_speed.py)
+        speed_action = menu.addAction("Speed...")
         rename_action = menu.addAction("Rename")
         # BUILD 221: a new keyframe clip of any type on this track, starting
         # at this clip's out frame (the Add Keyframe Clip dialog; it fills
@@ -1441,6 +1474,9 @@ def _clip_context_menu(self, clip, pos):
         elif action == add_after_action:
             self.add_keyframe_clip(self._clip_track_id(clip),
                                    int(clip[2]) + max(1, int(clip[3])))
+        elif action == speed_action:
+            from clip_speed import edit_clip_speed
+            edit_clip_speed(self, clip)
         elif action == rename_action:
             from keyframe import rename_keyframe_clip
             rename_keyframe_clip(self, clip)
@@ -1460,6 +1496,7 @@ def _clip_context_menu(self, clip, pos):
         clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
         edit_action = menu.addAction("Edit")
         slice_action = menu.addAction("Slice")
+        speed_action = menu.addAction("Speed...")     # BUILD 303
         link_action, unlink_action = self._add_link_actions(menu, clip)
         menu.addSeparator()
         # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
@@ -1474,6 +1511,9 @@ def _clip_context_menu(self, clip, pos):
             self.edit_caption(clip)
         elif action == slice_action:
             self.slice_clip(clip, self._x_in_clips(pos))
+        elif action == speed_action:
+            from clip_speed import edit_clip_speed
+            edit_clip_speed(self, clip)
         elif link_action is not None and action == link_action:
             self.link_selected_clips(clip)
         elif unlink_action is not None and action == unlink_action:
@@ -1503,6 +1543,8 @@ def _clip_context_menu(self, clip, pos):
     scene_action = None
     if self._track_type(self._clip_track_id(clip)) == "video" and not is_seq_clip:
         scene_action = menu.addAction("Scene Detect (Slice)")
+    # BUILD 303: clip speed, whole link stack (clip_speed.py)
+    speed_action = menu.addAction("Speed...")
     marker_menu = menu.addMenu("Marker")
     marker_click_action = marker_menu.addAction("Add To Mouse Click")
     marker_tick_action = marker_menu.addAction("Add to Time Tick")
@@ -1540,6 +1582,10 @@ def _clip_context_menu(self, clip, pos):
         return
     if action == ripple_action:
         self.ripple_delete_clips()
+        return
+    if action == speed_action:
+        from clip_speed import edit_clip_speed
+        edit_clip_speed(self, clip)
         return
     if gain_action is not None and action == gain_action:
         from clip_gain import edit_clip_gain
@@ -1623,7 +1669,9 @@ def _edge_drag_release(self):
     if drag["edge"] == "right" and is_video:
         # clip is the live list edited by the drag, so clip[3] is the new
         # length. Out frame = in_frame + length_frames - 1
-        out_frame = out_frame_for(clip[7], clip[3])
+        from clip_speed import source_span
+        out_frame = out_frame_for(clip[7], source_span(
+            clip[3], (getattr(self, "_clip_speeds", None) or {}).get(clip[0], 100)))
         # print(f"ICON out release clip={clip[0]} in_frame={clip[7]} length={clip[3]} "
               # f"out_frame={out_frame} track_height={self._track_row_height(track_id)}")
         self._generate_out_icon(clip[1], track_id, out_frame)

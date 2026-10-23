@@ -634,19 +634,25 @@ def apply_overwrite(cur, state, ranges):
         if table == "clips":
             cur.execute("SELECT in_frame FROM clips WHERE id = ?", (row_id,))
             in0 = int(cur.fetchone()[0] or 0)
+            # BUILD 303: a kept piece starts on the source frame it showed
+            # at its timeline start (clip speed, clip_speed.source_offset);
+            # _copy_row carries speed_percent to the new pieces
+            from clip_speed import row_speed, source_offset, source_span
+            speed = row_speed(cur, "clips", row_id)
             for n, (a, b) in enumerate(pieces[1:], 1):
-                src_in = in0 + (a - st["cs"])
+                src_in = in0 + source_offset(a - st["cs"], speed)
                 new_id = _copy_row(cur, "clips", row_id,
                                    {"start_frame": a, "length_frames": b - a,
                                     "in_frame": src_in})
                 from markers import move_markers
-                move_markers(cur, row_id, new_id, src_in, src_in + (b - a))
+                move_markers(cur, row_id, new_id, src_in,
+                             src_in + source_span(b - a, speed))
                 extra.setdefault((st["link_id"], n), []).append(
                     ("clips", new_id, new_id))
             cur.execute(
                 "UPDATE clips SET start_frame = ?, length_frames = ?, "
                 "in_frame = ? WHERE id = ?",
-                (a0, b0 - a0, in0 + (a0 - st["cs"]), row_id))
+                (a0, b0 - a0, in0 + source_offset(a0 - st["cs"], speed), row_id))
         else:
             for n, (a, b) in enumerate(pieces[1:], 1):
                 new_id = _copy_row(cur, table, row_id,

@@ -96,6 +96,10 @@ class SnapshotIndex(object):
         # Frame rate conform by footage id (snap[19]): a changed footage or
         # sequence rate changes the source frames, so it is in desc
         self.fps_conform = snap[19] if len(snap) > 19 else {}
+        # BUILD 303: clip speed by clip id (snap[28], only != 100); a sped
+        # clip's source frame is not frame + constant, so its desc holds
+        # (in, start - d, speed), which fixes the mapping for every frame
+        self.speeds = snap[28] if len(snap) > 28 else {}
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7)]
         # BUILD 147: + crop_x (snap[8]) and crop_y (snap[9]): their clip
@@ -173,7 +177,11 @@ class SnapshotIndex(object):
             link_id = c[8] if len(c) > 8 else None
             conform = None
             if kind == "video":
-                src = int(c[7]) - (int(c[2]) - d)
+                speed = self.speeds.get(c[0], 100)
+                if speed != 100:
+                    src = (int(c[7]), int(c[2]) - d, speed)
+                else:
+                    src = int(c[7]) - (int(c[2]) - d)
                 conform = self.fps_conform.get(c[1])
             else:
                 src = 0
