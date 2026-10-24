@@ -50,7 +50,7 @@ from sequence_timeline_tracks import (
     TRACK_ADD_ITEMS, _track_add_items, _add_track_actions, _add_track_menu_items,
     _run_track_menu_action, _track_display_properties, _track_row_height,
     _toggle_collapse_at, _setup_collapse_column, NameCellDelegate,
-    _track_name_click,
+    _track_name_click, _set_hover_track_row,
 )
 # BUILD 162: clip parts of the window (same names, re-exported here)
 from sequence_timeline_clips import (
@@ -207,6 +207,7 @@ class SequenceTimeline(QMainWindow):
     _toggle_collapse_at = _toggle_collapse_at
     _setup_collapse_column = _setup_collapse_column
     _track_name_click = _track_name_click
+    _set_hover_track_row = _set_hover_track_row
     # BUILD 162: clip selection / drag / trim / menu live in
     # sequence_timeline_clips.py
     _linked_clips = _linked_clips
@@ -254,6 +255,7 @@ class SequenceTimeline(QMainWindow):
         self._key_drag = None
         self._marker_drag = None
         self._hover_marker_id = None
+        self._hover_track_row = -1   # BUILD 331: track row under mouse
         self._snap_frame = None
         self._drop_info = None        # BUILD 125 drop preview
         self._drop_preview = []
@@ -301,6 +303,7 @@ class SequenceTimeline(QMainWindow):
         self._restore_view_state()
 
         self.table = QTableWidget()
+        self.table._hover_track_row = -1   # BUILD 331: read by track style
         self.ruler = RulerHeader(self)
         self.table.setHorizontalHeader(self.ruler)
         # BUILD 126: 4th logical column = collapse triangle, shown far left
@@ -1416,6 +1419,8 @@ class SequenceTimeline(QMainWindow):
                 from markers import hit_test_marker
                 mh = self._hit_marker(pos)
                 self._set_hover_marker(mh[1][0] if mh is not None else None)
+                # BUILD 331: whole-row track hover cue
+                self._set_hover_track_row(self.table.rowAt(pos.y()))
             if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if getattr(self, "_marker_drag", None) is not None:
                     from markers import marker_drag_release
@@ -1430,6 +1435,7 @@ class SequenceTimeline(QMainWindow):
                     return True
             if etype == QEvent.Leave:
                 self._set_hover_marker(None)
+                self._set_hover_track_row(-1)   # BUILD 331
             if etype == QEvent.Leave and self._edge_drag is None:
                 obj.unsetCursor()
         return super().eventFilter(obj, event)

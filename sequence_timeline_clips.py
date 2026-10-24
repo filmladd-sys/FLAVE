@@ -24,7 +24,7 @@ from sequence_timeline_sql import (
     EDGE_HIT_PX, COLLAPSE_COL, ROLE_COLLAPSED, EDIT_TRACK_TYPES,
     _get_global_setting,
 )
-from sequence_timeline_tracks import paint_collapse_cell
+from sequence_timeline_tracks import paint_collapse_cell, TRACK_HOVER_BG
 from PySide6.QtWidgets import (
     QMessageBox, QMenu, QApplication, QStyledItemDelegate,
 )
@@ -83,7 +83,11 @@ class ClipDelegate(QStyledItemDelegate):
         # BUILD 52 stored #403050 on keyframe tracks; treat like caption/video default (none)
         if bg and track_type == "keyframe" and bg.lower() == "#403050":
             bg = ""
-        if bg:
+        # BUILD 331: hover fill for the Clips lane (style covers Name/Type/
+        # collapse; custom track bg would otherwise cover the style fill)
+        if getattr(tl, "_hover_track_row", -1) == index.row():
+            painter.fillRect(rect, TRACK_HOVER_BG)
+        elif bg:
             color = QColor(bg)
             if color.isValid():
                 painter.fillRect(rect, color)

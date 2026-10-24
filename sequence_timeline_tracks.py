@@ -23,13 +23,17 @@ from sequence_timeline_sql import (
 )
 
 
-# BUILD 158: no track highlight. The track table draws every cell with a
-# row panel (QTableView drawCell -> PE_PanelItemViewRow) and the item panel
-# (CE_ItemViewItem -> PE_PanelItemViewItem) carrying the Selected /
-# MouseOver / HasFocus states; the platform style paints those light grey /
-# lighter on hover (header cells and the clip-area lane). This style drops
-# those states for the track table only, so a row always paints exactly as
-# an unselected, unhovered row; the focus rectangle is not drawn.
+# BUILD 158: no track highlight from the platform. The track table draws
+# every cell with a row panel (QTableView drawCell -> PE_PanelItemViewRow)
+# and the item panel (CE_ItemViewItem -> PE_PanelItemViewItem) carrying
+# the Selected / MouseOver / HasFocus states; the platform style paints
+# those light grey / lighter on hover. This style drops those states for
+# the track table only so a row paints plain; the focus rectangle is not
+# drawn. BUILD 331: our own subtle hover fill (TRACK_HOVER_BG) is painted
+# instead when table._hover_track_row matches the row.
+# BUILD 331: subtle mouse-over fill for the whole track row
+TRACK_HOVER_BG = QColor(50, 50, 50)
+
 _TRACK_STRIP_STATES = (QStyle.State_Selected | QStyle.State_MouseOver
                        | QStyle.State_HasFocus)
 
@@ -40,10 +44,31 @@ def _plain_option(opt):
     return opt
 
 
+def _hover_row_of(widget, option):
+    # Row index for a style option, or -1
+    if widget is None:
+        return -1
+    idx = getattr(option, "index", None)
+    if idx is not None and idx.isValid():
+        return idx.row()
+    try:
+        return widget.rowAt(option.rect.center().y())
+    except Exception:
+        return -1
+
+
 class _NoTrackHighlightStyle(QProxyStyle):
     def drawPrimitive(self, element, option, painter, widget=None):
         if element in (QStyle.PE_PanelItemViewRow, QStyle.PE_PanelItemViewItem):
             option = _plain_option(option)
+            super().drawPrimitive(element, option, painter, widget)
+            # BUILD 331: full-row hover cue after the plain panel
+            if (widget is not None
+                    and _hover_row_of(widget, option)
+                    == getattr(widget, "_hover_track_row", -1)
+                    and getattr(widget, "_hover_track_row", -1) >= 0):
+                painter.fillRect(option.rect, TRACK_HOVER_BG)
+            return
         elif element == QStyle.PE_FrameFocusRect:
             return
         super().drawPrimitive(element, option, painter, widget)
@@ -61,6 +86,18 @@ def _track_table_style(table):
     style = _NoTrackHighlightStyle(base) if base is not None else _NoTrackHighlightStyle()
     style.setParent(table)
     return style
+
+
+def _set_hover_track_row(self, row):
+    # BUILD 331: which track row the mouse is over (-1 = none). Drives the
+    # subtle TRACK_HOVER_BG fill across the whole row; no selection change.
+    row = -1 if row is None else int(row)
+    if getattr(self, "_hover_track_row", -1) == row:
+        return
+    self._hover_track_row = row
+    if getattr(self, "table", None) is not None:
+        self.table._hover_track_row = row
+        self.table.viewport().update()
 
 
 # BUILD 163: yellow outline around the Name cell of the track whose
