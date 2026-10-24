@@ -2,8 +2,9 @@
 
 <!-- Intro by FilmLadd goes here -->
 
-**License:** free to use and modify for non-commercial purposes with
-attribution; see [LICENSE](LICENSE). Not for sale.
+**License:** free to use (including commercially), modify, and share
+with attribution; see [LICENSE](LICENSE). The software itself may not
+be sold.
 
 ## Build Notes for Agentic Coders
 
