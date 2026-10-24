@@ -488,6 +488,12 @@ class SequenceTimeline(QMainWindow):
         # File menu: Exit quits FLAVE the same way as Project Manager's
         # File > Exit (its closeEvent saves the open windows, then quits)
         file_menu = menubar.addMenu("File")
+        # BUILD 330: Render under File (was a top-level menubar action)
+        render_action = QAction("Render", self)
+        render_action.triggered.connect(
+            lambda checked=False: self.open_render_manager())
+        file_menu.addAction(render_action)
+        file_menu.addSeparator()
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self._exit_app)
         file_menu.addAction(exit_action)
@@ -539,11 +545,6 @@ class SequenceTimeline(QMainWindow):
         player_action = QAction("Player", self)
         player_action.triggered.connect(lambda checked=False: self.open_player())
         menubar.addAction(player_action)
-
-        # BUILD 116: Render (one Render Manager per sequence)
-        render_action = QAction("Render", self)
-        render_action.triggered.connect(lambda checked=False: self.open_render_manager())
-        menubar.addAction(render_action)
 
         # BUILD 166: Refresh Preview (also F5, the QShortcut above).
         # BUILD 178: under a Preview menu, with Clear Video / Clear Audio
