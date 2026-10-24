@@ -1,6 +1,6 @@
 # FLAVE Python packages (Windows + NVIDIA GPU). Install with:
-# If you want to modify this, fastest way is to use Grok + Bot
 #   pip install -r requirements.txt
+# If you want to modify this, fastest way is to use Grok + Bot
 # Python 3.11+ recommended (3.8-3.10 runs; preview audio mix is slower).
 
 PySide6>=6.5
