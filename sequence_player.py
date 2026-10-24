@@ -1398,6 +1398,13 @@ class SequencePlayer(QWindow):
             if preview_log.RENDER_LOG:
                 print("DECODER close: %s #%d (%s; %d open)" % (
                     key[1], int(key[0] or 0), why, len(self.decoders)))
+            # BUILD 342: CPU fallback owns an ffmpeg process for this file.
+            # NVDEC decoders are released by deleting them, as before.
+            if getattr(dec, "cpu_fallback", False):
+                try:
+                    dec.close()
+                except Exception:
+                    pass
             del dec
 
     def _close_all_decoders(self):
@@ -1442,16 +1449,24 @@ class SequencePlayer(QWindow):
             self.dec_used[key] = int(frame)
         dec = self.decoders.get(key)
         if dec is None:
-            import PyNvVideoCodec as nvc
             import time as _time
+            from cpu_decoder import CpuDecoder, open_with_cpu_fallback
             t_open = _time.perf_counter()
-            dec = nvc.SimpleDecoder(
-                path,
-                gpu_id=0,
-                use_device_memory=True,
-                need_scanned_stream_metadata=True,
-                output_color_type=nvc.OutputColorType.RGB,
-            )
+
+            def _nvdec():
+                import PyNvVideoCodec as nvc
+                return nvc.SimpleDecoder(
+                    path,
+                    gpu_id=0,
+                    use_device_memory=True,
+                    need_scanned_stream_metadata=True,
+                    output_color_type=nvc.OutputColorType.RGB,
+                )
+
+            # BUILD 342: NVDEC open failure uses CPU decode for this file
+            # only. The result is stored on this key. Other keys still open
+            # NVDEC. No global CPU switch.
+            dec = open_with_cpu_fallback(path, _nvdec, lambda: CpuDecoder(path))
             self.decoders[key] = dec
             # BUILD 247: open time on the console (preview_log)
             preview_log.decoder_opened(path, _time.perf_counter() - t_open)

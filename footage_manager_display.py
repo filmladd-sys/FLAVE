@@ -490,12 +490,11 @@ def _load_cudart():
 
 
 def _get_decoder(path):
-    # One SimpleDecoder per path (originals and, BUILD 302, proxies); later
+    # One decoder per path (originals and, BUILD 302, proxies); later
     # frames of the same file reuse it. A file rewritten in place (new
     # mtime or size, e.g. a regenerated proxy) gets a new decoder.
-    nvc = _load_nvc()
-    if nvc is None:
-        return None
+    # BUILD 342: if NVDEC cannot open this path, CPU decode for this path
+    # only. Other footage still opens NVDEC.
     key = os.path.normcase(os.path.abspath(path))
     try:
         st = os.stat(path)
@@ -509,13 +508,21 @@ def _get_decoder(path):
         # print(f"ICON: decoder reused for {path}")
     if decoder is None:
         # print(f"ICON: decoder created for {path}")
-        t = time.perf_counter()
-        decoder = nvc.SimpleDecoder(
-            path,
-            gpu_id=0,
-            use_device_memory=True,
-            output_color_type=nvc.OutputColorType.RGB,
-        )
+        # t = time.perf_counter()
+        from cpu_decoder import CpuDecoder, open_with_cpu_fallback
+
+        def _nvdec():
+            nvc = _load_nvc()
+            if nvc is None:
+                raise RuntimeError("PyNvVideoCodec not available")
+            return nvc.SimpleDecoder(
+                path,
+                gpu_id=0,
+                use_device_memory=True,
+                output_color_type=nvc.OutputColorType.RGB,
+            )
+
+        decoder = open_with_cpu_fallback(path, _nvdec, lambda: CpuDecoder(path))
         # print(f"ICON: timing decoder create {_ms(t)} ms")
         _decoders[key] = (stamp, decoder)
     return decoder
@@ -538,8 +545,9 @@ def _video_frame_full(path, frame_number=0):
 
 def _video_frame_full_impl(path, frame_number=0):
     # Full native-size RGB frame at 0-based frame_number as a QPixmap.
-    # NVDEC decode, cudaMemcpy device-to-host, no scaling. Returns None if
-    # PyNvVideoCodec or cudart is missing or the grab fails (no ffmpeg fallback).
+    # NVDEC decode, or (BUILD 342) CPU decode when NVDEC cannot open this
+    # file, then cudaMemcpy device-to-host, no scaling. Returns None if
+    # cudart is missing or the grab fails.
     frame_number = max(0, int(frame_number or 0))
     cudart = _load_cudart()
     if cudart is None:
