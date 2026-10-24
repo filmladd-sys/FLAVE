@@ -1095,9 +1095,22 @@ class SequenceTimeline(QMainWindow):
                 "ORDER BY id DESC",
                 (footage_id, frame_number, height)
             )
-            for row in cur.fetchall():
+            rows = cur.fetchall()
+            disp = None
+            if rows:
+                # BUILD 325: an old squeezed icon of non-square footage is
+                # not used mid-drag; the next generate call grabs it again
+                from footage_manager_display import _display_aspect, _aspect_ok
+                cur.execute("SELECT original_path, file_type FROM footage WHERE id = ?",
+                            (footage_id,))
+                f = cur.fetchone()
+                if f:
+                    disp = _display_aspect(f[0], (f[1] or "").lower())
+            for row in rows:
                 loaded = QPixmap()
                 if loaded.loadFromData(bytes(row[0])) and loaded.height() == height:
+                    if disp is not None and not _aspect_ok(loaded, disp):
+                        return None
                     return loaded
             return None
         finally:

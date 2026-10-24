@@ -390,6 +390,13 @@ class FootageManager(QMainWindow):
                 fps = store_footage_fps(self.project_db, fid, path)
             if (ftype or "").lower() in IMAGE_EXTS:
                 fps = None
+            elif w and path and str(path).lower().endswith(VIDEO_EXTENSIONS):
+                # BUILD 325: non-square-pixel video shows its display width
+                # (720x480 SAR 32:27 -> 854); the stored width is unchanged
+                from clip_proxy import cached_video_sar, display_width
+                sar = cached_video_sar(path)
+                if sar is not None and sar[2] != sar[3]:
+                    w = display_width(w, sar[2], sar[3])
             info[int(fid)] = (h, w, codec, fps)
         return info
 

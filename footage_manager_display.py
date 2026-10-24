@@ -169,6 +169,56 @@ def _load_original(conn, footage_id, frame_number=0):
     return None
 
 
+_ICONS_DROPPED = set()   # (project_db, footage_id) whose stale icons were dropped
+
+
+def _display_aspect(path, ftype):
+    # BUILD 325: display (w, h) of non-square-pixel video footage, else None
+    # (square pixels, stills, audio, unreadable: icons exactly as before)
+    if ftype not in VIDEO_EXTS or not path:
+        return None
+    from clip_proxy import cached_video_sar, display_width
+    sar = cached_video_sar(path)
+    if sar is None or sar[2] == sar[3]:
+        return None
+    return display_width(sar[0], sar[2], sar[3]), sar[1]
+
+
+def _stretch_to_display(pixmap, disp):
+    # BUILD 325: grabbed frame (original or proxy, coded aspect) stretched
+    # to the display aspect; height kept
+    h = pixmap.height()
+    w = max(1, int(round(h * float(disp[0]) / float(disp[1]))))
+    if w == pixmap.width():
+        return pixmap
+    return pixmap.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+
+def _aspect_ok(pixmap, disp):
+    # BUILD 325: True if a stored icon has the display aspect (within the
+    # 1 px rounding of a resize), False for an old squeezed one
+    w, h = pixmap.width(), pixmap.height()
+    if w <= 0 or h <= 0:
+        return True
+    ar = float(disp[0]) / float(disp[1])
+    return abs(w - int(round(h * ar))) <= 1 or abs(h - int(round(w / ar))) <= 1
+
+
+def _drop_stale_icons(conn, project_db, footage_id):
+    # BUILD 325: icons cached before BUILD 325 for non-square footage are
+    # squeezed; drop that footage's icon rows once per session so they are
+    # grabbed again (only this footage, no schema change). Returns False if
+    # already dropped this session (then the icon found is used as is).
+    key = (project_db, int(footage_id))
+    if key in _ICONS_DROPPED:
+        return False
+    _ICONS_DROPPED.add(key)
+    conn.execute("DELETE FROM icons WHERE footage_id = ?", (int(footage_id),))
+    conn.commit()
+    # print(f"ICON: dropped squeezed icons footage_id={footage_id}")
+    return True
+
+
 # Counts icon rows saved by this process. The Sequence Timeline drops its
 # remembered icon misses when this changes, so a newly saved icon shows.
 ICON_SAVE_SERIAL = 0
@@ -235,6 +285,7 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
             if ftype is None:
                 ftype = row[1]
         ftype = (ftype or "").lower()
+        disp = _display_aspect(path, ftype)
 
         # Prefer an already-resized version at the current limits
         t = time.perf_counter()
@@ -242,6 +293,9 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
             pixmap = _load_resized_height(conn, footage_id, target_height, frame_number)
         else:
             pixmap = _load_resized(conn, footage_id, max_w, max_h, frame_number)
+        if (pixmap is not None and disp is not None and not _aspect_ok(pixmap, disp)
+                and _drop_stale_icons(conn, project_db, footage_id)):
+            pixmap = None
         # print(f"ICON: timing load resized lookup {_ms(t)} ms")
         if pixmap is not None:
             pass
@@ -250,6 +304,9 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
         if pixmap is None:
             t = time.perf_counter()
             original = _load_original(conn, footage_id, frame_number)
+            if (original is not None and disp is not None and not _aspect_ok(original, disp)
+                    and _drop_stale_icons(conn, project_db, footage_id)):
+                original = None
             # print(f"ICON: timing load full-frame lookup {_ms(t)} ms")
             if original is not None:
                 pass
@@ -273,6 +330,8 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
                         original = _video_frame_full(proxy[0], proxy[1])
                     if original is None or original.isNull():
                         original = _video_frame_full(path, frame_number)
+                    if disp is not None and original is not None and not original.isNull():
+                        original = _stretch_to_display(original, disp)
                 elif ftype in AUDIO_EXTS:
                     original = _speaker_icon(256, 256)
                 elif not (path and os.path.isfile(path)):

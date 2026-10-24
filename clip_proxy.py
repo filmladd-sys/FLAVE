@@ -182,6 +182,23 @@ def probe_video_sar(path):
     return w, h, num, den
 
 
+_SAR_CACHE = {}   # (path, mtime, bytes) -> probe_video_sar result
+
+
+def cached_video_sar(path):
+    # BUILD 325: probe_video_sar once per file version (cached), for the
+    # Footage Manager size columns and the icon generator; None when the
+    # file is missing or unreadable
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime, st.st_size)
+    except (OSError, TypeError, ValueError):
+        return None
+    if key not in _SAR_CACHE:
+        _SAR_CACHE[key] = probe_video_sar(path)
+    return _SAR_CACHE[key]
+
+
 def display_width(width, sar_num, sar_den):
     # BUILD 324: square-pixel width of a frame with this SAR, rounded to
     # even (720x480 SAR 8:9 -> 640, 32:27 -> 854; 1440x1080 4:3 -> 1920)
