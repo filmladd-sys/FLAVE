@@ -1,6 +1,22 @@
 # FLAVE
 
-<!-- Intro by FilmLadd goes here -->
+FLAVE (Film Ladd Video Editor) is a lean, source-available NLE built so
+FilmLadd could leave Adobe Premiere without throwing away decades of
+editing muscle memory. It does what he needs -- tracks, captions,
+proxies, multi-monitor windows that stay where you put them -- without
+subscription lock-in or a UI packed with features he does not use.
+
+It was built in a few days with Grok + Bot: describe what you want,
+test, fix, repeat. This repo is that source, with notes aimed at AI
+coding agents as much as at people. It is a starting point, not a
+finished product. Clone it, run it, and reshape it (with Grok + Bot or
+any other AI) until it matches how *you* work -- add what you use, rip
+out what you do not. You should not need a locked installer or someone
+else's roadmap.
+
+FLAVE runs on Windows with an NVIDIA GPU today. The design should be
+portable to Linux or Mac, but that has not been tested; see the stack
+notes below for the Windows-specific pieces.
 
 **License:** free to use (including commercially), modify, and share
 with attribution; see [LICENSE](LICENSE). The software itself may not
