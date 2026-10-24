@@ -19,6 +19,8 @@ import threading
 # is tried on NVDEC again.
 _LOCK = threading.Lock()
 _NVDEC_FAILED = set()
+# Passthrough argv for this ffmpeg. None until the first CPU open.
+_SYNC_ARGS = None
 
 
 def _footage_key(path):
@@ -115,6 +117,52 @@ def _popen(cmd, **kw):
     if sys.platform.startswith("win"):
         kw["creationflags"] = _no_window_flags()
     return subprocess.Popen(cmd, **kw)
+
+
+def _ffmpeg_option_ok(name, value):
+    # True when this ffmpeg accepts the option. ffmpeg parses argv before
+    # it requires an output file. A removed option exits with
+    # "Unrecognized option" / "Option not found", which is the CPU open
+    # failure from -vsync on ffmpeg 8.
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-" + name, value]
+    try:
+        if sys.platform.startswith("win"):
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=15, creationflags=_no_window_flags())
+        else:
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    err = (result.stdout + result.stderr).decode("ascii", "replace").lower()
+    if "unrecognized option" in err or "option not found" in err:
+        return False
+    return True
+
+
+def _probe_output_sync_args():
+    # One raw frame per decoded frame. The default (cfr) duplicates frames
+    # across timestamp gaps, so a later index is the wrong picture.
+    # -vsync 0 is that mode on ffmpeg before 8. ffmpeg 8 removed -vsync;
+    # -fps_mode passthrough (since 5.1) is the same mode. No single flag
+    # is accepted by both generations, so pick the one this binary has.
+    # -fps_mode is an output option and must stay after -i.
+    if _ffmpeg_option_ok("fps_mode", "passthrough"):
+        return ("-fps_mode", "passthrough")
+    if _ffmpeg_option_ok("vsync", "0"):
+        return ("-vsync", "0")
+    return ()
+
+
+def _output_sync_args():
+    global _SYNC_ARGS
+    args = _SYNC_ARGS
+    if args is None:
+        args = _probe_output_sync_args()
+        _SYNC_ARGS = args
+    return list(args)
 
 
 def _probe_size(path):
@@ -232,7 +280,9 @@ class CpuDecoder(object):
             # index are dropped inside ffmpeg; the pipe then yields index,
             # index + 1, ... in order.
             cmd += ["-vf", "select=gte(n\\,%d),format=rgb24" % int(index)]
-        cmd += ["-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+        # BUILD 343: passthrough, spelled so this ffmpeg accepts it.
+        cmd += _output_sync_args()
+        cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
         return cmd
 
     def _start_proc(self, index):
