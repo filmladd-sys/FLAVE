@@ -375,28 +375,43 @@ class FootageManager(QMainWindow):
         try:
             conn = sqlite3.connect(self.project_db)
             try:
-                rows = conn.execute(
-                    "SELECT id, height, width, codec, fps, file_type, "
-                    "original_path FROM footage").fetchall()
+                try:
+                    rows = conn.execute(
+                        "SELECT id, height, width, codec, fps, file_type, "
+                        "original_path, pixel_aspect FROM footage").fetchall()
+                except Exception:
+                    # Pre-BUILD 326 DB (column not yet migrated)
+                    rows = [r + (None,) for r in conn.execute(
+                        "SELECT id, height, width, codec, fps, file_type, "
+                        "original_path FROM footage").fetchall()]
             finally:
                 conn.close()
         except Exception:
             return {}
         from footage_importer import IMAGE_EXTS, store_footage_fps
+        from clip_proxy import (parse_pixel_aspect, cached_video_sar,
+                                display_width, write_footage_pixel_aspect)
         info = {}
-        for fid, h, w, codec, fps, ftype, path in rows:
+        for fid, h, w, codec, fps, ftype, path, pa in rows:
             if (fps is None and h is not None and path
                     and (ftype or "").lower() not in IMAGE_EXTS):
                 fps = store_footage_fps(self.project_db, fid, path)
             if (ftype or "").lower() in IMAGE_EXTS:
                 fps = None
             elif w and path and str(path).lower().endswith(VIDEO_EXTENSIONS):
-                # BUILD 325: non-square-pixel video shows its display width
-                # (720x480 SAR 32:27 -> 854); the stored width is unchanged
-                from clip_proxy import cached_video_sar, display_width
-                sar = cached_video_sar(path)
-                if sar is not None and sar[2] != sar[3]:
-                    w = display_width(w, sar[2], sar[3])
+                # BUILD 325/326: non-square-pixel video shows its display
+                # width (720x480 SAR 32:27 -> 854); stored width unchanged.
+                # Prefer footage.pixel_aspect; probe + write back only when
+                # the DB value is missing.
+                parsed = parse_pixel_aspect(pa)
+                if parsed is None:
+                    sar = cached_video_sar(path)
+                    if sar is not None:
+                        parsed = (sar[2], sar[3])
+                        write_footage_pixel_aspect(
+                            self.project_db, fid, sar[2], sar[3])
+                if parsed is not None and parsed[0] != parsed[1]:
+                    w = display_width(w, parsed[0], parsed[1])
             info[int(fid)] = (h, w, codec, fps)
         return info
 

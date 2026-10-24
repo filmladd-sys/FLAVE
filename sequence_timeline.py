@@ -1105,7 +1105,8 @@ class SequenceTimeline(QMainWindow):
                             (footage_id,))
                 f = cur.fetchone()
                 if f:
-                    disp = _display_aspect(f[0], (f[1] or "").lower())
+                    disp = _display_aspect(
+                        f[0], (f[1] or "").lower(), project_db, footage_id)
             for row in rows:
                 loaded = QPixmap()
                 if loaded.loadFromData(bytes(row[0])) and loaded.height() == height:

@@ -54,6 +54,24 @@ def import_footage(project_db, media_path):
     if ext in _VISUAL_EXTS and ext not in IMAGE_EXTS:
         store_footage_fps(project_db, new_id, media_path)
 
+    # BUILD 326: sample / pixel aspect of v:0 into footage.pixel_aspect
+    # ("N:D", including 1:1); images and audio stay NULL
+    if ext in _VISUAL_EXTS and ext not in IMAGE_EXTS:
+        try:
+            from clip_proxy import probe_video_sar, format_pixel_aspect
+            sar = probe_video_sar(media_path)
+            if sar is not None:
+                conn = sqlite3.connect(project_db)
+                try:
+                    conn.execute(
+                        "UPDATE footage SET pixel_aspect = ? WHERE id = ?",
+                        (format_pixel_aspect(sar[2], sar[3]), new_id))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+
     # BUILD 119: MKV field order (progressive / interlaced / telecine /
     # unknown) into footage.field_order. Other files stay NULL.
     if ext == "mkv":

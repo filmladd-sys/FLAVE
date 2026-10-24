@@ -199,6 +199,93 @@ def cached_video_sar(path):
     return _SAR_CACHE[key]
 
 
+def format_pixel_aspect(sar_num, sar_den):
+    # BUILD 326: "N:D" for footage.pixel_aspect (1:1, 8:9, 32:27, 4:3)
+    return "%d:%d" % (int(sar_num), int(sar_den))
+
+
+def parse_pixel_aspect(text):
+    # BUILD 326: "N:D" -> (num, den), else None (NULL / empty / junk)
+    if not text or not isinstance(text, str):
+        return None
+    t = text.strip()
+    if ":" not in t:
+        return None
+    try:
+        n, d = t.split(":", 1)
+        n, d = int(n), int(d)
+        if n > 0 and d > 0:
+            return n, d
+    except ValueError:
+        pass
+    return None
+
+
+def read_footage_pixel_aspect(project_db, footage_id):
+    # BUILD 326: (num, den) from footage.pixel_aspect, or None when the
+    # column / row is missing or empty (old DB before migration, stills)
+    if not project_db or footage_id is None:
+        return None
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            row = conn.execute(
+                "SELECT pixel_aspect FROM footage WHERE id = ?",
+                (int(footage_id),)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return parse_pixel_aspect(row[0])
+
+
+def write_footage_pixel_aspect(project_db, footage_id, sar_num, sar_den):
+    # BUILD 326: store "N:D" on footage.pixel_aspect; no-op when the
+    # column is missing (pre-migration) or the write fails
+    if not project_db or footage_id is None:
+        return
+    try:
+        conn = sqlite3.connect(project_db)
+        try:
+            conn.execute(
+                "UPDATE footage SET pixel_aspect = ? WHERE id = ?",
+                (format_pixel_aspect(sar_num, sar_den), int(footage_id)))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def resolve_footage_sar(project_db, footage_id, path):
+    # BUILD 326: (w, h, num, den) preferring footage.pixel_aspect + stored
+    # width/height; ffprobe only when the DB value is missing, then write
+    # it back. None for missing files / non-video / unreadable.
+    if path and project_db and footage_id is not None:
+        try:
+            conn = sqlite3.connect(project_db)
+            try:
+                row = conn.execute(
+                    "SELECT width, height, pixel_aspect FROM footage WHERE id = ?",
+                    (int(footage_id),)).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            row = None
+        if row is not None:
+            parsed = parse_pixel_aspect(row[2])
+            if parsed is not None and row[0] and row[1]:
+                return int(row[0]), int(row[1]), parsed[0], parsed[1]
+    info = cached_video_sar(path) if path else None
+    if info is None:
+        return None
+    if project_db and footage_id is not None:
+        write_footage_pixel_aspect(project_db, footage_id, info[2], info[3])
+    return info
+
+
 def display_width(width, sar_num, sar_den):
     # BUILD 324: square-pixel width of a frame with this SAR, rounded to
     # even (720x480 SAR 8:9 -> 640, 32:27 -> 854; 1440x1080 4:3 -> 1920)

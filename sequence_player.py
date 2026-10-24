@@ -218,11 +218,40 @@ def _original_size(path, w, h):
 
 
 _SAR_CACHE = {}   # original path -> (coded w, h, sar_num, sar_den) or None
+_SAR_DB_SEEDED = set()   # project_db paths already loaded into _SAR_CACHE
+
+
+def seed_sar_cache(project_db):
+    # BUILD 326: load footage.pixel_aspect into _SAR_CACHE so playback /
+    # resolve_proxies do not ffprobe every original after migration
+    if not project_db or project_db in _SAR_DB_SEEDED:
+        return
+    _SAR_DB_SEEDED.add(project_db)
+    try:
+        from clip_proxy import parse_pixel_aspect
+        conn = sqlite3.connect(project_db)
+        try:
+            rows = conn.execute(
+                "SELECT original_path, width, height, pixel_aspect "
+                "FROM footage WHERE pixel_aspect IS NOT NULL "
+                "AND TRIM(pixel_aspect) != ''").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return
+    for path, w, h, pa in rows:
+        if not path or path in _SAR_CACHE:
+            continue
+        parsed = parse_pixel_aspect(pa)
+        if parsed is None or not w or not h:
+            continue
+        _SAR_CACHE[path] = (int(w), int(h), parsed[0], parsed[1])
 
 
 def _sar_info(path):
-    # BUILD 324: ffprobe the SAR of a video original once (cached); None
-    # for stills or when unreadable (treated as square pixels)
+    # BUILD 324/326: SAR of a video original once (cached); prefers values
+    # seeded from footage.pixel_aspect, else ffprobe. None for stills or
+    # when unreadable (treated as square pixels).
     if path not in _SAR_CACHE:
         info = None
         try:
@@ -468,6 +497,7 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
     # ratio: proxy_frame_ratio (None = same frame count).
     if not project_db or not track_ids or not (use_proxies or render_deint):
         return {}
+    seed_sar_cache(project_db)
     try:
         conn = sqlite3.connect(project_db)
         try:
@@ -582,6 +612,8 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
         project_db = tl._project_db()
     except Exception:
         project_db = None
+    # BUILD 326: prefer footage.pixel_aspect (no per-file ffprobe)
+    seed_sar_cache(project_db)
     # render_deint (BUILD 119): final render override, MKV 100% deint only
     proxies = resolve_proxies(project_db, [r[0] for r in rows], use_proxies,
                               render_deint)
@@ -1037,10 +1069,27 @@ class SequencePlayer(QWindow):
         try:
             conn = sqlite3.connect(self.timeline._project_db())
             cur = conn.cursor()
-            cur.execute("SELECT original_path FROM footage WHERE id = ?", (footage_id,))
-            row = cur.fetchone()
+            # BUILD 326: pull pixel_aspect with the path so a newly imported
+            # clip does not need a separate ffprobe
+            try:
+                cur.execute(
+                    "SELECT original_path, width, height, pixel_aspect "
+                    "FROM footage WHERE id = ?", (footage_id,))
+                row = cur.fetchone()
+                pa = row[3] if row else None
+            except Exception:
+                cur.execute("SELECT original_path FROM footage WHERE id = ?",
+                            (footage_id,))
+                row = cur.fetchone()
+                pa = None
             conn.close()
             path = row[0] if row and row[0] else None
+            if path and pa and path not in _SAR_CACHE:
+                from clip_proxy import parse_pixel_aspect
+                parsed = parse_pixel_aspect(pa)
+                if parsed is not None and row[1] and row[2]:
+                    _SAR_CACHE[path] = (
+                        int(row[1]), int(row[2]), parsed[0], parsed[1])
         except Exception:
             path = None
         self.paths[footage_id] = path

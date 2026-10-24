@@ -172,13 +172,14 @@ def _load_original(conn, footage_id, frame_number=0):
 _ICONS_DROPPED = set()   # (project_db, footage_id) whose stale icons were dropped
 
 
-def _display_aspect(path, ftype):
-    # BUILD 325: display (w, h) of non-square-pixel video footage, else None
-    # (square pixels, stills, audio, unreadable: icons exactly as before)
+def _display_aspect(path, ftype, project_db=None, footage_id=None):
+    # BUILD 325/326: display (w, h) of non-square-pixel video footage, else
+    # None (square pixels, stills, audio, unreadable: icons exactly as
+    # before). Prefers footage.pixel_aspect; probes only when missing.
     if ftype not in VIDEO_EXTS or not path:
         return None
-    from clip_proxy import cached_video_sar, display_width
-    sar = cached_video_sar(path)
+    from clip_proxy import resolve_footage_sar, display_width
+    sar = resolve_footage_sar(project_db, footage_id, path)
     if sar is None or sar[2] == sar[3]:
         return None
     return display_width(sar[0], sar[2], sar[3]), sar[1]
@@ -285,7 +286,7 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
             if ftype is None:
                 ftype = row[1]
         ftype = (ftype or "").lower()
-        disp = _display_aspect(path, ftype)
+        disp = _display_aspect(path, ftype, project_db, footage_id)
 
         # Prefer an already-resized version at the current limits
         t = time.perf_counter()
