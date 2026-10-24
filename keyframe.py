@@ -2,9 +2,10 @@
 # Keyframe clip tables, dialog, load/draw/persist helpers. ASCII only.
 
 import sqlite3
+import sys
 
-from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QColor, QPen
+from PySide6.QtCore import Qt, QRect, QEvent, QObject
+from PySide6.QtGui import QColor, QPen, QPainter, QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QMessageBox, QDoubleSpinBox, QApplication, QInputDialog,
@@ -1254,6 +1255,413 @@ def add_keyframe_clip(timeline, track_id, click_frame):
         "Added keyframe clip at frame %d" % in_frame)
 
 
+# BUILD 338: chroma Pick. One frameless top-most tool window per screen,
+# parented to the modal Add / Edit dialog so that dialog's modality does
+# not eat the click. Alpha 1 (not 0): on Windows a fully transparent
+# layered window is click-through. Left click hides the layers, then
+# reads the pixel under the cursor. Escape or right-click cancels.
+# Windows sample is BitBlt from that monitor's DC at GetCursorPos.
+# QScreen.grabWindow(0) on Windows BitBlts GetDesktopWindow(), which is
+# the wallpaper, not other applications. A monitor DC is the composited
+# desktop, so the pick works over any window on any monitor (origins
+# left of the primary are negative; the cursor and the monitor rect are
+# both physical pixels under Qt 6's per-monitor DPI). Other platforms
+# use QScreen.grabWindow, the same call as Qt's own eyedropper. A failed
+# read leaves R, G, B unchanged. Tolerance is never written here.
+
+
+def _dwm_flush():
+    # Hide has to be composed before the sample, or the pick layer is
+    # the pixel we read. No-op off Windows.
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+        dwmapi.DwmFlush.argtypes = []
+        dwmapi.DwmFlush.restype = ctypes.c_long
+        dwmapi.DwmFlush()
+    except Exception:
+        pass
+
+
+def _sample_qt(global_pos):
+    # Device-independent pixel relative to the screen under the cursor.
+    try:
+        screen = QGuiApplication.screenAt(global_pos)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        geo = screen.geometry()
+        pm = screen.grabWindow(0, int(global_pos.x() - geo.x()),
+                               int(global_pos.y() - geo.y()), 1, 1)
+        if pm.isNull() or pm.width() < 1 or pm.height() < 1:
+            return None
+        img = pm.toImage()
+        if img.isNull() or img.width() < 1 or img.height() < 1:
+            return None
+        color = img.pixelColor(0, 0)
+        if not color.isValid():
+            return None
+        return (int(color.red()), int(color.green()), int(color.blue()))
+    except Exception:
+        return None
+
+
+def _sample_win32():
+    # One composited pixel at the cursor, from the monitor it is on.
+    # Private WinDLL so argtypes do not leak onto other ctypes callers.
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = ctypes.c_void_p
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetDC.argtypes = [wintypes.HWND]
+        user32.GetDC.restype = wintypes.HDC
+        user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+        user32.ReleaseDC.restype = ctypes.c_int
+        gdi32.CreateDCW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                    wintypes.LPCWSTR, ctypes.c_void_p]
+        gdi32.CreateDCW.restype = wintypes.HDC
+        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        gdi32.CreateCompatibleDC.restype = wintypes.HDC
+        gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int,
+                                                 ctypes.c_int]
+        gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+        gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+        gdi32.SelectObject.restype = wintypes.HGDIOBJ
+        gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_int, wintypes.HDC,
+                                 ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+        gdi32.BitBlt.restype = wintypes.BOOL
+        gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP,
+                                    wintypes.UINT, wintypes.UINT,
+                                    ctypes.c_void_p, ctypes.c_void_p,
+                                    wintypes.UINT]
+        gdi32.GetDIBits.restype = ctypes.c_int
+        gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        gdi32.DeleteDC.argtypes = [wintypes.HDC]
+        gdi32.DeleteDC.restype = wintypes.BOOL
+
+        class MONITORINFOEXW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+                ("szDevice", wintypes.WCHAR * 32),
+            ]
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [
+                ("bmiHeader", BITMAPINFOHEADER),
+                ("bmiColors", wintypes.DWORD * 3),
+            ]
+
+        pt = wintypes.POINT()
+        if not user32.GetCursorPos(ctypes.byref(pt)):
+            return None
+        src_x, src_y = int(pt.x), int(pt.y)
+        hdc_screen = None
+        created = False
+        hmon = user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST
+        if hmon:
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                hdc_screen = gdi32.CreateDCW(info.szDevice, None, None, None)
+                if hdc_screen:
+                    created = True
+                    src_x = int(pt.x - info.rcMonitor.left)
+                    src_y = int(pt.y - info.rcMonitor.top)
+        if not hdc_screen:
+            hdc_screen = user32.GetDC(None)
+            created = False
+            src_x, src_y = int(pt.x), int(pt.y)
+        if not hdc_screen:
+            return None
+        hdc_mem = None
+        hbmp = None
+        old = None
+        try:
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+            hbmp = gdi32.CreateCompatibleBitmap(hdc_screen, 1, 1)
+            if not hdc_mem or not hbmp:
+                return None
+            old = gdi32.SelectObject(hdc_mem, hbmp)
+            # CAPTUREBLT includes layered windows in the composited image.
+            if not gdi32.BitBlt(hdc_mem, 0, 0, 1, 1, hdc_screen,
+                                src_x, src_y, 0x00CC0020 | 0x40000000):
+                return None
+            if old:
+                gdi32.SelectObject(hdc_mem, old)
+                old = None
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = 1
+            bmi.bmiHeader.biHeight = -1
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0  # BI_RGB
+            buf = (ctypes.c_ubyte * 4)()
+            if gdi32.GetDIBits(hdc_screen, hbmp, 0, 1, buf,
+                               ctypes.byref(bmi), 0) == 0:
+                return None
+            return (int(buf[2]), int(buf[1]), int(buf[0]))
+        finally:
+            if old and hdc_mem:
+                gdi32.SelectObject(hdc_mem, old)
+            if hbmp:
+                gdi32.DeleteObject(hbmp)
+            if hdc_mem:
+                gdi32.DeleteDC(hdc_mem)
+            if created:
+                gdi32.DeleteDC(hdc_screen)
+            else:
+                user32.ReleaseDC(None, hdc_screen)
+    except Exception:
+        return None
+
+
+def _sample_screen(global_pos):
+    if sys.platform == "win32":
+        rgb = _sample_win32()
+        if rgb is not None:
+            return rgb
+    return _sample_qt(global_pos)
+
+
+class _ChromaPickOverlay(QWidget):
+    # One screen. Nearly invisible, still receives the click.
+
+    def __init__(self, dialog, session, screen):
+        super().__init__(dialog)
+        self._session = session
+        self._screen = screen
+        self.setWindowFlags(
+            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.BypassWindowManagerHint | Qt.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMouseTracking(True)
+        # BUILD 338: plain Qt crosshair. No custom eyedropper pixmap.
+        self.setCursor(Qt.CrossCursor)
+
+    def place(self):
+        screen = self._screen
+        self.winId()
+        wh = self.windowHandle()
+        if wh is not None and screen is not None:
+            try:
+                wh.setScreen(screen)
+            except Exception:
+                pass
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        screen = self._screen
+        if screen is not None and self.geometry() != screen.geometry():
+            self.setGeometry(screen.geometry())
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
+        painter.end()
+
+    def keyPressEvent(self, event):
+        session = self._session
+        if session is not None and event.key() == Qt.Key_Escape:
+            event.accept()
+            session.cancel()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        session = self._session
+        if session is None or session._closed:
+            event.accept()
+            return
+        if event.button() == Qt.RightButton:
+            event.accept()
+            session.cancel()
+            return
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            session.pick(event.globalPosition().toPoint())
+            return
+        super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event):
+        # Right-click cancels; do not open a menu.
+        event.accept()
+
+
+class _ChromaPickSession(QObject):
+    # Overlays for one Pick. cancel() leaves the dialog's spins alone.
+
+    def __init__(self, dialog, apply):
+        super().__init__(dialog)
+        self._dialog = dialog
+        self._apply = apply
+        self._overlays = []
+        self._closed = False
+        self._finished = False
+        self._cursor_set = False
+        self._key_grabber = None
+        self._filtered = False
+
+    def eventFilter(self, obj, event):
+        # Escape on the dialog would reject it. An accepted
+        # ShortcutOverride is followed by KeyPress (that is how Qt says
+        # "the widget will handle this key"). Cancel on the KeyPress,
+        # while this filter is still installed, so the dialog stays open
+        # and R, G, B stay.
+        if event.type() in (QEvent.KeyPress, QEvent.KeyRelease,
+                            QEvent.ShortcutOverride):
+            if event.key() == Qt.Key_Escape:
+                event.accept()
+                if event.type() == QEvent.KeyPress and not self._closed:
+                    self.cancel()
+                return True
+        return False
+
+    def start(self):
+        if self._closed:
+            return
+        screens = list(QGuiApplication.screens())
+        if not screens:
+            self.cancel()
+            return
+        try:
+            self._dialog.installEventFilter(self)
+            self._filtered = True
+            # Same Qt crosshair over every screen while Pick is active.
+            QApplication.setOverrideCursor(Qt.CrossCursor)
+            self._cursor_set = True
+            for screen in screens:
+                ov = _ChromaPickOverlay(self._dialog, self, screen)
+                self._overlays.append(ov)
+                ov.place()
+                ov.show()
+                ov.place()
+                ov.raise_()
+            self._grab_keys()
+        except Exception:
+            self.cancel()
+
+    def _grab_keys(self):
+        if not self._overlays:
+            return
+        pos = QCursor.pos()
+        grabber = self._overlays[0]
+        for ov in self._overlays:
+            if ov.geometry().contains(pos):
+                grabber = ov
+                break
+        grabber.raise_()
+        grabber.activateWindow()
+        grabber.setFocus(Qt.OtherFocusReason)
+        grabber.grabKeyboard()
+        self._key_grabber = grabber
+
+    def pick(self, global_pos):
+        if self._closed:
+            return
+        self._closed = True
+        rgb = None
+        try:
+            self._release_input()
+            for ov in list(self._overlays):
+                ov.hide()
+            QApplication.processEvents()
+            _dwm_flush()
+            rgb = _sample_screen(global_pos)
+        finally:
+            self._finish()
+        if rgb is not None and self._apply is not None:
+            try:
+                self._apply(rgb)
+            except RuntimeError:
+                pass
+
+    def cancel(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._release_input()
+        self._finish()
+
+    def _release_input(self):
+        grabber = self._key_grabber
+        self._key_grabber = None
+        if grabber is not None:
+            try:
+                grabber.releaseKeyboard()
+            except RuntimeError:
+                pass
+        if self._cursor_set:
+            self._cursor_set = False
+            QApplication.restoreOverrideCursor()
+
+    def _finish(self):
+        if self._finished:
+            return
+        self._finished = True
+        dialog = self._dialog
+        overlays = self._overlays
+        self._overlays = []
+        for ov in overlays:
+            try:
+                ov._session = None
+                ov.hide()
+                ov.deleteLater()
+            except RuntimeError:
+                pass
+        if self._filtered and dialog is not None:
+            try:
+                dialog.removeEventFilter(self)
+            except RuntimeError:
+                pass
+        self._filtered = False
+        if dialog is not None and getattr(dialog, "_chroma_pick", None) is self:
+            dialog._chroma_pick = None
+        btn = None
+        if dialog is not None:
+            btn = getattr(dialog, "chroma_pick_btn", None)
+        if btn is not None:
+            try:
+                btn.setEnabled(True)
+            except RuntimeError:
+                pass
+        self._dialog = None
+        self.deleteLater()
+
+
 class AddKeyDialog(QDialog):
     # One numeric value labeled with the clip type (X / Y / Scale)
     # BUILD 147: choose_type=True (the clip has no keys): a Type drop-down
@@ -1275,6 +1683,9 @@ class AddKeyDialog(QDialog):
     # Tolerance (R/G/B 0..255, tolerance 0..442, step 1; chroma = the
     # initial (g, b, tolerance), default green 255, 0 and tolerance 80);
     # chroma_extra() reads them. Other types hide that row.
+    # BUILD 338: chroma also has Pick. It lays a transparent window over
+    # every screen; left click samples that pixel into R, G, B (tolerance
+    # stays). Escape or right-click cancels and leaves R, G, B alone.
     def __init__(self, parent, type_label, initial=None, title="Add Key",
                  stored_type=None, choose_type=False, defaults=None,
                  rgba=None, y=None, y_defaults=None, edges=None, chroma=None):
@@ -1284,6 +1695,7 @@ class AddKeyDialog(QDialog):
         self.type_combo = None
         self._defaults = defaults
         self._y_defaults = y_defaults
+        self._chroma_pick = None
         if choose_type:
             trow = QHBoxLayout()
             trow.addWidget(QLabel("Type:"))
@@ -1372,6 +1784,11 @@ class AddKeyDialog(QDialog):
                 sp.setValue(float(fallback))
             crow.addWidget(sp)
             self.chroma_spins.append(sp)
+        self.chroma_pick_btn = QPushButton("Pick")
+        self.chroma_pick_btn.setToolTip(
+            "Sample a color from any screen. Esc or right-click cancels.")
+        self.chroma_pick_btn.clicked.connect(self._pick_chroma)
+        crow.addWidget(self.chroma_pick_btn)
         layout.addWidget(self.chroma_row)
         self._show_border(stored_type)
         ok_btn = QPushButton("OK")
@@ -1449,6 +1866,34 @@ class AddKeyDialog(QDialog):
         tol = max(0.0, min(CHROMA_TOLERANCE_MAX,
                            float(self.chroma_spins[2].value())))
         return (g, b, tol)
+
+    def _pick_chroma(self):
+        # BUILD 338: eyedropper. Tolerance is not touched. Cancel leaves
+        # R, G, B as they were.
+        if self._chroma_pick is not None:
+            return
+        self.chroma_pick_btn.setEnabled(False)
+        session = _ChromaPickSession(self, self._apply_chroma_pick)
+        self._chroma_pick = session
+        session.start()
+        if self._chroma_pick is None:
+            self.chroma_pick_btn.setEnabled(True)
+
+    def _apply_chroma_pick(self, rgb):
+        r, g, b = (max(0, min(255, int(v))) for v in rgb)
+        self.spin.setValue(float(r))
+        self.chroma_spins[0].setValue(float(g))
+        self.chroma_spins[1].setValue(float(b))
+
+    def _end_chroma_pick(self):
+        session = self._chroma_pick
+        if session is not None:
+            session.cancel()
+
+    def done(self, result):
+        # Closing the dialog mid-pick cancels the sample.
+        self._end_chroma_pick()
+        super().done(result)
 
     def border_rgba(self):
         # BUILD 222: (r, g, b, a) from the R, G, B, A fields
