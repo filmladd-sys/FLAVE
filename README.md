@@ -23,8 +23,8 @@ says what it owns.
   `sqlite3.Connection.blobopen`). 3.8-3.10 runs (the DLL loader uses
   `os.add_dll_directory`), but the preview audio mix is slow on long
   sources.
-- **Python packages:** there is no requirements file. Install the three
-  third-party packages with `pip install PySide6 PyNvVideoCodec numpy`.
+- **Python packages:** see `requirements.txt`. Core install:
+  `pip install -r requirements.txt` (PySide6, numpy, PyNvVideoCodec).
   The third-party imports are:
   - `PySide6` -- all windows, QAudioSink playback, the Sequence Player's
     QWindow + QOpenGLContext.

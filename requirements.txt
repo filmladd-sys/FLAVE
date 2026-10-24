@@ -1,0 +1,18 @@
+# FLAVE Python packages (Windows + NVIDIA GPU). Install with:
+#   pip install -r requirements.txt
+# Python 3.11+ recommended (3.8-3.10 runs; preview audio mix is slower).
+
+PySide6>=6.5
+numpy>=1.24
+PyNvVideoCodec>=1.0
+
+# Optional: Generate Captions (audio clip right-click)
+# faster-whisper>=1.0
+# If captions should run on CUDA, ctranslate2 may also need (CUDA 12):
+#   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+
+# Not installed by pip (system / NVIDIA toolkit):
+# - NVIDIA GPU with NVDEC / NVENC (device 0)
+# - CUDA runtime and nvJPEG DLLs (nvcuda, cudart64_*, nvjpeg64_*)
+# - FFmpeg and ffprobe on PATH
+# - OpenGL (Sequence Player window only)
