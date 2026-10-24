@@ -846,9 +846,16 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.mode_combo = QComboBox()
             row.addWidget(self.mode_combo, 1)
             layout.addLayout(row)
+            # BUILD 332: Generate All to the right of Generate
+            btn_row = QHBoxLayout()
             self.gen_btn = QPushButton("Generate")
             self.gen_btn.clicked.connect(self._generate)
-            layout.addWidget(self.gen_btn)
+            btn_row.addWidget(self.gen_btn)
+            self.gen_all_btn = QPushButton("Generate All")
+            self.gen_all_btn.clicked.connect(self._generate_all)
+            btn_row.addWidget(self.gen_all_btn)
+            btn_row.addStretch(1)
+            layout.addLayout(btn_row)
             self.combo.currentIndexChanged.connect(self._fill_modes)
             self.mode_combo.currentIndexChanged.connect(self._update_button)
             self.table = QTableWidget(0, 4)
@@ -938,10 +945,23 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.mode_combo.blockSignals(False)
             self._update_button()
 
+        def _pending_pairs(self):
+            # Missing (percentage, mode) pairs for this footage, in list order
+            src_path, _n = footage_source(db_path, footage_id)
+            out = []
+            for pct in percentages_for(src_path):
+                for m in getattr(self, "_modes", ["normal"]):
+                    if (int(pct), m) not in getattr(self, "_have", set()):
+                        out.append((int(pct), m))
+            return out
+
         def _update_button(self, *_args):
-            self.gen_btn.setEnabled(not getattr(self, "_generating", False)
+            busy = getattr(self, "_generating", False)
+            self.gen_btn.setEnabled(not busy
                                     and self.combo.currentData() is not None
                                     and self.mode_combo.currentData() is not None)
+            # BUILD 332: Generate All when any size/mode is still missing
+            self.gen_all_btn.setEnabled(not busy and bool(self._pending_pairs()))
 
         def _generate(self):
             pct = self.combo.currentData()
@@ -971,6 +991,62 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 except Exception:
                     pass
 
+        def _generate_all(self):
+            # BUILD 332: walk every missing percentage/mode and reuse the
+            # same generate path as Generate; skip sizes already present.
+            if getattr(self, "_generating", False):
+                return
+            pending = self._pending_pairs()
+            if not pending:
+                return
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import Qt
+            src_path, _n = footage_source(db_path, footage_id)
+            self._generating = True
+            self.gen_btn.setEnabled(False)
+            self.gen_all_btn.setEnabled(False)
+            self.gen_btn.setText("Generating")
+            self.gen_all_btn.setText("Generating")
+            self.combo.setEnabled(False)
+            self.mode_combo.setEnabled(False)
+            self.setCursor(Qt.WaitCursor)
+            try:
+                for pct, mode in pending:
+                    QApplication.processEvents()
+                    if is_video_path(src_path):
+                        ok, out = self._generate_video(int(pct), mode)
+                        set_default_after_generate(
+                            db_path, footage_id, int(pct), ok,
+                            out if ok else None)
+                        if not ok:
+                            show_message(self, "Proxy Manager", out)
+                            break
+                        self._have.add((int(pct), mode))
+                    else:
+                        try:
+                            add_proxy_row(db_path, footage_id, int(pct))
+                        except Exception as e:
+                            show_message(self, "Proxy Manager",
+                                         "Could not add proxy: %s" % e)
+                            break
+                        set_default_after_generate(
+                            db_path, footage_id, int(pct), True)
+                        self._have.add((int(pct), mode))
+            finally:
+                self.unsetCursor()
+                self._generating = False
+                self.gen_btn.setText("Generate")
+                self.gen_all_btn.setText("Generate All")
+                self.combo.setEnabled(True)
+                self.mode_combo.setEnabled(True)
+                self._reload()
+                self._update_button()
+                if on_change is not None:
+                    try:
+                        on_change()
+                    except Exception:
+                        pass
+
         def _generate_video(self, pct, mode="normal"):
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import Qt
@@ -981,12 +1057,16 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                     time.sleep(0.05)
 
             # Busy state on this window only (other windows stay usable)
-            self._generating = True
-            self.gen_btn.setEnabled(False)
-            self.gen_btn.setText("Generating")
-            self.combo.setEnabled(False)
-            self.mode_combo.setEnabled(False)
-            self.setCursor(Qt.WaitCursor)
+            manage = not getattr(self, "_generating", False)
+            if manage:
+                self._generating = True
+                self.gen_btn.setEnabled(False)
+                self.gen_all_btn.setEnabled(False)
+                self.gen_btn.setText("Generating")
+                self.gen_all_btn.setText("Generating")
+                self.combo.setEnabled(False)
+                self.mode_combo.setEnabled(False)
+                self.setCursor(Qt.WaitCursor)
             ok, msg = False, ""
             try:
                 try:
@@ -994,13 +1074,15 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                 except Exception as e:
                     ok, msg = False, "Proxy generation failed: %s" % e
             finally:
-                self.unsetCursor()
-                self._generating = False
-                self.gen_btn.setText("Generate")
-                self.combo.setEnabled(True)
-                self.mode_combo.setEnabled(True)
-                self._update_button()
-            if not ok:
+                if manage:
+                    self.unsetCursor()
+                    self._generating = False
+                    self.gen_btn.setText("Generate")
+                    self.gen_all_btn.setText("Generate All")
+                    self.combo.setEnabled(True)
+                    self.mode_combo.setEnabled(True)
+                    self._update_button()
+            if not ok and manage:
                 show_message(self, "Proxy Manager", msg)
             return ok, msg
 
