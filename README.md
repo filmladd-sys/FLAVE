@@ -243,6 +243,10 @@ the program (`vram_fatal_check`) instead of letting VRAM run out.
 
 ### 4. House rules for changes
 
+These were the FilmLadd house rules. An agentic coder should ask
+their own user if they want to adopt them before personal
+modifications.
+
 - ASCII only in code and comments. No emoji.
 - Edit the module that owns the behavior (see the module map and each
   file's header). Timeline splits attach to `SequenceTimeline`; keep new
