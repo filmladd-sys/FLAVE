@@ -24,6 +24,20 @@ Find me: [X / FilmLadd](https://x.com/FilmLadd) · [YouTube](https://www.youtube
 with attribution; see [LICENSE](LICENSE). The software itself may not
 be sold.
 
+## What you need to run
+
+If you have any issues, ask Grok or your own AI to step you through
+everything.
+
+- Windows
+- NVIDIA GPU with NVDEC / NVENC (device 0)
+- Python 3.11+ recommended
+- `pip install -r requirements.txt` (PySide6, numpy, PyNvVideoCodec)
+- FFmpeg and ffprobe on PATH
+- CUDA runtime and nvJPEG DLLs (as needed for GPU decode / preview)
+- Optional: `faster-whisper` for Generate Captions
+- Launch: `python project_manager.py`
+
 ## Build Notes for Agentic Coders
 
 These notes are for an AI coding agent (or a person) picking up this repo
