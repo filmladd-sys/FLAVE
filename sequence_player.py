@@ -681,6 +681,79 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
                 clip_speeds, text_styles) + tuple(chroma_clips)
 
 
+def _chroma_key_rows(chroma):
+    # BUILD 339: None, one (r, g, b, tolerance), or a stack of those.
+    # Invalid rows are dropped. Empty means the kernel skips chroma.
+    if not chroma:
+        return ()
+    try:
+        if len(chroma) >= 4 and not isinstance(chroma[0], (tuple, list)):
+            chroma = (chroma,)
+    except TypeError:
+        return ()
+    from keyframe import CHROMA_TOLERANCE_MAX
+    out = []
+    for row in chroma:
+        try:
+            if len(row) < 4:
+                continue
+            ckr = max(0.0, min(255.0, float(row[0])))
+            ckg = max(0.0, min(255.0, float(row[1])))
+            ckb = max(0.0, min(255.0, float(row[2])))
+            ckt = max(0.0, min(float(CHROMA_TOLERANCE_MAX), float(row[3])))
+        except (TypeError, ValueError, IndexError):
+            continue
+        if ckr == ckr and ckg == ckg and ckb == ckb and ckt == ckt:
+            out.append((ckr, ckg, ckb, ckt))
+    return tuple(out)
+
+
+def _upload_chroma(self, flat):
+    # BUILD 339: device table of stacked chroma keys (r, g, b, tol floats).
+    # The copy is queued on self.stream ahead of blend_layer, so one buffer
+    # is enough across layers. The host array stays alive until _sync
+    # (pageable cudaMemcpyAsync may still read it after this returns).
+    # The first alloc holds 64 keys; growing syncs the stream first so a
+    # queued blend is not still reading the old table.
+    cudart = _libs()[0]
+    n = len(flat)
+    dev = getattr(self, "_chroma_dev", None)
+    cap = int(getattr(self, "_chroma_cap", 0) or 0)
+    if dev is None or not getattr(dev, "value", None) or cap < n:
+        if dev is not None and getattr(dev, "value", None):
+            _check(cudart.cudaStreamSynchronize(self.stream), "chroma grow sync")
+            _check(cudart.cudaFree(dev), "chroma free")
+            self._chroma_hold = []
+        dev = ctypes.c_void_p()
+        cap = n if n > (64 * 4) else (64 * 4)
+        _check(cudart.cudaMalloc(ctypes.byref(dev), cap * 4), "chroma malloc")
+        self._chroma_dev = dev
+        self._chroma_cap = cap
+    host = (ctypes.c_float * n)()
+    for i, v in enumerate(flat):
+        host[i] = float(v)
+    hold = getattr(self, "_chroma_hold", None)
+    if hold is None:
+        self._chroma_hold = hold = []
+    hold.append(host)
+    _check(cudart.cudaMemcpyAsync(
+        dev, ctypes.cast(host, ctypes.c_void_p), n * 4, 1, self.stream),
+        "chroma copy")
+    return dev
+
+
+def _free_chroma_buf(self):
+    # BUILD 339: drop the stacked chroma table. Safe when chroma was never
+    # used. Caller has the CUDA context current.
+    dev = getattr(self, "_chroma_dev", None)
+    self._chroma_hold = []
+    self._chroma_cap = 0
+    self._chroma_dev = ctypes.c_void_p()
+    if dev is None or not getattr(dev, "value", None):
+        return
+    _libs()[0].cudaFree(dev)
+
+
 # ---------------------------------------------------------------- window
 
 class SequencePlayer(QWindow):
@@ -1056,6 +1129,7 @@ class SequencePlayer(QWindow):
                 if b.value:
                     cudart.cudaFree(b)
             self.gen_bufs = []
+            _free_chroma_buf(self)
             gl.glDeleteTextures(1, ctypes.byref(self.tex))
             if getattr(self, "_cap_tex", None) is not None:
                 gl.glDeleteTextures(1, ctypes.byref(self._cap_tex))
@@ -1151,7 +1225,8 @@ class SequencePlayer(QWindow):
                                 for i in (24, 25, 26, 27))
         from keyframe import crop_edges_for_link
         # BUILD 337: chroma keyframes (snapshot[30] .. [33]); layer items
-        # gain (r, g, b, tolerance) or None ([18])
+        # gain a stack of (r, g, b, tolerance) or None ([18]). BUILD 339:
+        # every linked chroma clip above the layer, not only the nearest.
         chroma_clips = tuple(snapshot[i] if len(snapshot) > i else []
                              for i in (30, 31, 32, 33))
         from keyframe import chroma_for_link
@@ -1545,26 +1620,24 @@ class SequencePlayer(QWindow):
                               << (8 * i))
             except (TypeError, ValueError, IndexError):
                 ow, orgba = 0.0, 0
-        # BUILD 337: chroma key (r, g, b, tolerance) or None = off. The
-        # kernel punches source pixels within Euclidean distance tolerance
-        # of (r, g, b) (0..255) down to alpha 0. chroma_on 0 skips it
-        # (bit-exact with no chroma key). Jokey and rough: no spill
-        # suppression. Tolerance 80 on green 0, 255, 0 is the new-key
-        # default (a modest green-screen gag).
-        ck_on = 0
-        ck = (0.0, 0.0, 0.0, 0.0)
-        if chroma is not None:
-            try:
-                from keyframe import CHROMA_TOLERANCE_MAX
-                ckr = max(0.0, min(255.0, float(chroma[0])))
-                ckg = max(0.0, min(255.0, float(chroma[1])))
-                ckb = max(0.0, min(255.0, float(chroma[2])))
-                ckt = max(0.0, min(float(CHROMA_TOLERANCE_MAX), float(chroma[3])))
-                if ckr == ckr and ckg == ckg and ckb == ckb and ckt == ckt:
-                    ck_on = 1
-                    ck = (ckr, ckg, ckb, ckt)
-            except (TypeError, ValueError, IndexError):
-                ck_on = 0
+        # BUILD 337 / 339: chroma keys (r, g, b, tolerance), one or a stack,
+        # or None = off. The kernel punches source pixels within Euclidean
+        # distance tolerance of any key (0..255) down to alpha 0. chroma_n
+        # 0 skips it (bit-exact with no chroma key). Jokey and rough: no
+        # spill suppression. Tolerance 80 on green 0, 255, 0 is the new-key
+        # default (a modest green-screen gag). Keys combine (color A then
+        # color B).
+        rows = _chroma_key_rows(chroma)
+        ck_n = len(rows)
+        ck_ptr = 0
+        if ck_n:
+            flat = []
+            for row in rows:
+                flat.extend(row)
+            dev = _upload_chroma(self, flat)
+            ck_ptr = int(dev.value or 0)
+            if not ck_ptr:
+                ck_n = 0
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -1594,9 +1667,7 @@ class SequencePlayer(QWindow):
                  ctypes.c_float(k_), ctypes.c_float(b_), ctypes.c_float(1.0 / g_),
                  ctypes.c_float(rot_cs[0]), ctypes.c_float(rot_cs[1]),
                  ctypes.c_float(ow), ctypes.c_uint32(orgba),
-                 ctypes.c_uint32(ck_on), ctypes.c_float(ck[0]),
-                 ctypes.c_float(ck[1]), ctypes.c_float(ck[2]),
-                 ctypes.c_float(ck[3])]
+                 ctypes.c_uint32(ck_n), ctypes.c_uint64(ck_ptr)]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -1613,6 +1684,9 @@ class SequencePlayer(QWindow):
         _check(cudart.cudaEventRecord(ev, self.stream), "record")
         _check(cudart.cudaEventSynchronize(ev), "sync")
         cudart.cudaEventDestroy(ev)
+        # BUILD 339: chroma host tables are done once the stream finishes
+        if getattr(self, "_chroma_hold", None):
+            self._chroma_hold = []
 
     # ---- one frame: show the preview JPEG, or ask the worker for it
 

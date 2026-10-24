@@ -125,6 +125,8 @@ class HeadlessComposer(object):
             if self.gen_dst.value:
                 cudart.cudaFree(self.gen_dst)
                 self.gen_dst = ctypes.c_void_p()
+            from sequence_player import _free_chroma_buf
+            _free_chroma_buf(self)
             for b in self.gen_bufs:
                 if b.value:
                     cudart.cudaFree(b)

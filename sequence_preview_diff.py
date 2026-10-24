@@ -54,8 +54,11 @@ class _Effect(object):
     # BUILD 219; border px and r / g / b / a channels, BUILD 222; move x and
     # y, BUILD 294; crop_xy x and y, BUILD 295; crop_edges top / bottom /
     # left / right, BUILD 296; chroma r / g / b / tolerance, BUILD 337): linked
-    # keyframe clips indexed by link_id, as keyframe._pick_above_keyframe
-    def __init__(self, clips):
+    # keyframe clips indexed by link_id, as keyframe._pick_above_keyframe.
+    # BUILD 339: stack=True keeps every clip above the layer (chroma), so
+    # editing any of them changes the descriptor.
+    def __init__(self, clips, stack=False):
+        self.stack = bool(stack)
         self.by_link = {}
         for link_id, in_f, out_f, keys, order in clips or []:
             if link_id is None or order is None:
@@ -73,6 +76,19 @@ class _Effect(object):
             if best is None or order > best[3]:
                 best = (in_f, out_f, pts, order)
         return best
+
+    def covering(self, link_id, f, clip_order):
+        # BUILD 339: every linked clip above clip_order that covers f.
+        # Sorted so two snapshots with the same clips compare equal.
+        if link_id is None or clip_order is None:
+            return ()
+        hits = []
+        for in_f, out_f, pts, order in self.by_link.get(link_id, ()):
+            if order >= int(clip_order) or not (in_f <= f < out_f):
+                continue
+            hits.append((in_f, out_f, pts, order))
+        hits.sort(key=lambda t: (t[3], t[0], t[1], repr(t[2])))
+        return tuple(hits)
 
     def edges(self):
         out = []
@@ -126,10 +142,13 @@ class SnapshotIndex(object):
         # BUILD 295: + crop_xy x and y (snap[22], [23])
         # BUILD 296: + crop_edges top, bottom, left, right (snap[24] .. [27])
         # BUILD 337: + chroma r, g, b, tolerance (snap[30] .. [33])
-        self.effects = [_Effect(snap[i] if len(snap) > i else [])
-                        for i in (2, 3, 5, 7, 8, 9, 10, 11, 12, 13,
-                                  14, 15, 16, 17, 18, 20, 21, 22, 23,
-                                  24, 25, 26, 27, 30, 31, 32, 33)]
+        # BUILD 339: those four stack, so any linked chroma key dirties
+        _idx = (2, 3, 5, 7, 8, 9, 10, 11, 12, 13,
+                14, 15, 16, 17, 18, 20, 21, 22, 23,
+                24, 25, 26, 27, 30, 31, 32, 33)
+        _stack = set((30, 31, 32, 33))
+        self.effects = [_Effect(snap[i] if len(snap) > i else [], i in _stack)
+                        for i in _idx]
         any_solo = any(solo for _t, _e, solo, _k in rows)
         self.tracks = []    # bottom first: (kind, order, starts, clips, sorted)
         for track_id, enabled, solo, kind in reversed(rows):
@@ -198,8 +217,15 @@ class SnapshotIndex(object):
                 src = 0
             fx = []
             for e in self.effects:
-                p = e.pick(link_id, f, order)
-                fx.append(None if p is None else _bracket(p[2], f, d))
+                if e.stack:
+                    hits = e.covering(link_id, f, order)
+                    if not hits:
+                        fx.append(None)
+                    else:
+                        fx.append(tuple(_bracket(p[2], f, d) for p in hits))
+                else:
+                    p = e.pick(link_id, f, order)
+                    fx.append(None if p is None else _bracket(p[2], f, d))
             layers.append((kind, c[1], src, self.proxies.get(c[0]), conform,
                            tuple(fx)))
         return tuple(layers)

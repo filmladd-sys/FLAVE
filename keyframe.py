@@ -491,21 +491,51 @@ def crop_edges_for_link(edge_clips, clip_link_id, frame, clip_order):
 
 
 def chroma_for_link(chroma_clips, clip_link_id, frame, clip_order):
-    # BUILD 337: linked type-chroma keyframe clip above this clip (same
-    # rule as crop_edges): (r, g, b, tolerance), each channel linear
-    # between its keys and flat outside them. chroma_clips: the four lists
-    # of collect_chroma_clips, all from the same clips, so every channel
-    # picks the same clip. r / g / b are the key color (0..255) and
-    # tolerance is Euclidean distance in that RGB space. None when there
-    # is no chroma key.
-    out = []
-    for clips in chroma_clips:
-        keys = _pick_above_keyframe(clips, clip_link_id, frame, clip_order)
-        v = evaluate_keyframes(keys, frame) if keys is not None else None
-        if v is None:
-            return None
-        out.append(float(v))
-    return tuple(out)
+    # BUILD 337: linked type-chroma keyframe clips above this clip (same
+    # link-below rule as crop_edges: same link_id, track order strictly
+    # above the clip, covering frame). BUILD 339: every such clip, not
+    # only the nearest. Each entry is (r, g, b, tolerance), channels
+    # linear between that clip's keys and flat outside them. chroma_clips
+    # is the four lists from collect_chroma_clips (r, g, b, tolerance),
+    # the same clips in the same order. The blend punches every key (a
+    # pixel near any of them goes transparent). None when none qualify.
+    # Order is timeline top to bottom (smaller track order first).
+    if clip_link_id is None or clip_order is None or not chroma_clips:
+        return None
+    lists = tuple(chroma_clips)
+    if len(lists) < 4 or not lists[0]:
+        return None
+    n = min(len(lists[0]), len(lists[1]), len(lists[2]), len(lists[3]))
+    found = []
+    frame = int(frame)
+    limit = int(clip_order)
+    for i in range(n):
+        link_id, in_f, out_f, _keys, kf_order = lists[0][i]
+        if link_id is None or link_id != clip_link_id:
+            continue
+        if kf_order is None or int(kf_order) >= limit:
+            continue
+        if not (int(in_f) <= frame < int(out_f)):
+            continue
+        vals = []
+        ok = True
+        for ch in range(4):
+            ent = lists[ch][i]
+            if (ent[0] != link_id or int(ent[1]) != int(in_f)
+                    or int(ent[4]) != int(kf_order)):
+                ok = False
+                break
+            v = evaluate_keyframes(ent[3], frame)
+            if v is None:
+                ok = False
+                break
+            vals.append(float(v))
+        if ok:
+            found.append((int(kf_order), i, tuple(vals)))
+    if not found:
+        return None
+    found.sort()
+    return tuple(item[2] for item in found)
 
 
 def _xy_for_link(x_clips, y_clips, clip_link_id, frame, clip_order):

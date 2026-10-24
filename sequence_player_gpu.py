@@ -424,6 +424,10 @@ def _libs():
     cudart.cudaMemGetInfo.restype = c.c_int
     cudart.cudaMemcpy.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t, c.c_int]
     cudart.cudaMemcpy.restype = c.c_int
+    # BUILD 339: stacked chroma keys, host to device on the blend stream
+    cudart.cudaMemcpyAsync.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t,
+                                       c.c_int, c.c_void_p]
+    cudart.cudaMemcpyAsync.restype = c.c_int
     cudart.cudaMemsetAsync.argtypes = [c.c_void_p, c.c_int, c.c_size_t, c.c_void_p]
     cudart.cudaMemsetAsync.restype = c.c_int
     cudart.cudaMemcpy2DToArray.argtypes = [c.c_void_p, c.c_size_t, c.c_size_t, c.c_void_p,
@@ -569,13 +573,15 @@ GL_QUADS = 0x0007
 # clamp 0..1; 2 brightness c + brightness (-1..1), clamp 0..1; 4 gamma
 # c ** inv_gamma (inv_gamma = 1 / gamma). Back to round(c * 255). Alpha and
 # the opacity blend after it are unchanged; flags 0 skips it all.
-# BUILD 337: chroma_on / chroma_r / chroma_g / chroma_b / chroma_tol. Jokey
-# classic chroma key on the source RGB, before color and the opacity
-# blend. chroma_on 0 skips it (bit-exact). Otherwise a pixel whose
-# Euclidean distance to (chroma_r, chroma_g, chroma_b) is <= chroma_tol
-# (all in 0..255; compare squared so the kernel skips sqrt) gets alpha 0.
-# No spill suppression. Edges stay rough. The outline band is not keyed
-# (it joins at COLOR_DONE, after this test).
+# BUILD 337: jokey classic chroma key on the source RGB, before color and
+# the opacity blend. BUILD 339: chroma_n / chroma_ptr. chroma_n 0 skips it
+# (bit-exact, chroma_ptr is not read). Otherwise chroma_ptr is n tightly
+# packed keys, each four floats r, g, b, tolerance (0..255; tolerance is
+# Euclidean distance in that space). A pixel whose distance to any key is
+# <= that key's tolerance (compare squared so the kernel skips sqrt) gets
+# alpha 0. Keys combine: punching color A then color B. No spill
+# suppression. Edges stay rough. The outline band is not keyed (it joins
+# at COLOR_DONE, after this test).
 # BUILD 152: crop_y is the same real crop on y: drawn only if the source
 # pixel center lies in [crop_y, sh - crop_y] (top and bottom; picture in
 # place; <= 0 = no crop; >= sh / 2 hides the layer). The BUILD 147 y shift
@@ -605,8 +611,7 @@ PTX = b"""
     .param .u32 color_flags, .param .f32 contrast, .param .f32 brightness,
     .param .f32 inv_gamma, .param .f32 rot_cos, .param .f32 rot_sin,
     .param .f32 outline_w, .param .u32 outline_rgba,
-    .param .u32 chroma_on, .param .f32 chroma_r, .param .f32 chroma_g,
-    .param .f32 chroma_b, .param .f32 chroma_tol)
+    .param .u32 chroma_n, .param .u64 chroma_ptr)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
@@ -619,9 +624,9 @@ PTX = b"""
     .reg .f32 fcon, fbri, figm, fcc;
     .reg .f32 frc, frs, frns, fru, frv;
     .reg .f32 fow, fol, fohi, foe, fod, fodb;
-    .reg .u32 orgba, ckon;
+    .reg .u32 orgba, ckon, cki;
     .reg .f32 fckr, fckg, fckb, fckt, fcd;
-    .reg .u64 srcv, dstv, addr;
+    .reg .u64 srcv, dstv, addr, ckbase, ckaddr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
     mul.lo.u32 x, x, 256;
@@ -737,16 +742,25 @@ PTX = b"""
     @p bra BLEND;
     ld.global.u8 a, [addr+3];
 BLEND:
-    // BUILD 337: jokey chroma key. chroma_on 0 skips (bit-exact). Else a
-    // source pixel with (dr*dr + dg*dg + db*db) <= tol*tol gets alpha 0.
-    // No spill suppression.
-    ld.param.u32 ckon, [chroma_on];
+    // BUILD 339: jokey chroma stack. chroma_n 0 skips (bit-exact, pointer
+    // not read). Else each key at chroma_ptr (16 bytes: r, g, b, tol) is
+    // tested; (dr*dr + dg*dg + db*db) <= tol*tol sets alpha 0. Later keys
+    // still run, so a second color punches out too. No spill suppression.
+    ld.param.u32 ckon, [chroma_n];
     setp.eq.u32 p, ckon, 0;
     @p bra CHROMA_DONE;
-    ld.param.f32 fckr, [chroma_r];
-    ld.param.f32 fckg, [chroma_g];
-    ld.param.f32 fckb, [chroma_b];
-    ld.param.f32 fckt, [chroma_tol];
+    ld.param.u64 ckbase, [chroma_ptr];
+    mov.u32 cki, 0;
+CHROMA_LOOP:
+    setp.ge.u32 p, cki, ckon;
+    @p bra CHROMA_DONE;
+    mul.lo.u32 off32, cki, 16;
+    cvt.u64.u32 ckaddr, off32;
+    add.u64 ckaddr, ckbase, ckaddr;
+    ld.global.f32 fckr, [ckaddr];
+    ld.global.f32 fckg, [ckaddr+4];
+    ld.global.f32 fckb, [ckaddr+8];
+    ld.global.f32 fckt, [ckaddr+12];
     cvt.rn.f32.u32 fcd, r;
     sub.rn.f32 fcd, fcd, fckr;
     mul.rn.f32 fcd, fcd, fcd;
@@ -761,6 +775,8 @@ BLEND:
     mul.rn.f32 fckt, fckt, fckt;
     setp.le.f32 p, fcd, fckt;
     @p mov.u32 a, 0;
+    add.u32 cki, cki, 1;
+    bra CHROMA_LOOP;
 CHROMA_DONE:
     // BUILD 154: color keyframes on the source RGB (not alpha), before the
     // opacity / alpha blend. flags 0 (all identity): skipped, bit-exact.

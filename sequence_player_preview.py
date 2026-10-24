@@ -132,9 +132,10 @@ def resample_rgb(self, src, sw, sh, sstride, dst, dw, dh):
     # Scale an RGB device image (sw x sh, row stride sstride) into dst (dw x
     # dh, rows dw * 3 bytes) on self.stream, nearest pixel, no sync. Runs
     # the blend kernel as a plain copy: 3 bytes per pixel (opaque),
-    # opacity 1, no crop, color, rotate, outline or chroma, so every dst pixel is
-    # exactly one source pixel (the blend with alpha 255 keeps none of
-    # dst). Sampling is at pixel centers: ox / oy center the source the
+    # opacity 1, no crop, color, rotate, outline or chroma (chroma_n 0),
+    # so every dst pixel is exactly one source pixel (the blend with alpha
+    # 255 keeps none of dst). Sampling is at pixel centers: ox / oy center
+    # the source the
     # same way _blend does, inv_scale = sw / dw per axis.
     nvcuda = _libs()[1]
     c = ctypes
@@ -146,8 +147,7 @@ def resample_rgb(self, src, sw, sh, sstride, dst, dw, dh):
              c.c_float(0.0), c.c_float(0.0), c.c_uint32(0),
              c.c_float(1.0), c.c_float(0.0), c.c_float(1.0),
              c.c_float(1.0), c.c_float(0.0), c.c_float(0.0), c.c_uint32(0),
-             c.c_uint32(0), c.c_float(0.0), c.c_float(0.0), c.c_float(0.0),
-             c.c_float(0.0)]
+             c.c_uint32(0), c.c_uint64(0)]
     args = (c.c_void_p * len(ptrs))(
         *[c.cast(c.pointer(v), c.c_void_p) for v in ptrs])
     grid = (int(dw) * int(dh) + 255) // 256
