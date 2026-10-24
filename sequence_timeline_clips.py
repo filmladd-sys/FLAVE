@@ -603,8 +603,20 @@ def _clear_selection(self):
 def _select_clip(self, clip, mode):
     # mode: "normal" = clip + link partners, "solo" = only clip with
     # selection solo on, "add" = add clip and its link partners (keep
-    # existing selection; drop nothing)
-    if mode == "add":
+    # existing selection; drop nothing), "add_one" = BUILD 329 Alt+Shift:
+    # toggle ONLY this clip into / out of the multi-set (no link partners)
+    if mode == "add_one":
+        # Premiere-style additive toggle of the clicked clip alone
+        if self._selection_solo:
+            self._selection_solo = False
+        cid = clip[0]
+        if cid in self._selected_clip_ids:
+            self._selected_clip_ids.discard(cid)
+            self._selection_order = [x for x in self._selection_order if x != cid]
+        else:
+            self._selected_clip_ids.add(cid)
+            self._selection_order.append(cid)
+    elif mode == "add":
         if self._selection_solo:
             self._selection_solo = False
         members = [clip] + self._linked_clips(clip)
@@ -1723,8 +1735,9 @@ def _clip_track_id(self, clip):
 
 def _clip_press_select(self, event, press_pos):
     # BUILD 162: the click-selection part of eventFilter's left press
-    # (normal / Alt / Shift / already selected / empty space). Returns
-    # hit_clip for the caller, which still uses it after the key check.
+    # (normal / Alt / Shift / Alt+Shift / already selected / empty space).
+    # Returns hit_clip for the caller, which still uses it after the key
+    # check.
     hit_clip = self._clip_at(press_pos)
     edge_hit = self._clip_edge_at(press_pos)
     if hit_clip is None and edge_hit is not None:
@@ -1735,6 +1748,11 @@ def _clip_press_select(self, event, press_pos):
     if hit_clip is None:
         if self._x_in_clips(press_pos) >= 0:
             self._clear_selection()
+    elif (mods & Qt.AltModifier) and (mods & Qt.ShiftModifier):
+        # BUILD 329: Alt+Shift = toggle ONLY this clip into the multi-set
+        # (not its linked stack). Accumulate across stacks; toggle off if
+        # already selected.
+        self._select_clip(hit_clip, "add_one")
     elif mods & Qt.AltModifier:
         # Alt: ONLY this clip, no link partners, solo on
         self._select_clip(hit_clip, "solo")

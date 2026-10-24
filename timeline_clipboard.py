@@ -103,14 +103,9 @@ def _sequence_fps(cur, sequence_id):
 
 
 def _selection_set(tl):
-    # Same set as the Delete path: the selection plus link partners, unless
-    # selection solo (then only the selected clips)
-    ids = set(tl._selected_clip_ids)
-    if not tl._selection_solo:
-        for c in tl._selected_clips():
-            for m in tl._linked_clips(c):
-                ids.add(m[0])
-    return ids
+    # Same set as the Delete path: exactly the selection (BUILD 329: no
+    # silent expand to link partners; see delete_clip_ids).
+    return set(tl._selected_clip_ids)
 
 
 def _columns(cur, table):

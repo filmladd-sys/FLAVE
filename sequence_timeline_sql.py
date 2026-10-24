@@ -638,8 +638,9 @@ def _range_overlaps(self, cur, track_id, start, length):
 
 
 def delete_selected_clip(self):
-    # Delete key: remove every selected clip; unless selection solo, also
-    # every clip sharing a link_id with a selected clip
+    # Delete key: remove every selected clip (the multi-set as shown).
+    # Link partners are only removed when they are themselves selected
+    # (normal / Shift click add them; Alt and Alt+Shift do not).
     if not self._selected_clip_ids or self._edge_drag is not None:
         return
     ids = delete_clip_ids(self)
@@ -661,15 +662,12 @@ def delete_selected_clip(self):
 
 
 def delete_clip_ids(self):
-    # Clip ids the Delete key / Delete / Ripple Delete remove: every
-    # selected clip; unless selection solo, also every clip sharing a
-    # link_id with a selected clip
-    ids = set(self._selected_clip_ids)
-    if not self._selection_solo:
-        for c in self._selected_clips():
-            for m in self._linked_clips(c):
-                ids.add(m[0])
-    return ids
+    # Clip ids the Delete key / Delete / Ripple Delete remove: exactly
+    # the selection set. BUILD 329: no silent expand to link partners;
+    # partners are in the set already after a normal or Shift select.
+    # Alt / Alt+Shift pick individual clips, so Delete leaves unselected
+    # partners alone.
+    return set(self._selected_clip_ids)
 
 
 def delete_clip_ids_db(cur, ids):
