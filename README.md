@@ -14,7 +14,7 @@ any other AI) until it matches how *you* work -- add what you use, rip
 out what you do not. You should not need a locked installer or someone
 else's roadmap.
 
-FLAVE runs on Windows with an NVIDIA GPU today. The design should be
+FLAVE runs on Windows 10 or 11 with an NVIDIA GPU today. The design should be
 portable to Linux or Mac, but that has not been tested; see the stack
 notes below for the Windows-specific pieces.
 
@@ -29,7 +29,7 @@ be sold.
 If you have any issues, ask Grok or your own AI to step you through
 everything.
 
-- Windows
+- Windows 10 or 11
 - NVIDIA GPU with NVDEC / NVENC (device 0)
 - Python 3.11+ recommended
 - `pip install -r requirements.txt` (PySide6, numpy, PyNvVideoCodec)
@@ -47,7 +47,7 @@ says what it owns.
 
 ### 1. Stack and requirements
 
-- **OS:** Windows. The GPU code loads Windows DLLs through ctypes
+- **OS:** Windows 10 or 11. The GPU code loads Windows DLLs through ctypes
   (`nvcuda.dll`, `cudart64_*.dll`, `nvjpeg64_*.dll`, `opengl32.dll`) and
   `dark_titlebar.py` calls DWM. It will not run as-is on Linux or macOS.
   To adapt: replace the ctypes Windows DLL loads with the platform's
