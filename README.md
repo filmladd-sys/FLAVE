@@ -36,6 +36,11 @@ says what it owns.
 - **OS:** Windows. The GPU code loads Windows DLLs through ctypes
   (`nvcuda.dll`, `cudart64_*.dll`, `nvjpeg64_*.dll`, `opengl32.dll`) and
   `dark_titlebar.py` calls DWM. It will not run as-is on Linux or macOS.
+  To adapt: replace the ctypes Windows DLL loads with the platform's
+  CUDA / nvJPEG / OpenGL libraries; swap `dark_titlebar.py` (DWM) for
+  that OS's window chrome; keep an NVIDIA + NVDEC stack
+  (PyNvVideoCodec and CUDA path discovery), FFmpeg/ffprobe on PATH,
+  and an OpenGL-capable Sequence Player.
 - **GPU:** an NVIDIA card with NVDEC/NVENC. Device 0 is used everywhere.
 - **Python 3.11+ recommended** (needed for fast preview audio reads,
   `sqlite3.Connection.blobopen`). 3.8-3.10 runs (the DLL loader uses
