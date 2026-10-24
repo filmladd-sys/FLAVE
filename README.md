@@ -41,6 +41,8 @@ says what it owns.
   that OS's window chrome; keep an NVIDIA + NVDEC stack
   (PyNvVideoCodec and CUDA path discovery), FFmpeg/ffprobe on PATH,
   and an OpenGL-capable Sequence Player.
+  Sign up for Grok + Bot (or another AI) and adapt it yourself;
+  we are not promising a Linux or Mac port.
 - **GPU:** an NVIDIA card with NVDEC/NVENC. Device 0 is used everywhere.
 - **Python 3.11+ recommended** (needed for fast preview audio reads,
   `sqlite3.Connection.blobopen`). 3.8-3.10 runs (the DLL loader uses
