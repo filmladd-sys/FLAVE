@@ -199,8 +199,9 @@ _ORIG_SIZE_CACHE = {}   # original path -> (w, h) probed once
 
 def _original_size(path, w, h):
     # Original footage box: footage.width/height, else ffprobe once (cached)
+    # BUILD 324: a non-square-pixel original reports its display size
     if w and h:
-        return int(w), int(h)
+        return _stretched_size(path, (int(w), int(h)))
     if path in _ORIG_SIZE_CACHE:
         return _ORIG_SIZE_CACHE[path]
     size = None
@@ -211,8 +212,52 @@ def _original_size(path, w, h):
             size = (int(info[0]), int(info[1]))
     except Exception:
         size = None
+    size = _stretched_size(path, size)
     _ORIG_SIZE_CACHE[path] = size
     return size
+
+
+_SAR_CACHE = {}   # original path -> (coded w, h, sar_num, sar_den) or None
+
+
+def _sar_info(path):
+    # BUILD 324: ffprobe the SAR of a video original once (cached); None
+    # for stills or when unreadable (treated as square pixels)
+    if path not in _SAR_CACHE:
+        info = None
+        try:
+            from proxy_manager import is_video_path
+            from clip_proxy import probe_video_sar
+            if is_video_path(path):
+                info = probe_video_sar(path)
+        except Exception:
+            info = None
+        _SAR_CACHE[path] = info
+    return _SAR_CACHE[path]
+
+
+def _stretched_size(path, size):
+    # BUILD 324: (w, h) widened by the original's SAR (height unchanged);
+    # square pixels or no probe -> size unchanged
+    if size is None:
+        return None
+    info = _sar_info(path)
+    if info is None or info[2] == info[3]:
+        return size
+    from clip_proxy import display_width
+    return (display_width(size[0], info[2], info[3]), size[1])
+
+
+def anamorphic_size(path):
+    # BUILD 324: display (w, h) of a non-square-pixel video original, else
+    # None. Passed as the layer's orig_size so _blend stretches the decoded
+    # frame on the GPU (per-axis scale); square footage keeps None, so its
+    # math is exactly as before.
+    info = _sar_info(path)
+    if info is None or info[2] == info[3]:
+        return None
+    from clip_proxy import display_width
+    return (display_width(info[0], info[2], info[3]), info[1])
 
 
 _PROXY_SIZE_CACHE = {}  # (proxy path, mtime, bytes) -> (w, h) or None
@@ -1091,6 +1136,9 @@ class SequencePlayer(QWindow):
                     path, orig_size = pr[0], pr[1]
                     if len(pr) > 3:
                         ratio, pframes = pr[2], pr[3]
+                elif path and kind == "video":
+                    # BUILD 324: non-square-pixel original -> display size
+                    orig_size = anamorphic_size(path)
                 if path:
                     src = 0
                     if kind == "video":

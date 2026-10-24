@@ -26,7 +26,9 @@ import math
 PRESETS = (
     # BUILD 322: 480p presets, square pixels (Wide: 480 * 16 / 9 = 853.33,
     # rounded to the even 854 the encoders need; aspect 1.779 vs 1.778)
-    ("NTSC 480p (640x480)", 640, 480),
+    # BUILD 324: NTSC is the real 720x480 frame (3:2), still square pixels;
+    # non-square-pixel footage is stretched to its display size on playback
+    ("NTSC 480p (720x480)", 720, 480),
     ("Wide 480p (854x480)", 854, 480),
     ("1K Horizontal (1920x1080)", 1920, 1080),
     ("2K Horizontal (2560x1440)", 2560, 1440),

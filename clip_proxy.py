@@ -143,6 +143,54 @@ def apply_clip_proxy(timeline, clip, pct):
     timeline._after_clip_change("Clip proxy: %s" % proxy_label(pct))
 
 
+def probe_video_sar(path):
+    # BUILD 324: (width, height, sar_num, sar_den) of stream V:0 via
+    # ffprobe, or None. A missing / "N/A" / "0:1" SAR reads as 1:1.
+    flags = 0x08000000 if sys.platform.startswith("win") else 0   # CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "V:0",
+             "-show_entries", "stream=width,height,sample_aspect_ratio",
+             "-of", "default=noprint_wrappers=1", path],
+            capture_output=True, text=True, timeout=20, creationflags=flags)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    vals = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            vals[k.strip()] = v.strip()
+    try:
+        w = int(vals.get("width") or 0)
+        h = int(vals.get("height") or 0)
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    num = den = 1
+    sar = vals.get("sample_aspect_ratio") or ""
+    if ":" in sar:
+        try:
+            n, d = sar.split(":", 1)
+            n, d = int(n), int(d)
+            if n > 0 and d > 0:
+                num, den = n, d
+        except ValueError:
+            pass
+    return w, h, num, den
+
+
+def display_width(width, sar_num, sar_den):
+    # BUILD 324: square-pixel width of a frame with this SAR, rounded to
+    # even (720x480 SAR 8:9 -> 640, 32:27 -> 854; 1440x1080 4:3 -> 1920)
+    if not sar_num or not sar_den or sar_num == sar_den:
+        return int(width)
+    w = float(width) * sar_num / float(sar_den)
+    return max(2, int(w / 2.0 + 0.5) * 2)
+
+
 def probe_video_info(path):
     # (width, height, codec_name) of stream V:0 via ffprobe, or None.
     # BUILD 118: V (not v) skips attached pictures / cover art
