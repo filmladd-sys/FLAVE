@@ -151,22 +151,6 @@ def project_path_for(folder, name):
 
 
 
-def ensure_project_schema(db_path):
-    # On project open (startup autoload and File > Open), make sure tables
-    # added after the project's original create exist. CREATE IF NOT EXISTS
-    # is a no-op when the table is already there. Never raises.
-    try:
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute(KEYFRAME_CHROMA_SQL)
-            conn.commit()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        pass
-    return None
-
-
 def create_project_db(db_path):
     # Create the project database at db_path (raises on failure)
     NewProjectWindow._init_db(None, db_path)

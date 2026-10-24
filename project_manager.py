@@ -73,13 +73,6 @@ except ImportError:
 from global_settings import _get_global_setting, _set_global_setting
 
 
-def _ensure_schema_for(project_db):
-    # Project-load schema check (new_project.ensure_project_schema)
-    # before anything reads the project
-    if new_project is not None and hasattr(new_project, "ensure_project_schema"):
-        new_project.ensure_project_schema(project_db)
-
-
 def _ensure_audiotmp_for(project_db):
     # Create sibling _AudioTmp.db if missing and backfill from footage
     if not project_db:
@@ -270,7 +263,6 @@ class ProjectManager(QMainWindow):
             self.current_project = path
             self.status_label.setText(f"Project: {path}")
             self.status_bar.showMessage("Project loaded")
-            _ensure_schema_for(path)
             _ensure_audiotmp_for(path)
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
@@ -342,7 +334,6 @@ class ProjectManager(QMainWindow):
             if folder:
                 _set_global_setting("last_project_folder", folder)
             _set_global_setting("current_project", path)
-            _ensure_schema_for(path)
             _ensure_audiotmp_for(path)
             _ensure_undo_db_for(path)
             _prune_proxies_for(path)
