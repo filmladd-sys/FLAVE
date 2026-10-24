@@ -217,6 +217,12 @@ class RulerHeader(QHeaderView):
             self._scrub_x = None
             self._scrub_rem = 0.0
             self._scrub_panned = False
+            # BUILD 335: a scrubber press while playback is running stops
+            # it before the seek, so the move stays on the stopped path
+            tl = self.timeline
+            if (getattr(tl, "_playing", False) or getattr(tl, "_play_filling", False)
+                    or getattr(tl, "_play_mixing", False)):
+                tl._stop_play()
             # BUILD 130: a click inside a margin pans at once (the clicked
             # frame ends SCRUB_EDGE_PX in); holding there keeps panning
             self._edge_scrub(x)
