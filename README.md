@@ -38,6 +38,28 @@ everything.
 - Optional: `faster-whisper` for Generate Captions
 - Launch: `python project_manager.py`
 
+## First-time setup (for your AI)
+
+This section is for an AI agent, not a checklist for a first-time user
+to follow alone. Give this README to Grok + Bot (or another AI) and let
+it walk you through install and troubleshooting.
+
+- Install Python 3.11+ from python.org; enable Add to PATH (or use the
+  `py` launcher).
+- Optional: create a venv in the repo folder and activate it.
+- From the repo folder: `pip install -r requirements.txt`.
+- Put the FFmpeg `bin` folder on PATH (`ffmpeg` and `ffprobe`).
+- Install a recent NVIDIA Game Ready or Studio driver (NVDEC / NVENC).
+- CUDA runtime / nvJPEG: see Stack notes below for DLL discovery.
+- Launch from the repo folder: `python project_manager.py`.
+- Common failures an agent can check:
+  - `python` not found: try `py -3.11 project_manager.py` (or newer).
+  - Missing CUDA / nvJPEG / OpenGL DLL: driver or CUDA toolkit path.
+  - `ffmpeg` / `ffprobe` not found: PATH.
+  - Windows white for a few seconds on load: project open / restore
+    work on the GUI thread (normal for a large project).
+  - Console `nvJPEG not found, using Qt`: preview still works, slower.
+
 ## Build Notes for Agentic Coders
 
 These notes are for an AI coding agent (or a person) picking up this repo
