@@ -2,6 +2,9 @@
 
 <!-- Intro by FilmLadd goes here -->
 
+**License:** free to use and modify for non-commercial purposes with
+attribution; see [LICENSE](LICENSE). Not for sale.
+
 ## Build Notes for Agentic Coders
 
 These notes are for an AI coding agent (or a person) picking up this repo
