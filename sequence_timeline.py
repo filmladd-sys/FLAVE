@@ -915,10 +915,10 @@ class SequenceTimeline(QMainWindow):
         add_text_action = None
         x_in_clips = self._x_in_clips(pos)
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower()
-        # BUILD 297: Ripple Delete (close the gap under the mouse,
-        # ripple_gap) on every edit track again, keyframe tracks included
-        # (lost when BUILD 53 split Add Keyframe Clip off); greyed out when
-        # there is no gap to close.
+        # BUILD 297 / 340: Ripple Delete (close the gap under the mouse,
+        # ripple_gap) on every edit track, keyframe tracks included.
+        # BUILD 340 moves every clip at or past the cut, on every track.
+        # Greyed out when there is no gap to close.
         if x_in_clips >= 0 and track_type == "keyframe":
             menu.addSeparator()
             add_keyframe_action = menu.addAction("Add Keyframe Clip")

@@ -921,13 +921,17 @@ def slice_members_db(self, cur, members, split_frame, linked):
 
 
 def ripple_gap(self, track_id, click_frame):
-    # BUILD 297: the gap Ripple Delete at click_frame on one track, without
-    # changing anything. The gap runs from the end of the previous clip on
-    # the track (or 0) to the start of the next one; the clips from that
-    # one on move left, with their linked partners, by the gap clamped by
-    # ripple_moving. Returns (moving {id: clip}, delta < 0), or (None,
-    # status message) when there is nothing to close. The track menu
-    # greys out its Ripple Delete on (None, ...).
+    # BUILD 297 / 340: the gap Ripple Delete at click_frame on one track,
+    # without changing anything. The gap is the empty span on that track
+    # from the end of the previous clip (or 0) to the start of the next
+    # clip (the cut). How much to close is that span (wall - cut). BUILD
+    # 340: every clip in the sequence that starts at or after the cut then
+    # moves left by it, on every track and of every type, not only this
+    # track and not only link partners. Clamped by ripple_moving: nothing
+    # before frame 0, no overlap with a clip that stays before the cut.
+    # Returns (moving {id: clip}, delta < 0), or (None, status message)
+    # when there is nothing to close. The track menu greys out its Ripple
+    # Delete on (None, ...).
     track_clips = self.clips_by_track.get(track_id, [])
     wall = 0
     for c in track_clips:
@@ -938,18 +942,23 @@ def ripple_gap(self, track_id, click_frame):
                    key=lambda c: c[2])
     if not right:
         return None, "Ripple Delete: no clips to the right"
-    moving, delta = ripple_moving(self, right, wall - right[0][2])
+    cut = right[0][2]
+    want = wall - cut
+    if want >= 0:
+        return None, "Ripple Delete: no gap to close"
+    movers = [c for clips in self.clips_by_track.values() for c in clips
+              if c[2] >= cut]
+    moving, delta = ripple_moving(self, movers, want, expand_links=False)
     if delta >= 0:
         return None, "Ripple Delete: no gap to close"
     return moving, delta
 
 
 def ripple_delete(self, track_id, click_frame):
-    # Close the gap at click_frame on one track by moving the clips to its
-    # right left until the first one hits the previous clip's end (or 0)
-    # (ripple_gap). Linked partners (same link_id) move by the same delta.
-    # Footage, caption and keyframe clips (BUILD 297: the keyframe track
-    # menu lists it again) all move; one undo step.
+    # Close the gap at click_frame (ripple_gap). BUILD 340: every clip
+    # that starts at or after the cut moves left by that gap, on every
+    # track. Footage, caption, text and keyframe clips all move; one
+    # undo step.
     moving, delta = ripple_gap(self, track_id, click_frame)
     if moving is None:
         self.status_bar.showMessage(delta, 3000)
@@ -976,15 +985,21 @@ def ripple_delete(self, track_id, click_frame):
         f"Ripple Delete: moved {len(moving)} clip(s) by {delta} frames")
 
 
-def ripple_moving(self, right, delta, gone=()):
+def ripple_moving(self, right, delta, gone=(), expand_links=True):
     # Ripple rules shared by both Ripple Deletes. Moving set: the right
     # side clips plus their link partners (same link_id, any track), minus
-    # gone (clips being deleted). delta (negative) is clamped: nothing
-    # before 0, no overlap with a clip that is not moving (gone clips do
-    # not block). Returns (moving {id: clip}, int delta).
+    # gone (clips being deleted). BUILD 340: expand_links False keeps
+    # exactly the clips passed in (gap Ripple Delete passes every clip
+    # that starts at or past the cut, so a partner before the cut stays
+    # put and a partner past the cut is already in the set). delta
+    # (negative) is clamped: nothing before 0, no overlap with a clip
+    # that is not moving (gone clips do not block). Returns
+    # (moving {id: clip}, int delta).
     moving = {}
     for c in right:
         moving[c[0]] = c
+        if not expand_links:
+            continue
         for p in self._linked_clips(c):
             if p[0] not in gone:
                 moving[p[0]] = p
