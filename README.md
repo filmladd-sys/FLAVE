@@ -31,8 +31,9 @@ everything.
 
 - Windows 10 or 11
 - NVIDIA GPU with NVDEC / NVENC (device 0)
-- Python 3.11+ recommended
-- `pip install -r requirements.txt` (PySide6, numpy, PyNvVideoCodec)
+- Python 3.14.8 recommended (tested on that)
+- Use a sandboxed venv, then `pip install -r requirements.txt`
+  (PySide6, numpy, PyNvVideoCodec)
 - FFmpeg and ffprobe on PATH
 - CUDA runtime and nvJPEG DLLs (as needed for GPU decode / preview)
 - Optional: `faster-whisper` for Generate Captions
@@ -44,16 +45,19 @@ This section is for an AI agent, not a checklist for a first-time user
 to follow alone. Give this README to Grok + Bot (or another AI) and let
 it walk you through install and troubleshooting.
 
-- Install Python 3.11+ from python.org; enable Add to PATH (or use the
-  `py` launcher).
-- Optional: create a venv in the repo folder and activate it.
-- From the repo folder: `pip install -r requirements.txt`.
+- Install Python 3.14.8 from python.org; enable Add to PATH (or use
+  the `py` launcher).
+- From the repo folder, create and activate a venv (sandboxed
+  install for newbies):
+  `py -3.14 -m venv .venv` then
+  `.venv\Scripts\activate`.
+- With the venv active: `pip install -r requirements.txt`.
 - Put the FFmpeg `bin` folder on PATH (`ffmpeg` and `ffprobe`).
 - Install a recent NVIDIA Game Ready or Studio driver (NVDEC / NVENC).
 - CUDA runtime / nvJPEG: see Stack notes below for DLL discovery.
 - Launch from the repo folder: `python project_manager.py`.
 - Common failures an agent can check:
-  - `python` not found: try `py -3.11 project_manager.py` (or newer).
+  - `python` not found: try `py -3.14 project_manager.py`.
   - Missing CUDA / nvJPEG / OpenGL DLL: driver or CUDA toolkit path.
   - `ffmpeg` / `ffprobe` not found: PATH.
   - Windows white for a few seconds on load: project open / restore
@@ -80,10 +84,10 @@ says what it owns.
   Sign up for Grok + Bot (or another AI) and adapt it yourself;
   we are not promising a Linux or Mac port.
 - **GPU:** an NVIDIA card with NVDEC/NVENC. Device 0 is used everywhere.
-- **Python 3.11+ recommended** (needed for fast preview audio reads,
-  `sqlite3.Connection.blobopen`). 3.8-3.10 runs (the DLL loader uses
-  `os.add_dll_directory`), but the preview audio mix is slow on long
-  sources.
+- **Python 3.14.8 recommended** (tested on that). Fast preview audio
+  reads need 3.11+ (`sqlite3.Connection.blobopen`). 3.8-3.10 runs
+  (the DLL loader uses `os.add_dll_directory`), but the preview
+  audio mix is slow on long sources.
 - **Python packages:** see `requirements.txt`. Core install:
   `pip install -r requirements.txt` (PySide6, numpy, PyNvVideoCodec).
   The third-party imports are:
