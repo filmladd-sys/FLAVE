@@ -5,6 +5,11 @@
 # preview pauses and the audio mixes; RenderJob.on_progress, throttled).
 # BUILD 117: Codec choice H.264 (h264_nvenc / libx264, High) or H.265
 # (hevc_nvenc / libx265, Main, -tag:v hvc1); default output is a full path.
+# BUILD 344: that default is {ProjectName}_{SequenceName}_vNN.mp4 (the
+# sequence name, not the sequence id). NN starts at 01 and is one higher
+# than any vNN already in the folder for that name. 'Export subtitles as
+# .srt' writes the same stem as an .srt beside the mp4, from enabled
+# caption tracks. No cues: no .srt, and the render still succeeds.
 # One window per sequence, opened from the Sequence Timeline 'Render' menu.
 # Video: the preview composite (timeline_snapshot(tl, use_proxies=False),
 # same CUDA blend_layer, scale / position / opacity keyframes) run on the
@@ -102,19 +107,35 @@ def _sanitize(name):
         return s.strip(" ._") or "sequence"
 
 
+def _output_sequence_stem(sequence_id, sequence_name):
+    # File-name piece for the sequence. A name is kept readable: only
+    # characters illegal in a Windows file name are replaced (spaces stay).
+    # No name: the sequence id, so a project with no sequence name still
+    # gets a unique default (Flave_1_v01.mp4).
+    name = (sequence_name or "").strip()
+    if not name:
+        try:
+            return str(int(sequence_id))
+        except (TypeError, ValueError):
+            return "sequence"
+    return _sanitize(name)
+
+
 def next_output_path(project_db, sequence_id, sequence_name=""):
-    # BUILD 224: default render output, in the project file's folder:
-    # {ProjectName}_{sequence_id}_vNN.mp4 with NN = 1 + the highest vNN
-    # already in that folder for this project + sequence (case-insensitive;
-    # gaps are not reused; at least 2 digits, v100 after v99). Shown with
-    # forward slashes (C:/Videos/test7_3_v02.mp4); Windows and ffmpeg accept
-    # them. No project path: bare '<sequence name>_v01.mp4'.
+    # Default render output, in the project file's folder:
+    # {ProjectName}_{SequenceName}_vNN.mp4. NN is at least two digits, one
+    # higher than the highest vNN already in that folder for this project
+    # and sequence name (case-insensitive; a missing number is not reused,
+    # so v01 plus v03 yields v04). Shown with forward slashes
+    # (P:/Flave/Flave_My Seq_v02.mp4); Windows and ffmpeg accept them.
+    # No project path: bare '<sequence name>_v01.mp4'.
     if not project_db:
         return "%s_v01.mp4" % _sanitize(sequence_name)
     import re
     from sequence_preview import project_name
     folder = os.path.dirname(os.path.abspath(project_db))
-    base = "%s_%d" % (project_name(project_db), int(sequence_id))
+    stem = _output_sequence_stem(sequence_id, sequence_name)
+    base = "%s_%s" % (project_name(project_db), stem)
     pat = re.compile(r"^%s_v(\d+)\.mp4$" % re.escape(base), re.IGNORECASE)
     top = 0
     try:
@@ -187,6 +208,33 @@ def srt_text(captions, fps):
         t1 = (int(start) + int(length)) / fps
         out.append("%d\n%s --> %s\n%s\n" % (n, _srt_time(t0), _srt_time(t1), body))
     return "\n".join(out), n
+
+
+def srt_sidecar_path(out_path):
+    # Flave_MySeq_v01.mp4 -> Flave_MySeq_v01.srt, same folder. A video path
+    # that already ends in .srt gets an extra suffix so the subtitle file
+    # does not replace the rendered video.
+    path = os.path.splitext(out_path)[0] + ".srt"
+    if os.path.normcase(os.path.normpath(path)) == os.path.normcase(
+            os.path.normpath(out_path)):
+        path = out_path + ".srt"
+    return path
+
+
+def write_srt_export(out_path, captions, fps, enabled=True):
+    # Export-subtitles checkbox. Off: write nothing. On, with cues: write
+    # the sidecar and return (path, cue count). On, with no cues: write
+    # nothing and return (None, 0); the render still succeeds. OSError
+    # propagates so the caller can keep the video.
+    if not enabled:
+        return None, 0
+    text, n = srt_text(captions, fps)
+    if n <= 0:
+        return None, 0
+    path = srt_sidecar_path(out_path)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    return path, n
 
 
 def write_wav(path, mono_pcm, stereo):
@@ -700,6 +748,17 @@ class RenderJob(object):
                      ("stereo" if p["stereo"] else "mono") if wav else "no audio"]
             if srt:
                 parts.append("captions" + (" (%s)" % lang if lang else ""))
+            # BUILD 344: sidecar .srt only after the mp4 exists, and only
+            # when the checkbox is on. No cues, or a write error, leaves
+            # the finished video in place.
+            if p.get("export_srt"):
+                try:
+                    side, _n = write_srt_export(
+                        out_path, p.get("captions") or [], p["fps"], enabled=True)
+                except OSError:
+                    parts.append("srt not written")
+                else:
+                    parts.append("srt" if side else "no srt cues")
             return True, "Rendered %s\n%s, %.1f s" % (out_path, ", ".join(parts), el)
         finally:
             self.proc = None
@@ -766,8 +825,10 @@ def _make_window_class():
                 project_db = timeline._project_db()
             except Exception:
                 project_db = ""
-            # BUILD 224: next free {ProjectName}_{sequence_id}_vNN.mp4; refilled
-            # by refresh_output_path (window shown again, render finished)
+            # BUILD 344: next free {ProjectName}_{SequenceName}_vNN.mp4;
+            # refilled by refresh_output_path (window shown again, render
+            # finished). A path the user typed is replaced only then, same
+            # as before.
             self.out_edit = QLineEdit(
                 next_output_path(project_db, self.sequence_id, self.seq_name))
             self.out_edit.setToolTip("A bare name or relative path is saved in the "
@@ -807,6 +868,11 @@ def _make_window_class():
             form.addRow("Audio", audio_row)
             self.caps_check = QCheckBox("Include captions")
             form.addRow("", self.caps_check)
+            self.srt_check = QCheckBox("Export subtitles as .srt")
+            self.srt_check.setToolTip(
+                "Write an .srt next to the video, same name, from this "
+                "sequence's caption clips. Skipped when there are no captions.")
+            form.addRow("", self.srt_check)
             self.deint_check = QCheckBox("MKV: Use 100% deinterlaced proxies")
             self.deint_check.setToolTip(
                 "MKV clips with a 100% deinterlaced (or inverse telecine) proxy "
@@ -837,13 +903,14 @@ def _make_window_class():
             outer.addWidget(self.progress_bar)
             outer.addStretch(1)
             self.setCentralWidget(central)
-            self.resize(520, 330)
+            self.resize(520, 360)
 
         # ---- render start (GUI thread)
 
         def refresh_output_path(self):
-            # BUILD 224: put the next free version in the Output field
-            # (replaces any typed path); not while a render runs
+            # Put the next free version in the Output field (replaces any
+            # typed path); not while a render runs. Same times as before:
+            # the window is shown again, or a render finishes.
             if self.job is not None:
                 return
             try:
@@ -936,7 +1003,8 @@ def _make_window_class():
                 project_db = tl._project_db()
                 total = render_length_frames(project_db, self.sequence_id)
                 caps, langs = ([], [])
-                if self.caps_check.isChecked():
+                export_srt = self.srt_check.isChecked()
+                if self.caps_check.isChecked() or export_srt:
                     caps, langs = load_render_captions(project_db, self.sequence_id)
                 snapshot = timeline_snapshot(
                     tl, use_proxies=False, render_deint=self.deint_check.isChecked())
@@ -965,6 +1033,7 @@ def _make_window_class():
                     "faststart": self.fast_check.isChecked(),
                     "stereo": self.stereo_radio.isChecked(),
                     "captions_on": self.caps_check.isChecked(),
+                    "export_srt": export_srt,
                     "captions": caps, "languages": langs,
                     "chunk": chunk, "cuda": True,
                 }
