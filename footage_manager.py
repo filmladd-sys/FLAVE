@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QPoint, QMimeData
 from PySide6.QtGui import QAction, QDrag, QCursor
 
-FPS_COL = 10   # BUILD 272: logical column of FPS (shown after Size)
+PXA_COL = 10  # BUILD 327: logical column of PxA (after Codec)
+FPS_COL = 11   # BUILD 272: logical column of FPS (shown after Size)
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
@@ -199,13 +200,13 @@ class FootageManager(QMainWindow):
 
         self.table = FootageTable(self)
         # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Proxy Default, 4 Type,
-        # 5 Size, 6 Length, 7 Height, 8 Width, 9 Codec, 10 FPS (appended so
-        # the index-based handlers above are unchanged; FPS is shown right
-        # after Size by moving its header section, BUILD 272)
-        self.table.setColumnCount(11)
+        # 5 Size, 6 Length, 7 Height, 8 Width, 9 Codec, 10 PxA, 11 FPS
+        # (FPS is appended and shown right after Size by moving its header
+        # section, BUILD 272; PxA sits after Codec, BUILD 327)
+        self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels(
             ["Icon", "Name", "#Proxies", "Proxy Default", "Type", "Size", "Length",
-             "Height", "Width", "Codec", "FPS"])
+             "Height", "Width", "Codec", "PxA", "FPS"])
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -369,7 +370,8 @@ class FootageManager(QMainWindow):
         self.status_bar.showMessage(f"{len(rows)} footage item(s)")
 
     def _media_info(self):
-        # {footage_id: (height, width, codec, fps)}; {} on a read error.
+        # {footage_id: (height, width, codec, fps, pixel_aspect)}; {} on a
+        # read error. pixel_aspect is the stored DB text (or None).
         # BUILD 272: video footage imported before fps was stored is probed
         # once here (ffprobe) and its fps saved.
         try:
@@ -390,7 +392,8 @@ class FootageManager(QMainWindow):
             return {}
         from footage_importer import IMAGE_EXTS, store_footage_fps
         from clip_proxy import (parse_pixel_aspect, cached_video_sar,
-                                display_width, write_footage_pixel_aspect)
+                                display_width, write_footage_pixel_aspect,
+                                format_pixel_aspect)
         info = {}
         for fid, h, w, codec, fps, ftype, path, pa in rows:
             if (fps is None and h is not None and path
@@ -410,9 +413,10 @@ class FootageManager(QMainWindow):
                         parsed = (sar[2], sar[3])
                         write_footage_pixel_aspect(
                             self.project_db, fid, sar[2], sar[3])
+                        pa = format_pixel_aspect(sar[2], sar[3])
                 if parsed is not None and parsed[0] != parsed[1]:
                     w = display_width(w, parsed[0], parsed[1])
-            info[int(fid)] = (h, w, codec, fps)
+            info[int(fid)] = (h, w, codec, fps, pa)
         return info
 
     def _set_media_info(self, row, footage_id, items, info):
@@ -425,6 +429,12 @@ class FootageManager(QMainWindow):
             item = QTableWidgetItem("" if v is None else str(v))
             item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 7 + k, item)
+        # BUILD 327: PxA from footage.pixel_aspect (DB only, no re-probe);
+        # blank for stills / audio / NULL, same as Codec and FPS
+        pa = vals[4] if vals is not None and len(vals) > 4 else None
+        item = QTableWidgetItem("" if not pa else str(pa))
+        item.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(row, PXA_COL, item)
         # BUILD 272: FPS, up to 3 decimals without trailing zeros (29.97,
         # 23.976, 30); empty for images, audio and unknown rates
         fps = vals[3] if vals is not None and len(vals) > 3 else None
