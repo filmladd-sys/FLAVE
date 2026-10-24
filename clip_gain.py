@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
 )
 
 GAIN_MIN_DB = -96.0
-GAIN_MAX_DB = 12.0
+# BUILD 341: Gain maximum is 120 dB
+GAIN_MAX_DB = 120.0
 
 
 def read_clip_gain(project_db, clip_id):
