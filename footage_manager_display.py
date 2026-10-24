@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt, QRect, QPoint
 
 
 IMAGE_EXTS = {"png", "jpg", "jpeg", "bmp", "gif", "webp"}
-VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "m4v"}
+VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "m4v", "webm"}
 AUDIO_EXTS = {"mp3", "wav", "aac", "flac", "m4a", "ogg"}
 
 

@@ -19,7 +19,7 @@ PXA_COL = 10  # BUILD 327: logical column of PxA (after Codec)
 FPS_COL = 11   # BUILD 272: logical column of FPS (shown after Size)
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
-VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
+VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v", ".webm")
 
 
 def footage_usage(cur, footage_id):
@@ -298,7 +298,7 @@ class FootageManager(QMainWindow):
             self,
             "Import Footage",
             start_dir,
-            "Media Files (*.mp4 *.mov *.mkv *.avi *.mp3 *.wav *.png *.jpg *.jpeg);;All Files (*)"
+            "Media Files (*.mp4 *.mov *.mkv *.avi *.webm *.mp3 *.wav *.png *.jpg *.jpeg);;All Files (*)"
         )
         if not paths:
             return

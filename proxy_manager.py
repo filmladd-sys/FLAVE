@@ -283,7 +283,7 @@ def add_proxy_row(db_path, footage_id, percentage):
 
 # ---- video proxies (FFmpeg CUDA decode + scale_cuda + hevc_nvenc, BUILD 87)
 
-_VIDEO_EXTS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
+_VIDEO_EXTS = (".mov", ".mp4", ".mkv", ".avi", ".m4v", ".webm")
 
 
 def is_video_path(path):

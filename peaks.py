@@ -18,7 +18,7 @@ PEAKS_SAMPLE_RATE = 48000
 SAMPLES_PER_BUCKET = PEAKS_SAMPLE_RATE // PEAKS_PER_SECOND   # 480
 
 PEAK_AUDIO_EXTS = {"mp3", "wav", "aac", "flac", "m4a", "ogg"}
-PEAK_VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "m4v"}
+PEAK_VIDEO_EXTS = {"mov", "mp4", "mkv", "avi", "m4v", "webm"}
 
 # peaks table (project db): defined in new_project.py
 

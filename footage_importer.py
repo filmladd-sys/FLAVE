@@ -6,7 +6,7 @@ import os
 import sqlite3
 import subprocess
 
-_VISUAL_EXTS = {"mov", "mp4", "mkv", "avi", "m4v",
+_VISUAL_EXTS = {"mov", "mp4", "mkv", "avi", "m4v", "webm",
                 "png", "jpg", "jpeg", "bmp", "gif", "webp"}
 
 

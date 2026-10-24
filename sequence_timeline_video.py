@@ -3,7 +3,7 @@
 import os
 from PySide6.QtCore import Qt
 
-VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v")
+VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v", ".webm")
 
 
 def out_frame_for(in_frame, length_frames):
