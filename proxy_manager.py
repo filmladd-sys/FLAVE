@@ -671,12 +671,15 @@ def _ffmpeg_error_text(code, cmd, err, title=None):
         head, code, subprocess.list2cmdline(cmd), tail)
 
 
-def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="normal"):
+def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="normal",
+                         cancelled=None):
     # Run ffmpeg; on success save the Proxies row. Returns (ok, message).
     # BUILD 121: GPU command first unless the ffprobe codec / pix_fmt is not
     # NVDEC-decodable (then CPU decode + CPU scale only). A GPU failure whose
     # stderr names a filter / hwaccel error is retried once on the CPU path
     # (partial output deleted first); both failing shows both commands.
+    # BUILD 333: cancelled() True -> drop partial, return "cancelled",
+    # no CPU retry.
     src, _name = footage_source(db_path, footage_id)
     if not src or not os.path.isfile(src):
         return False, "Source file not found:\n%s" % src
@@ -700,11 +703,19 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="norma
         print("WORKER proxy: %s -> CPU decode + CPU scale (%s)"
               % (os.path.basename(src), note))
     # print("PROXY cmd: %s" % " ".join(cmd))
+    def _was_cancelled():
+        return cancelled is not None and cancelled()
+
     code, err = _run_proxy_ffmpeg(cmd, wait)
     if code is None:
         return False, "Could not start ffmpeg: %s" % err
+    if _was_cancelled():
+        _remove_partial(out)
+        return False, "cancelled"
     if not _proxy_ok(code, out):
         _remove_partial(out)
+        if _was_cancelled():
+            return False, "cancelled"
         pat = is_gpu_failure(err) if fallback is not None else None
         if pat is None:
             return False, _ffmpeg_error_text(code, cmd, err)
@@ -712,6 +723,9 @@ def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="norma
               "retrying with CPU decode + CPU scale" % (time.perf_counter() - t0, code, pat))
         t1 = time.perf_counter()
         code2, err2 = _run_proxy_ffmpeg(fallback, wait)
+        if _was_cancelled():
+            _remove_partial(out)
+            return False, "cancelled"
         if code2 is None:
             return False, (_ffmpeg_error_text(code, cmd, err, "GPU attempt") +
                            "\n\nCPU fallback: could not start ffmpeg: %s" % err2)
@@ -854,8 +868,17 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.gen_all_btn = QPushButton("Generate All")
             self.gen_all_btn.clicked.connect(self._generate_all)
             btn_row.addWidget(self.gen_all_btn)
+            # BUILD 333: Cancel only while generating
+            self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn.clicked.connect(self._cancel_generate)
+            self.cancel_btn.setVisible(False)
+            btn_row.addWidget(self.cancel_btn)
             btn_row.addStretch(1)
             layout.addLayout(btn_row)
+            self._blocked_windows = []
+            self._cancel_requested = False
+            self._ffmpeg_proc = None
+            self._saved_modality = None
             self.combo.currentIndexChanged.connect(self._fill_modes)
             self.mode_combo.currentIndexChanged.connect(self._update_button)
             self.table = QTableWidget(0, 4)
@@ -969,20 +992,26 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             if pct is None or getattr(self, "_generating", False):
                 return
             src_path, _n = footage_source(db_path, footage_id)
-            if is_video_path(src_path):
-                ok, out = self._generate_video(int(pct), mode)
-                # BUILD 122: success -> footage Proxy Default = this percent
-                set_default_after_generate(db_path, footage_id, int(pct), ok,
-                                           out if ok else None)
-            else:
-                # Images: BUILD 82 placeholder row only (no file written)
-                try:
-                    add_proxy_row(db_path, footage_id, int(pct))
-                except Exception as e:
-                    show_message(self, "Proxy Manager",
-                                        "Could not add proxy: %s" % e)
-                    return
-                set_default_after_generate(db_path, footage_id, int(pct), True)
+            self._begin_generate()
+            try:
+                if is_video_path(src_path):
+                    ok, out = self._generate_video(int(pct), mode)
+                    if ok:
+                        set_default_after_generate(
+                            db_path, footage_id, int(pct), True, out)
+                    elif out != "cancelled":
+                        show_message(self, "Proxy Manager", out)
+                else:
+                    # Images: BUILD 82 placeholder row only (no file written)
+                    try:
+                        add_proxy_row(db_path, footage_id, int(pct))
+                    except Exception as e:
+                        show_message(self, "Proxy Manager",
+                                            "Could not add proxy: %s" % e)
+                        return
+                    set_default_after_generate(db_path, footage_id, int(pct), True)
+            finally:
+                self._end_generate()
             # on_change: Footage Manager refresh (Proxy Default / #Proxies)
             self._reload()
             if on_change is not None:
@@ -994,34 +1023,33 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
         def _generate_all(self):
             # BUILD 332: walk every missing percentage/mode and reuse the
             # same generate path as Generate; skip sizes already present.
+            # BUILD 333: app-wide busy + Cancel stops the queue.
             if getattr(self, "_generating", False):
                 return
             pending = self._pending_pairs()
             if not pending:
                 return
             from PySide6.QtWidgets import QApplication
-            from PySide6.QtCore import Qt
             src_path, _n = footage_source(db_path, footage_id)
-            self._generating = True
-            self.gen_btn.setEnabled(False)
-            self.gen_all_btn.setEnabled(False)
-            self.gen_btn.setText("Generating")
-            self.gen_all_btn.setText("Generating")
-            self.combo.setEnabled(False)
-            self.mode_combo.setEnabled(False)
-            self.setCursor(Qt.WaitCursor)
+            self._begin_generate()
             try:
                 for pct, mode in pending:
+                    if getattr(self, "_cancel_requested", False):
+                        break
                     QApplication.processEvents()
+                    if getattr(self, "_cancel_requested", False):
+                        break
                     if is_video_path(src_path):
                         ok, out = self._generate_video(int(pct), mode)
-                        set_default_after_generate(
-                            db_path, footage_id, int(pct), ok,
-                            out if ok else None)
-                        if not ok:
+                        if ok:
+                            set_default_after_generate(
+                                db_path, footage_id, int(pct), True, out)
+                            self._have.add((int(pct), mode))
+                        elif out == "cancelled":
+                            break
+                        else:
                             show_message(self, "Proxy Manager", out)
                             break
-                        self._have.add((int(pct), mode))
                     else:
                         try:
                             add_proxy_row(db_path, footage_id, int(pct))
@@ -1033,60 +1061,128 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                             db_path, footage_id, int(pct), True)
                         self._have.add((int(pct), mode))
             finally:
-                self.unsetCursor()
-                self._generating = False
-                self.gen_btn.setText("Generate")
-                self.gen_all_btn.setText("Generate All")
-                self.combo.setEnabled(True)
-                self.mode_combo.setEnabled(True)
+                self._end_generate()
                 self._reload()
-                self._update_button()
                 if on_change is not None:
                     try:
                         on_change()
                     except Exception:
                         pass
 
-        def _generate_video(self, pct, mode="normal"):
+        def _begin_generate(self):
+            # BUILD 333: app-wide block (other top-levels off, this window
+            # ApplicationModal, override wait cursor) and show Cancel.
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import Qt
+            self._generating = True
+            self._cancel_requested = False
+            self._ffmpeg_proc = None
+            self.gen_btn.setEnabled(False)
+            self.gen_all_btn.setEnabled(False)
+            self.gen_btn.setText("Generating")
+            self.gen_all_btn.setText("Generating")
+            self.combo.setEnabled(False)
+            self.mode_combo.setEnabled(False)
+            self.all_combo.setEnabled(False)
+            self.all_btn.setEnabled(False)
+            self.table.setEnabled(False)
+            self.cancel_btn.setVisible(True)
+            self.cancel_btn.setEnabled(True)
+            self.cancel_btn.setCursor(Qt.ArrowCursor)
+            self._blocked_windows = []
+            for w in QApplication.topLevelWidgets():
+                if w is not self and w.isEnabled():
+                    w.setEnabled(False)
+                    self._blocked_windows.append(w)
+            self._saved_modality = self.windowModality()
+            self.setWindowModality(Qt.ApplicationModal)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self.raise_()
+            self.activateWindow()
+
+        def _end_generate(self):
+            # BUILD 333: hide Cancel, unblock other windows, restore UI
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import Qt
+            self._ffmpeg_proc = None
+            self._cancel_requested = False
+            self._generating = False
+            self.cancel_btn.setVisible(False)
+            self.gen_btn.setText("Generate")
+            self.gen_all_btn.setText("Generate All")
+            self.combo.setEnabled(True)
+            self.mode_combo.setEnabled(True)
+            self.all_combo.setEnabled(True)
+            self.all_btn.setEnabled(True)
+            self.table.setEnabled(True)
+            for w in self._blocked_windows:
+                try:
+                    w.setEnabled(True)
+                except RuntimeError:
+                    pass
+            self._blocked_windows = []
+            if self._saved_modality is not None:
+                self.setWindowModality(self._saved_modality)
+                self._saved_modality = None
+            else:
+                self.setWindowModality(Qt.NonModal)
+            QApplication.restoreOverrideCursor()
+            self.unsetCursor()
+            self._update_button()
+
+        def _cancel_generate(self):
+            # BUILD 333: stop current ffmpeg and the rest of Generate All
+            if not getattr(self, "_generating", False):
+                return
+            self._cancel_requested = True
+            proc = getattr(self, "_ffmpeg_proc", None)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+        def _generate_video(self, pct, mode="normal"):
+            # Busy / Cancel / block are owned by _begin_generate (caller).
+            from PySide6.QtWidgets import QApplication
 
             def wait(proc):
+                self._ffmpeg_proc = proc
                 while proc.poll() is None:
+                    if getattr(self, "_cancel_requested", False):
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        for _ in range(40):
+                            if proc.poll() is not None:
+                                break
+                            QApplication.processEvents()
+                            time.sleep(0.05)
+                        if proc.poll() is None:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                        break
                     QApplication.processEvents()
                     time.sleep(0.05)
+                self._ffmpeg_proc = None
 
-            # Busy state on this window only (other windows stay usable)
-            manage = not getattr(self, "_generating", False)
-            if manage:
-                self._generating = True
-                self.gen_btn.setEnabled(False)
-                self.gen_all_btn.setEnabled(False)
-                self.gen_btn.setText("Generating")
-                self.gen_all_btn.setText("Generating")
-                self.combo.setEnabled(False)
-                self.mode_combo.setEnabled(False)
-                self.setCursor(Qt.WaitCursor)
-            ok, msg = False, ""
             try:
-                try:
-                    ok, msg = generate_video_proxy(db_path, footage_id, pct, wait, mode)
-                except Exception as e:
-                    ok, msg = False, "Proxy generation failed: %s" % e
-            finally:
-                if manage:
-                    self.unsetCursor()
-                    self._generating = False
-                    self.gen_btn.setText("Generate")
-                    self.gen_all_btn.setText("Generate All")
-                    self.combo.setEnabled(True)
-                    self.mode_combo.setEnabled(True)
-                    self._update_button()
-            if not ok and manage:
-                show_message(self, "Proxy Manager", msg)
+                ok, msg = generate_video_proxy(
+                    db_path, footage_id, pct, wait, mode,
+                    cancelled=lambda: getattr(self, "_cancel_requested", False))
+            except Exception as e:
+                ok, msg = False, "Proxy generation failed: %s" % e
             return ok, msg
 
         def closeEvent(self, event):
+            # BUILD 333: closing while generating cancels; stay open until done
+            if getattr(self, "_generating", False):
+                self._cancel_generate()
+                event.ignore()
+                return
             try:
                 _open_windows.remove(self)
             except ValueError:
