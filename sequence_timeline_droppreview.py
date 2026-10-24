@@ -1,12 +1,12 @@
 # sequence_timeline_droppreview.py
-# BUILD 125: drop preview boxes while footage from the Footage Manager is
+# Drop preview boxes while footage from the Footage Manager is
 # dragged over the Sequence Timeline. Preview only: drop_footage
 # (sequence_timeline_sql.py) still decides everything. The math mirrors it:
 #   row = table.rowAt(y); x_in_clips = x - Clips column position
 #   start = max(0, view_start_frame + int(x_in_clips / pixels_per_frame))
 #   (no snapping in drop_footage, so none here)
 #   image footage -> image tracks only; video -> video; audio -> audio
-#   video length (BUILD 301): footage_length_frames (footage.duration,
+# video length: footage_length_frames (footage.duration
 #     else peaks, else 1 s) cut to the room before the next clip by
 #     fit_video_drop; a linked audio clip (peaks exist and the sequence has
 #     an audio track) goes on _nearest_free_track, below first, then above,

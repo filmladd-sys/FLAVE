@@ -1,5 +1,5 @@
 # captions_generate.py
-# Generate Captions (BUILD 225): transcribe one audio clip with faster-whisper
+# Generate Captions: transcribe one audio clip with faster-whisper
 # (local) and group the words into short caption clips. No Qt here; the
 # Sequence Timeline wiring is generate_captions in
 # sequence_timeline_captions.py.
@@ -14,7 +14,7 @@
 # after a word ending a sentence, or when the next word would pass
 # MAX_WORDS words or MAX_SECONDS. ASCII only.
 #
-# Console log (BUILD 275): lines prefixed "[captions]" report the library
+# Console log: lines prefixed "[captions]" report the library
 # versions, CUDA device count, the device / compute type tried, the full
 # error and traceback when CUDA fails, model load time, audio source and
 # load time, progress at most every PROGRESS_LOG_S seconds and a summary.
@@ -41,7 +41,7 @@ LANGUAGE_639_2 = {"en": "eng", "es": "spa", "fr": "fra", "de": "deu",
 
 INSTALL_HINT = "pip install faster-whisper"
 
-# BUILD 231: approximate download size per model, for the download prompt
+# Approximate download size per model, for the download prompt
 MODEL_SIZES = {"tiny": "75 MB", "base": "145 MB", "small": "460 MB",
                "medium": "1.5 GB", "large-v3": "3 GB", "large-v3-turbo": "1.6 GB"}
 
@@ -60,7 +60,7 @@ def _log(msg):
         pass
 
 
-# BUILD 276: Windows only. The nvidia-cublas-cu12 / nvidia-cudnn-cu12 pip
+# Windows only. The nvidia-cublas-cu12 / nvidia-cudnn-cu12 pip
 # wheels put their DLLs under <site-packages>/nvidia/<package>/bin (or lib),
 # which the Windows DLL search does not include, so CTranslate2's lazy load
 # of cublas64_12.dll fails and transcription falls back to the CPU.
@@ -351,7 +351,7 @@ def model_present(name=WHISPER_MODEL):
                               ("model.bin", "config.json", "tokenizer.json"))
 
 
-# BUILD 232: the files faster-whisper's download_model fetches
+# The files faster-whisper's download_model fetches
 MODEL_PATTERNS = ["config.json", "preprocessor_config.json", "model.bin",
                   "tokenizer.json", "vocabulary.*"]
 
@@ -472,7 +472,7 @@ def _load_model(device, allow_download=False):
     # One WhisperModel per device, kept for one run (transcribe releases
     # it with release_models). cuda: float16;
     # cpu: int8 on cpu_threads() threads. allow_download False: local files
-    # only (BUILD 231: a download needs the user's Yes in generate_captions
+    # only (: a download needs the user's Yes in generate_captions
     # first).
     from faster_whisper import WhisperModel
     m = _models.get(device)

@@ -1,5 +1,5 @@
 # clip_speed.py
-# Clip speed (BUILD 303): one integer percent per timeline clip, 1 .. 1000,
+# Clip speed: one integer percent per timeline clip, 1.. 1000
 # default 100, stored in speed_percent on clips, captions, keyframe_clips and
 # text_clips
 # (new_project.py). The timeline keeps {timeline clip id: speed} for clips whose speed
@@ -17,7 +17,7 @@
 # Speed... (edit_clip_speed): the right-clicked clip and every clip linked
 # to it get the new speed and one new timeline length,
 # round(length * old / new), cut to the room before the next clip on each
-# member's track and to the footage end (BUILD 301 source cap) of each
+# member's track and to the footage end (source cap) of each
 # footage member; never below 1 frame; later clips do not move. Keys of a
 # keyframe clip scale about its start. One undo step. ASCII only.
 
@@ -56,7 +56,7 @@ def load_clip_speeds(cur, sequence_id):
                      "AND %s != %d", lambda i: -i),
         ("keyframe_clips", "SELECT id, %s FROM keyframe_clips WHERE "
                            "sequence_id = ? AND %s != %d", mem_id_from_db),
-        # BUILD 308: WYSIWYG Text clips
+        # WYSIWYG Text clips
         ("text_clips", "SELECT id, %s FROM text_clips WHERE sequence_id = ? "
                        "AND %s != %d", text_mem_id),
     )
@@ -270,7 +270,7 @@ def _members_and_rooms(tl, clip):
 
 def _source_rooms(tl, members):
     # Remaining source frames (cap - in) of each footage member with a
-    # BUILD 301 source cap (video / audio footage clips)
+    # Source cap (video / audio footage clips)
     from sequence_timeline_clips import _add_source_caps, _no_source_floor
     group = [{"clip": c, "free_in": _no_source_floor(tl, c)} for c in members]
     _add_source_caps(tl, group)

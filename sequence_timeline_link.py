@@ -1,10 +1,10 @@
 # sequence_timeline_link.py
-# BUILD 133: Link / Unlink menu decision and the Link write plan for the
+# Link / Unlink menu decision and the Link write plan for the
 # Sequence Timeline. Pure functions over clip lists (clip[0] = mem id,
 # clip[8] = link_id) and clips_by_track. ASCII only.
 #
 # A link_id that only one clip carries (e.g. a partner removed by Delete
-# Track, BUILD 107) counts as unlinked here.
+# Track) counts as unlinked here.
 
 
 def link_group_sizes(clips_by_track):

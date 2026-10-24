@@ -1,17 +1,17 @@
 # refresh_preview_dialog.py
-# BUILD 167: "Refreshing Preview" window for F5 / Refresh Preview on the
+# "Refreshing Preview" window for F5 / Refresh Preview on the
 # Sequence Timeline. Two rows: the preview frames (percent from the preview
 # worker's progress, done when its explicit refresh pass finishes) and the
 # audio mix (busy bar while the mix job runs; the mix reports no percent).
 # Polls on the GUI thread; closes itself when both are done.
-# BUILD 239: application-modal and always on top (above every FLAVE window,
+# Application-modal and always on top (above every FLAVE window
 # the Sequence Player included), so nothing else takes input while it is
 # open; the work runs on its own threads and the event loop keeps running
 # (no exec). Cancel, Esc and the title bar X all cancel the refresh: a
 # pending Play start is dropped, the explicit refresh pass stops (frames
 # already built stay clean, the rest stay dirty) and a running audio mix is
 # cancelled. ASCII only.
-# BUILD 317: a refresh pass the worker aborted for lack of GPU memory
+# A refresh pass the worker aborted for lack of GPU memory
 # (sequence_preview_worker.take_refresh_abort) closes this window, stops
 # a pending Play start and shows the message (show_refresh_abort).
 
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QDialog, QLabel, QMessageBox, QProgressBar,
 
 
 def show_refresh_abort(timeline, text):
-    # GUI thread (BUILD 317): the refresh pass was aborted for lack of GPU
+    # GUI thread: the refresh pass was aborted for lack of GPU
     # memory. Drop a pending Play start (it would wait for frames that
     # will not come), put the text on the status bar and show it in a
     # non-modal message box over the timeline.
@@ -50,7 +50,7 @@ class RefreshPreviewDialog(QDialog):
         self._timeline = timeline
         self._video_pct = 0
         self.setWindowTitle("Refreshing Preview")
-        # BUILD 239: blocking and on top; flags set before the first show
+        # Blocking and on top; flags set before the first show
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self._finished = False      # True when it closes itself (work done)
@@ -130,7 +130,7 @@ class RefreshPreviewDialog(QDialog):
         return False, self._video_pct
 
     def _poll(self):
-        # BUILD 172: GUI heartbeat for the refresh pass (it naps briefly
+        # GUI heartbeat for the refresh pass (it naps briefly
         # when this poll has not run for a while, so the window updates)
         try:
             import time
@@ -138,7 +138,7 @@ class RefreshPreviewDialog(QDialog):
             spw._gui_beat[0] = time.perf_counter()
         except Exception:
             pass
-        # BUILD 317: refresh aborted for lack of GPU memory: close, then
+        # Refresh aborted for lack of GPU memory: close, then
         # the message (not under this application-modal window)
         try:
             from sequence_preview_worker import take_refresh_abort

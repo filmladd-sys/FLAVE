@@ -101,7 +101,7 @@ def _qt_preview_image(self, data):
 
 
 # ---------------------------------------------------------------------
-# Preview Size (BUILD 255, Project Settings > Project). Frames are always
+# Preview Size (Project Settings > Project). Frames are always
 # composited at the full sequence size (every layer's scale, position,
 # crop, rotate and outline exactly as at 100%). Below 100% each composite
 # is then scaled down on the card (resample_rgb) into a small buffer and
@@ -110,7 +110,7 @@ def _qt_preview_image(self, data):
 # (decode_play_jpegs for playback, QImage.scaled for a still frame).
 
 def _preview_pct(self):
-    # BUILD 320: this composer's sequence Preview Size percent (the sequence
+    # This composer's sequence Preview Size percent (the sequence
     # override, else the project Preview Size)
     from sequence_preview import sequence_preview_size_percent
     sid = getattr(self, "sequence_id", None)
@@ -184,12 +184,12 @@ def _free_scaled(self):
 
 def encode_preview(self, bufs, quality):
     # nvJPEG bytes of full-size composites bufs, at the sequence's Preview
-    # Size (BUILD 320: its override, else the project's). At 100% this is
+    # Size (its override, else the project's). At 100% this is
     # encode_many on the composites; below it, groups
     # of max_states are scaled into the small buffers and encoded from
     # there (encode_many syncs the stream, so the next group can reuse
     # them). Lock held, self.nvj created.
-    # BUILD 317: the encoder's max_states is sized for this encode size
+    # The encoder's max_states is sized for this encode size
     # first (nvj_fit_states), on every pass (normal and refresh).
     pw, ph = _preview_dims(self)
     nvj_fit_states(self, pw, ph)
@@ -206,7 +206,7 @@ def encode_preview(self, bufs, quality):
     return out
 
 
-# BUILD 317: nvJPEG encoder states per encoder, by resolution. A warmed
+# NvJPEG encoder states per encoder, by resolution. A warmed
 # state costs about 60 MB at 1920 x 1080 and scales with the encoded
 # pixels (about 240 MB at 3840 x 2160, about 615 MB at 6144 x 3456), so a
 # fixed 16 states could take most of the card at 6K. max_states = the
@@ -332,7 +332,7 @@ def _prefetch(self, frames, snapshot, clips=None):
     # (the explicit refresh decodes one track at a time)
     reqs = {}
     last = {}
-    import preview_log      # BUILD 247
+    import preview_log
     t_pre = time.perf_counter()
     if frames:
         self._prune_decoders(frames[0], snapshot)
@@ -350,8 +350,8 @@ def _prefetch(self, frames, snapshot, clips=None):
         if len(srcs) < 2 or srcs != list(range(srcs[0], srcs[0] + len(srcs))):
             continue
         dec = self._decoder(key, last.get(key))
-        # BUILD 240: only the part of the run not already known to be past
-        # the source end (BUILD 241: known only from an earlier refused
+        # Only the part of the run not already known to be past
+        # the source end (: known only from an earlier refused
         # seek); _build_dst skips those layers
         from sequence_player import (source_index_ok, is_out_of_range_error,
                                      learn_source_end)
@@ -364,7 +364,7 @@ def _prefetch(self, frames, snapshot, clips=None):
             except Exception as e:
                 self.dec_next.pop(key, None)
                 if is_out_of_range_error(e):
-                    learn_source_end(key, srcs[0])     # BUILD 241
+                    learn_source_end(key, srcs[0])
                     continue    # decoded per frame (and skipped) in _build_dst
                 raise
         try:
@@ -376,7 +376,7 @@ def _prefetch(self, frames, snapshot, clips=None):
             raise
         got = list(got or [])
         if got:
-            preview_log.first_decode(key, len(got))     # BUILD 247
+            preview_log.first_decode(key, len(got))
         for k, f in enumerate(got):
             pre[(key, srcs[0] + k)] = f
         if got:
@@ -618,7 +618,7 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
 # and checks the keep again after reserving. On a shortfall it lowers k
 # first (never below max_states, or k if that is smaller) and lowers N
 # only for what that cannot cover, so N still covers the range. At N = 1
-# it frees nvJPEG states next (BUILD 317); if the card is still too
+# it frees nvJPEG states next; if the card is still too
 # short (free after decode under REFRESH_VRAM_FATAL_MB +
 # REFRESH_CHUNK_CUSHION_MB) the refresh pass is aborted with a message
 # (REFRESH_ABORT) instead of running into the hard exit.
@@ -628,7 +628,7 @@ def composite_batch(self, frames, snapshot, dark, bufs, sink,
 # the rest of the range closes each layer's decoders after its blend.
 # vram_fatal_check() is the hard stop: free VRAM under 1500 MB at any
 # check point exits FLAVE at once (see that function for why); after
-# BUILD 317 that is only reached by drift after a successful reserve.
+# That is only reached by drift after a successful reserve.
 # ---------------------------------------------------------------------
 
 
@@ -656,7 +656,7 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
     for fr in frames:
         for item in self._layer_items(fr, snapshot):
             used.add(item[6][0])
-            if item[0] in ("image", "text"):      # BUILD 309: text textures
+            if item[0] in ("image", "text"):      # Text textures
                 stills.add(item[1])
             elif len(item) > 16:
                 used_keys[item[6][0]] = item[16]
@@ -722,7 +722,7 @@ def _composite_by_layer(self, frames, snapshot, dark, bufs):
 
 
 def track_stills(self, frames, snapshot, clips):
-    # Still (image) paths and text texture keys (BUILD 309) of the given
+    # Still (image) paths and text texture keys of the given
     # clips in these frames
     out = set()
     for fr in frames:
@@ -834,7 +834,7 @@ def kept_decoder_guard(project_path, sequence_id):
 
 
 def host_rgb(self, bufs):
-    # BUILD 142 sink: each device buffer copied to host RGB24 bytes
+    # Sink: each device buffer copied to host RGB24 bytes
     cudart = _libs()[0]
     size = self.row * self.seq_h
     out = []
@@ -846,7 +846,7 @@ def host_rgb(self, bufs):
 
 
 def _jpeg_sink(quality):
-    # BUILD 142 sink of the preview fill: ("jpeg", bytes) from nvJPEG, or
+    # Sink of the preview fill: ("jpeg", bytes) from nvJPEG, or
     # ("raw", host RGB) for the Qt fallback (no nvJPEG on this machine)
     def sink(self, bufs):
         lib = _nvjpeg_lib()
@@ -916,7 +916,7 @@ def FrameGenerateBatch(project_path, sequence_id, frames, snapshot):
     # Worker only: JPEG bytes for consecutive sequence frames in one card
     # pass (one lock hold, multi-frame decode), list parallel to frames
     # (None entries on failure), or None if no player is open.
-    # BUILD 141: with no player open, the headless GPU composite
+    # With no player open, the headless GPU composite
     # (sequence_preview_gpu); None only when that cannot start either.
     player = _generator_for(project_path, sequence_id)
     if player is None:
@@ -929,8 +929,8 @@ def FrameGenerate(project_path, sequence_id, frame_num, snapshot=None, worker=Fa
     # Sequence frame as JPEG bytes (quality 90), or None. Uses the open
     # Sequence Player's GPU context and composite; never opens a window,
     # so with no player open for this sequence it returns None.
-    # BUILD 141: worker=True with no player open: headless GPU composite.
-    # BUILD 145: worker=True always uses the frame engine (_generator_for),
+    # Worker=True with no player open: headless GPU composite.
+    # Worker=True always uses the frame engine (_generator_for)
     # player open or not; the GUI path (worker=False) still needs a player.
     if worker:
         gen = _generator_for(project_path, sequence_id)
@@ -944,11 +944,11 @@ def FrameGenerate(project_path, sequence_id, frame_num, snapshot=None, worker=Fa
         return None
     player = getattr(timeline, "_player", None)
     if player is None or player.closed:
-        # GUI path: needs the player (BUILD 145: the worker returned above)
+        # GUI path: needs the player (the worker returned above)
         return None
     if os.path.abspath(project_path) != os.path.abspath(timeline._project_db()):
         return None
-    # BUILD 145: the frame engine is not released for the player any more
+    # The frame engine is not released for the player any more
     # if worker:
     #     _release_headless()
     return player.frame_jpeg(int(frame_num), preview_jpeg_quality(), snapshot, worker)
@@ -964,10 +964,10 @@ def _release_headless():
 
 def _generator_for(project_path, sequence_id):
     # Worker thread: the composer for this sequence's preview frames.
-    # BUILD 145: the frame engine (one headless composer, its decoders stay
+    # The frame engine (one headless composer, its decoders stay
     # warm when a player opens or closes); the open player only when the
     # engine's GPU setup failed; else None.
-    # Was (BUILD 141): the open player first (headless released), else the
+    # Was: the open player first (headless released), else the
     # headless composer.
     try:
         from sequence_preview_gpu import headless_for
@@ -1041,7 +1041,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
     # Worker, once per explicit refresh pass, before any batch: the
     # per-range plan (see the memory model above _composite_by_layer).
     #
-    # 1) Close every decoder and free the whole pool. BUILD 317: warm
+    # 1) Close every decoder and free the whole pool. Warm
     #    one buffer + one nvJPEG state and measure the state's cost;
     #    max_states = states that fit in NVJ_STATES_VRAM_SHARE of total
     #    VRAM (1..16, nvj_fit_states). Then reserve and
@@ -1082,7 +1082,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         gen._keep_dec = False
         gen._pull_k = 0
         _free_pool(gen, None)
-        # BUILD 317: the encoder and (below 100%) one Preview Size buffer
+        # The encoder and (below 100%) one Preview Size buffer
         # exist before the measure, so only buffer + state are in it
         pw, ph = _preview_dims(gen)
         lib = _nvjpeg_lib()
@@ -1163,7 +1163,7 @@ def refresh_plan(project_path, sequence_id, snapshot, total, pool_n):
         per_all = {}
         for it in items:
             if it[0] == "text":
-                # BUILD 309: a text texture is sequence size (no probe)
+                # A text texture is sequence size (no probe)
                 still += 4 * int(gen.seq_w) * int(gen.seq_h)
                 continue
             size = _source_size(it[1]) or (int(gen.seq_w), int(gen.seq_h))
@@ -1271,7 +1271,7 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
     #    short: lower k first (decode is not allocated yet, so no
     #    re-reserve is needed); only if that cannot cover it, lower N by
     #    the shortfall and refit (up to 4 rounds). k never exceeds N.
-    # 4) BUILD 317, N = 1 and still short: free nvJPEG states beyond what
+    # 4) N = 1 and still short: free nvJPEG states beyond what
     #    covers the shortfall (N = 1 encodes with one state) and re-read
     #    free VRAM. Still short and the free VRAM left after the decode
     #    and stills would be under REFRESH_VRAM_FATAL_MB +
@@ -1370,7 +1370,7 @@ def fit_refresh_pool(project_path, sequence_id, n, per, still, k=0, held=0,
 
 
 # fit_refresh_pool result: not enough VRAM even at N = 1 with the nvJPEG
-# states trimmed; the worker aborts the refresh pass (BUILD 317)
+# states trimmed; the worker aborts the refresh pass
 REFRESH_ABORT = -1
 REFRESH_ABORT_TEXT = "Memory Low! Reduce Preview Size"
 

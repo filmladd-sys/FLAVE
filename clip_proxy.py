@@ -9,9 +9,9 @@ import sqlite3
 import subprocess
 import sys
 
-PROXY_PERCENTS = (100, 75, 50, 25, 10)   # BUILD 120: 100 (MKV proxies only)
+PROXY_PERCENTS = (100, 75, 50, 25, 10)   # 100 (MKV proxies only)
 
-# BUILD 120: several proxies may share a percent (Normal / Deinterlace /
+# Several proxies may share a percent (Normal / Deinterlace /
 # double rate / IVTC). The percent stays the choice; the composite uses the
 # first mode of this order (same as sequence_player.PROXY_MODE_PREFERENCE)
 # and the menus name it, e.g. '50% (deint)'.
@@ -144,7 +144,7 @@ def apply_clip_proxy(timeline, clip, pct):
 
 
 def probe_video_sar(path):
-    # BUILD 324: (width, height, sar_num, sar_den) of stream V:0 via
+    # (width, height, sar_num, sar_den) of stream V:0 via
     # ffprobe, or None. A missing / "N/A" / "0:1" SAR reads as 1:1.
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # CREATE_NO_WINDOW
     try:
@@ -186,7 +186,7 @@ _SAR_CACHE = {}   # (path, mtime, bytes) -> probe_video_sar result
 
 
 def cached_video_sar(path):
-    # BUILD 325: probe_video_sar once per file version (cached), for the
+    # Probe_video_sar once per file version (cached), for the
     # Footage Manager size columns and the icon generator; None when the
     # file is missing or unreadable
     try:
@@ -200,12 +200,12 @@ def cached_video_sar(path):
 
 
 def format_pixel_aspect(sar_num, sar_den):
-    # BUILD 326: "N:D" for footage.pixel_aspect (1:1, 8:9, 32:27, 4:3)
+    # "N:D" for footage.pixel_aspect (1:1, 8:9, 32:27, 4:3)
     return "%d:%d" % (int(sar_num), int(sar_den))
 
 
 def parse_pixel_aspect(text):
-    # BUILD 326: "N:D" -> (num, den), else None (NULL / empty / junk)
+    # "N:D" -> (num, den), else None (NULL / empty / junk)
     if not text or not isinstance(text, str):
         return None
     t = text.strip()
@@ -222,8 +222,8 @@ def parse_pixel_aspect(text):
 
 
 def read_footage_pixel_aspect(project_db, footage_id):
-    # BUILD 326: (num, den) from footage.pixel_aspect, or None when the
-    # column / row is missing or empty (old DB before migration, stills)
+    # (num, den) from footage.pixel_aspect, or None when the
+    # row is missing or the value is empty (stills / not probed)
     if not project_db or footage_id is None:
         return None
     try:
@@ -242,8 +242,7 @@ def read_footage_pixel_aspect(project_db, footage_id):
 
 
 def write_footage_pixel_aspect(project_db, footage_id, sar_num, sar_den):
-    # BUILD 326: store "N:D" on footage.pixel_aspect; no-op when the
-    # column is missing (pre-migration) or the write fails
+    # Store "N:D" on footage.pixel_aspect; no-op when the write fails
     if not project_db or footage_id is None:
         return
     try:
@@ -260,7 +259,7 @@ def write_footage_pixel_aspect(project_db, footage_id, sar_num, sar_den):
 
 
 def resolve_footage_sar(project_db, footage_id, path):
-    # BUILD 326: (w, h, num, den) preferring footage.pixel_aspect + stored
+    # (w, h, num, den) preferring footage.pixel_aspect + stored
     # width/height; ffprobe only when the DB value is missing, then write
     # it back. None for missing files / non-video / unreadable.
     if path and project_db and footage_id is not None:
@@ -287,7 +286,7 @@ def resolve_footage_sar(project_db, footage_id, path):
 
 
 def display_width(width, sar_num, sar_den):
-    # BUILD 324: square-pixel width of a frame with this SAR, rounded to
+    # Square-pixel width of a frame with this SAR, rounded to
     # even (720x480 SAR 8:9 -> 640, 32:27 -> 854; 1440x1080 4:3 -> 1920)
     if not sar_num or not sar_den or sar_num == sar_den:
         return int(width)
@@ -297,7 +296,7 @@ def display_width(width, sar_num, sar_den):
 
 def probe_video_info(path):
     # (width, height, codec_name) of stream V:0 via ffprobe, or None.
-    # BUILD 118: V (not v) skips attached pictures / cover art
+    # V (not v) skips attached pictures / cover art
     flags = 0x08000000 if sys.platform.startswith("win") else 0   # CREATE_NO_WINDOW
     try:
         result = subprocess.run(

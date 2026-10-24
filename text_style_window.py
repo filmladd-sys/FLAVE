@@ -1,5 +1,5 @@
 # text_style_window.py
-# WYSIWYG Text style window (BUILD 308): a floating, non-modal tool window
+# WYSIWYG Text style window: a floating, non-modal tool window
 # of a SequenceTimeline, shown while exactly one text clip is selected
 # (linked clips of other tracks may be selected with it) and hidden
 # otherwise. Fields: font family (QFontComboBox), size (sequence px), color
@@ -8,14 +8,14 @@
 # as an undo step; typing in the text field, or in the size box, is one
 # undo step per focus of that field. The timeline label (first line of the
 # text) repaints at once. The window position is kept in the global
-# settings (POS_KEY). BUILD 309: each change also schedules a preview
+# settings (POS_KEY). Each change also schedules a preview
 # retarget (schedule_text_preview), which marks the clip's preview frames
-# stale. BUILD 311: a 'Drop Shadow' group (checkable = shadow_on) with
+# stale. A 'Drop Shadow' group (checkable = shadow_on) with
 # the shadow color (button -> QColorDialog with alpha, swatch; stored
 # '#RRGGBBAA'), blur radius, angle (degrees clockwise from up, 135 =
 # down-right; text_clip.shadow_delta) and offset (sequence px). The on
 # switch and the color are one undo step each; the blur, angle and offset
-# boxes are one undo step per focus like the size box. BUILD 315: every
+# boxes are one undo step per focus like the size box. Every
 # style change (font, size, color, shadow fields; not the text) also stores
 # the clip's whole style as the last used text style in the global
 # settings (text_clip.remember_text_style), the style of the next new text
@@ -63,7 +63,7 @@ class TextStyleWindow(QWidget):
         self.text_edit = QPlainTextEdit()
         self.text_edit.setTabChangesFocus(True)
         form.addRow("Text:", self.text_edit)
-        # BUILD 311: drop shadow
+        # Drop shadow
         self.shadow_box = QGroupBox("Drop Shadow")
         self.shadow_box.setCheckable(True)
         self.shadow_box.setChecked(False)
@@ -163,7 +163,7 @@ class TextStyleWindow(QWidget):
             self.text_edit.blockSignals(True)
             self.text_edit.setPlainText(text)
             self.text_edit.blockSignals(False)
-        # BUILD 311: shadow fields (None: the text_clip defaults)
+        # Shadow fields (None: the text_clip defaults)
         import text_clip as tc
         on = bool(style.get("shadow_on"))
         if self.shadow_box.isChecked() != on:
@@ -263,7 +263,7 @@ def apply_text_field(tl, clip_id, key, value, push=True):
     except sqlite3.Error as e:
         tl.status_bar.showMessage(f"Could not save text clip: {e}", 3000)
         return False
-    # BUILD 315: a style change: the clip's whole style is the last used
+    # A style change: the clip's whole style is the last used
     # text style (global settings; Add Text Clip uses it)
     from text_clip import REMEMBER_KEYS, read_text_style, remember_text_style
     if key in REMEMBER_KEYS:
@@ -280,7 +280,7 @@ def apply_text_field(tl, clip_id, key, value, push=True):
     return True
 
 
-# BUILD 309: a style edit changes the burned-in picture: one preview
+# A style edit changes the burned-in picture: one preview
 # retarget (new snapshot, mile marker diff marks the clip's frames dirty,
 # the shown frame redraws) PREVIEW_DELAY_MS after the last edit, so typing
 # does not snapshot the timeline per key

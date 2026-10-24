@@ -47,7 +47,7 @@ def _draw_waveform(self, painter, tl, clip_rect, footage_id, in_frame, length_fr
     # Center line plus a vertical min..max bar per pixel column. The clip's
     # in_frame..in_frame+length_frames maps to peak buckets via fps.
     # No peaks row: the clip is drawn with no waveform.
-    # BUILD 165: stored peaks are scaled by the clip gain (dB) at draw time,
+    # Stored peaks are scaled by the clip gain (dB) at draw time
     # clamped to the clip height; the peaks themselves are not regenerated
     stored = tl.peaks_for(footage_id)
     if stored is None:
@@ -60,7 +60,7 @@ def _draw_waveform(self, painter, tl, clip_rect, footage_id, in_frame, length_fr
     mid = top + h // 2
     half = max(1, h // 2 - 2)
     scale = half * (10.0 ** (float(gain_db) / 20.0)) / 32768.0
-    painter.setPen(QColor(240, 240, 240))   # BUILD 108 waveform color
+    painter.setPen(QColor(240, 240, 240))   # Waveform color
     painter.drawLine(clip_rect.left(), mid, clip_rect.right(), mid)
     # Only the visible part of the clip
     view = painter.clipBoundingRect().toRect() if painter.hasClipping() else clip_rect

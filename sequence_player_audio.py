@@ -81,7 +81,7 @@ class PreviewAudioPlayer(object):
     def __init__(self):
         self.wav_path = None
         self._wav_stamp = None
-        self._wav_gen = None     # BUILD 135: mix generation of the PCM
+        self._wav_gen = None     # Mix generation of the PCM
         self.fps = 29.97
         self._pcm = b""
         self._qba = None
@@ -99,7 +99,7 @@ class PreviewAudioPlayer(object):
         return bool(self._pcm) and self.wav_path is not None
 
     def prepare(self, wav_path, fps, gen=None):
-        # gen (BUILD 135): sequence_preview_audio generation; a different
+        # gen: sequence_preview_audio generation; a different
         # value reloads the PCM even when path / size / mtime look equal
         self.fps = float(fps) if fps and float(fps) > 0 else 29.97
         path = os.path.abspath(wav_path) if wav_path else None
@@ -268,14 +268,14 @@ class PreviewAudioPlayer(object):
         return
 
 
-# ---------------------------------------------------------------- BUILD 111
+# ----------------------------------------------------------------
 # Scrub audio burst: about one frame of the existing preview mix WAV at the
 # new playhead when the ruler is clicked / dragged while stopped. Never
 # builds the mix (no .sig check: a stale WAV is fine), never touches the
 # play sink, the play clock or the preview video path.
 
 BURST_RAMP_SAMPLES = 32     # short linear fade in / out against clicks
-BURST_POLL_MS = 5           # BUILD 113: burst-done check interval
+BURST_POLL_MS = 5           # Burst-done check interval
 BURST_DONE_MARGIN_S = 0.03  # drained buffer + this = done (output latency)
 BURST_HARD_CAP_S = 0.25     # done regardless, never stuck waiting
 
@@ -326,18 +326,18 @@ def ramp_pcm16(data, channels=CHANNELS, ramp=BURST_RAMP_SAMPLES):
 
 
 class ScrubBurst(object):
-    # BUILD 112: ONE long-lived QAudioSink and ONE QBuffer (internal data,
+    # ONE long-lived QAudioSink and ONE QBuffer (internal data
     # set with setData, so no external QByteArray to outlive), both
     # parented to a QObject owner created on the GUI thread and reused.
     # release() stops everything and deleteLater()s the owner.
     #
-    # BUILD 111 created a new QByteArray and QBuffer per burst and dropped
+    # Created a new QByteArray and QBuffer per burst and dropped
     # the old ones right after sink.stop(); Python freed them at once (no
     # parent), and the old QByteArray was freed while the old QBuffer still
     # pointed at it. A sink backend still holding the old pull device can
     # then touch freed memory.
     #
-    # BUILD 113: a playing burst is never cut off. A scrub that arrives
+    # A playing burst is never cut off. A scrub that arrives
     # while one plays only stores the latest frame (overwriting any older
     # pending one; intermediate frames are dropped). When the burst is
     # done the pending frame plays, then is cleared. "Done" is checked
@@ -351,7 +351,7 @@ class ScrubBurst(object):
     def __init__(self):
         self.path = None
         self._stamp = None
-        self._gen = None                # BUILD 135: mix generation
+        self._gen = None                # Mix generation
         self._pcm = b""
         self._rate = SAMPLE_RATE
         self._ch = CHANNELS
@@ -563,7 +563,7 @@ class ScrubBurst(object):
 
 
 def release_scrub_burst(player):
-    # BUILD 112: called when the player closes or Play starts
+    # Called when the player closes or Play starts
     burst = getattr(player, "_scrub_burst", None)
     if burst is None:
         return
@@ -601,7 +601,7 @@ def scrub_burst(timeline):
         wav = preview_audio_wav_path(project_db, timeline.sequence_id)
         if not wav or not os.path.isfile(wav):
             return False
-        # BUILD 135: silent while the mix is stale (Play rebuilds it)
+        # Silent while the mix is stale (Play rebuilds it)
         if not preview_audio_scrub_ok(project_db, timeline.sequence_id, fps,
                                       int(timeline.total_frames())):
             stop_scrub_burst(player)

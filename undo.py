@@ -1,7 +1,7 @@
 # undo.py
 # Snapshot undo/redo for Ladd Video Editor. ASCII only.
 # {ProjectName}_Undo.db next to the project (Test9.db -> Test9_Undo.db,
-# BUILD 223, sequence_preview.temp_file_path).
+# Sequence_preview.temp_file_path).
 # Each snapshot copies whole tables (ATTACH + INSERT ... SELECT), ids kept.
 # The icons table (large thumbnail blobs) is not in ordinary snapshots; a
 # Footage Manager remove snapshots only the removed footage's icon rows
@@ -17,13 +17,13 @@ import time
 
 SNAP_TABLES = ("clips", "keyframe_clips", "keyframes", "tracks", "footage",
                "sequences", "captions", "Marker",
-               "sequence_children",   # BUILD 106: follows sequence clips
-               "keyframe_border",     # BUILD 222: border clip keys
-               "keyframe_move",       # BUILD 294: move clip keys
-               "keyframe_crop",       # BUILD 295: crop_xy clip keys
-               "keyframe_crop_edges",  # BUILD 296: crop_edges clip keys
-               "keyframe_chroma",     # BUILD 337: chroma clip keys
-               "text_clips")          # BUILD 308: WYSIWYG Text clips
+               "sequence_children",   # Follows sequence clips
+               "keyframe_border",     # Border clip keys
+               "keyframe_move",       # Move clip keys
+               "keyframe_crop",       # Crop_xy clip keys
+               "keyframe_crop_edges",  # Crop_edges clip keys
+               "keyframe_chroma",     # Chroma clip keys
+               "text_clips")          # WYSIWYG Text clips
 # Thumbnails follow footage only through a Footage Manager remove (BUILD
 # 235): that snapshot holds the icon rows of the removed footage ids
 ICONS_TABLE = "icons"
@@ -319,7 +319,7 @@ def current_project():
 def _refresh_after_restore(project_path, message):
     # Whole sequence dirty, then reload every open window
     try:
-        # BUILD 136: every sequence's audio mix may differ now, including
+        # Every sequence's audio mix may differ now, including
         # sequences with no timeline open (cheap flags, no mixing)
         from sequence_preview_audio import mark_preview_audio_dirty
         mark_preview_audio_dirty(project_path)
@@ -334,11 +334,11 @@ def _refresh_after_restore(project_path, message):
                 tl._selected_clip_ids = set()
                 tl._selection_order = []
                 tl._selection_solo = False
-                # BUILD 146: no whole-sequence mark: the reload's mile-marker
+                # No whole-sequence mark: the reload's mile-marker
                 # diff (footage paths included) marks what the undo changed
                 # tl._mark_preview_dirty([WHOLE_RANGE])
                 tl._after_clip_change(message)
-                # BUILD 316: an undone / redone resolution change rebuilds
+                # An undone / redone resolution change rebuilds
                 # the open Sequence Player at the restored size
                 from sequence_player import sync_player_size
                 sync_player_size(tl)
@@ -353,7 +353,7 @@ def _refresh_after_restore(project_path, message):
             print(f"Undo refresh failed: {e}")
 
 
-_blocked = set()     # BUILD 233: keys of running jobs that forbid undo / redo
+_blocked = set()     # Keys of running jobs that forbid undo / redo
 
 
 def set_blocked(key, on):

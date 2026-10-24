@@ -1,5 +1,5 @@
 # player_text.py
-# BUILD 309: WYSIWYG Text clips (text_clip.py) as compositor layers. A
+# WYSIWYG Text clips (text_clip.py) as compositor layers. A
 # text clip is a layer of kind "text" (sequence_player._layer_items): its
 # picture is text_clip.render_text_image, a sequence-size transparent
 # frame, converted to straight-alpha RGBA8888 and uploaded to device
@@ -22,7 +22,7 @@ TEXT_TEX_MAX = 8
 
 def style_hash(style):
     # Short hash of a style tuple (text_clip.TEXT_STYLE_KEYS order: text,
-    # font_family, font_size, color, x, y and the BUILD 311 shadow fields)
+    # font_family, font_size, color, x, y and the shadow fields)
     return hashlib.md5(repr(tuple(style)).encode("utf-8", "replace")).hexdigest()[:16]
 
 

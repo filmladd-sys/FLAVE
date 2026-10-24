@@ -1,5 +1,5 @@
 # window_snapshot.py
-# BUILD 114: a camera button over every top-level window's title bar.
+# A camera button over every top-level window's title bar.
 # Windows title bars are native non-client area, so a child widget cannot
 # draw there. Each target gets a small frameless Qt.Tool helper window,
 # owned by the target (transient parent), placed over the title bar just

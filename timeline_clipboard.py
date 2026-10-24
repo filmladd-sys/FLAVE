@@ -56,7 +56,7 @@ def _type_label(track_type):
 
 
 def cross_track_map(tl, clip):
-    # BUILD 290: plain Paste into another sequence. The selected tracks of
+    # Plain Paste into another sequence. The selected tracks of
     # this sequence (tl._selected_track_ids, in track order) must match the
     # source tracks holding copied items: same count, same type at each
     # position. Returns ({source track id: selected track id}, None) when
@@ -103,7 +103,7 @@ def _sequence_fps(cur, sequence_id):
 
 
 def _selection_set(tl):
-    # Same set as the Delete path: exactly the selection (BUILD 329: no
+    # Same set as the Delete path: exactly the selection (: no
     # silent expand to link partners; see delete_clip_ids).
     return set(tl._selected_clip_ids)
 
@@ -147,7 +147,7 @@ def copy_selection(tl):
             start, length = _start_len(table, row)
             keys = []
             if table == "keyframe_clips":
-                # BUILD 222: from keyframes or (border clip) keyframe_border;
+                # From keyframes or (border clip) keyframe_border
                 # each key dict remembers its table as "_table"
                 from keyframe import key_tables
                 for ktable in key_tables(cur):
@@ -226,7 +226,7 @@ def paste(tl, anchor, make_room):
     # Overwrite: existing clips under a pasted item are trimmed, moved in or
     # deleted (see the plan below). make_room is kept for callers; Paste To
     # Tic and Paste to End both overwrite.
-    # BUILD 160: every paste path (Ctrl+V, Edit menu Paste To Tic / Paste to
+    # Every paste path (Ctrl+V, Edit menu Paste To Tic / Paste to
     # End, right-click Paste > To Mouse / To Tick) overwrites the same way:
     # covered clips removed, partly covered trimmed, a clip the paste lands
     # inside split around it (overwrite_plan / apply_overwrite).
@@ -256,7 +256,7 @@ def paste(tl, anchor, make_room):
 
 
 def _paste_cross(tl, clip, anchor):
-    # BUILD 290: the clipboard from another sequence onto the selected
+    # The clipboard from another sequence onto the selected
     # tracks (cross_track_map), source track i -> selected track i. Items
     # are converted to this sequence's rate (convert_items) and pasted by
     # the same core as a same-sequence paste, overwriting what is under
@@ -296,7 +296,7 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
     # paste in. Right overlap: in-point moved to the paste out (start and
     # source in_frame advance, length shrinks; keyframe keys stay put).
     # Fully inside: deleted.
-    # BUILD 160: replaced by overwrite_plan below. The old plan cut a clip
+    # Replaced by overwrite_plan below. The old plan cut a clip
     # spanning the paste at the paste in and dropped its right part, and
     # dropped any gap between two pasted items inside one clip; a trimmed
     # keyframe clip kept its keys outside the new range.
@@ -320,13 +320,13 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
     #         else:
     #             st["deleted"] = True
     #         state[c[0]] = st
-    # BUILD 160: per destination track only, each existing clip keeps the
+    # Per destination track only, each existing clip keeps the
     # parts of its range no pasted item on that track covers (pieces). No
     # pieces: deleted. One piece: trimmed. Two or more (the paste lands
     # inside it): split, the first piece keeps the row, the others are new
     # rows (see apply_overwrite). Never refuses because of overlap.
     state = overwrite_plan(tl, ok, anchor) if make_tracks is None else {}
-    # BUILD 106: sequence clips in the paste must pass the self / cycle
+    # Sequence clips in the paste must pass the self / cycle
     # check against this sequence, else the whole paste is refused
     children = set()
     for it in ok:
@@ -355,19 +355,19 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
         conn = sqlite3.connect(project)
         cur = conn.cursor()
         trimmed = deleted = 0
-        # BUILD 106: pairs of sequence clips the overwrite deletes
+        # Pairs of sequence clips the overwrite deletes
         from sequence_timeline_sql import sequence_pairs_for, prune_sequence_children
         # seq_pairs = sequence_pairs_for(
         #     cur, [m for m, st in state.items() if st["deleted"]])
         seq_pairs = sequence_pairs_for(
             cur, [m for m, st in state.items() if not st["pieces"]])
-        # BUILD 160: old trim / delete loop (no split), replaced by
+        # Old trim / delete loop (no split), replaced by
         # apply_overwrite
         # for mem_id, st in state.items():
         #     table, row_id = clip_table_and_id(mem_id)
         #     ranges.append((st["orig_cs"], st["orig_ce"] - 1))
         #     if st["deleted"]:
-        #         # Same row delete as the Delete path (no second undo)
+        # Same row delete as the Delete path (no second undo)
         #         cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
         #         if table == "clips":
         #             from markers import delete_markers
@@ -377,7 +377,7 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
         #     trimmed += 1
         #     new_len = max(1, st["ce"] - st["cs"])
         #     if table == "keyframe_clips":
-        #         # Keys are absolute frames: they do not move
+        # Keys are absolute frames: they do not move
         #         cur.execute(
         #             "UPDATE keyframe_clips SET in_frame = ?, out_frame = ? WHERE id = ?",
         #             (st["cs"], st["cs"] + new_len, row_id))
@@ -430,22 +430,22 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
                         f"({', '.join('?' for _ in knames)})",
                         [kd[k] for k in knames])
             else:
-                # clips.id, -captions.id or a text clip id (BUILD 308)
+                # clips.id, -captions.id or a text clip id
                 from sequence_timeline_captions import mem_id_for
                 mem = mem_id_for(table, new_id)
             if table == "clips" and it.get("markers"):
                 from markers import insert_marker_rows
                 insert_marker_rows(cur, mem, it["markers"])
             # if it["link_id"] is not None:
-            # BUILD 155: a pasted keyframe clip is always unlinked (link_id
+            # A pasted keyframe clip is always unlinked (link_id
             # stays NULL); it does not rejoin its pasted link partners
             # if it["link_id"] is not None and table != "keyframe_clips":
-            # BUILD 157: every type (keyframe clips too) rejoins its pasted
+            # Every type (keyframe clips too) rejoins its pasted
             # partners of the same original group
             if it["link_id"] is not None:
                 groups.setdefault(it["link_id"], []).append((table, new_id, mem))
             ranges.append((s, s + it["length"] - 1))
-        # BUILD 106: pasted sequence clips get their sequence_children row;
+        # Pasted sequence clips get their sequence_children row
         # then drop rows the overwrite left without a referencing clip
         for ch in children:
             cur.execute("INSERT OR IGNORE INTO sequence_children (parent_id, "
@@ -453,7 +453,7 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
         prune_sequence_children(cur, seq_pairs)
         # New link_id per original group (first pasted member's in-memory
         # id, as Link does); a lone pasted member stays unlinked
-        # BUILD 156: no relink at all: every pasted clip stays unlinked
+        # No relink at all: every pasted clip stays unlinked
         # (link_id NULL, set on insert above)
         # for members in groups.values():
         #     if len(members) < 2:
@@ -463,7 +463,7 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
         #         if "link_id" in cols_by_table.get(table, ()):
         #             cur.execute(f"UPDATE {table} SET link_id = ? WHERE id = ?",
         #                         (new_link, new_id))
-        # BUILD 157: a group of two or more pasted members (of one original
+        # A group of two or more pasted members (of one original
         # link_id) gets one NEW shared link_id; each original group its own.
         # A lone pasted member (only one copied, or the only one whose track
         # still exists) stays unlinked. The new id is a pasted member's mem
@@ -506,7 +506,7 @@ def _paste_core(tl, ok, anchor, skipped, make_tracks=None, label="Paste clips",
     tl._after_clip_change(msg)
 
 
-# ---------------------------------------------------------------- BUILD 160
+# ----------------------------------------------------------------
 # Paste overwrites: the pasted items replace whatever is in their time range
 # on their destination tracks (only tracks that receive a pasted item).
 
@@ -581,7 +581,7 @@ def _overwrite_keyframe_clip(cur, mem_id, st):
             kept.append(seg_mem)
             continue
         db_id = db_id_from_mem(seg_mem)
-        # keyframes / keyframe_border rows (BUILD 222)
+        # keyframes / keyframe_border rows
         from keyframe import delete_clip_keys
         delete_clip_keys(cur, [db_id])
         cur.execute("DELETE FROM keyframe_clips WHERE id = ?", (db_id,))
@@ -609,7 +609,7 @@ def apply_overwrite(cur, state, ranges):
         if not pieces:
             # Same row delete as the Delete path (no second undo)
             if table == "keyframe_clips":
-                # keyframes / keyframe_border rows (BUILD 222)
+                # keyframes / keyframe_border rows
                 from keyframe import delete_clip_keys
                 delete_clip_keys(cur, [row_id])
             cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
@@ -629,7 +629,7 @@ def apply_overwrite(cur, state, ranges):
         if table == "clips":
             cur.execute("SELECT in_frame FROM clips WHERE id = ?", (row_id,))
             in0 = int(cur.fetchone()[0] or 0)
-            # BUILD 303: a kept piece starts on the source frame it showed
+            # A kept piece starts on the source frame it showed
             # at its timeline start (clip speed, clip_speed.source_offset);
             # _copy_row carries speed_percent to the new pieces
             from clip_speed import row_speed, source_offset, source_span
@@ -672,7 +672,7 @@ def apply_overwrite(cur, state, ranges):
     return trimmed, deleted
 
 
-# ---------------------------------------------------------------- BUILD 288
+# ----------------------------------------------------------------
 # Paste w/New Tracks: paste the clipboard (from any sequence of the
 # project) into this sequence on new tracks, one per source track that
 # holds copied items, created as one block above all existing tracks in the
@@ -680,7 +680,7 @@ def apply_overwrite(cur, state, ranges):
 # default names, other settings copied, enabled on, solo off). The earliest
 # in-point lands at anchor; links get new ids per original group, keyframe
 # clips, captions and markers come along as in Paste. One undo step.
-# BUILD 289: Paste Insert w/New Tracks (insert=True) first makes room in
+# Paste Insert w/New Tracks (insert=True) first makes room in
 # the same undo step: the pasted span (earliest in to latest out, at the
 # target rate) is inserted at anchor on every existing track exactly like
 # a Shift+drag insert (sequence_timeline_insert.ripple_insert_db): clips

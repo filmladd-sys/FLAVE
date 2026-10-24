@@ -27,7 +27,7 @@ except ImportError:
     GlobalSettingsWindow = None
     apply_dark_mode = None
 
-# BUILD 228: first-open / monitor-change placement of the windows opened here
+# First-open / monitor-change placement of the windows opened here
 from window_place import place_from_project_manager
 
 # Project creation (File > New Project)
@@ -74,7 +74,7 @@ from global_settings import _get_global_setting, _set_global_setting
 
 
 def _ensure_schema_for(project_db):
-    # BUILD 337: project-load schema check (new_project.ensure_project_schema),
+    # Project-load schema check (new_project.ensure_project_schema)
     # before anything reads the project
     if new_project is not None and hasattr(new_project, "ensure_project_schema"):
         new_project.ensure_project_schema(project_db)
@@ -180,7 +180,7 @@ class ProjectManager(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Snapshot undo/redo (undo.py), no menu (BUILD 226: the Edit menu
+        # Snapshot undo/redo (undo.py), no menu (: the Edit menu
         # is gone). Ctrl+Z / Ctrl+Y are application-wide shortcuts on these
         # two actions, added to this window, so they fire from every QWidget
         # window (Sequence Manager, Footage Manager, timelines, ...); the
@@ -277,7 +277,7 @@ class ProjectManager(QMainWindow):
             self._update_windows_menu()
 
     def _new_project(self):
-        # BUILD 226: folder browser, then a name prompt; creates
+        # Folder browser, then a name prompt; creates
         # <folder>/<name>.db. Cancel at either step changes nothing. An
         # invalid name or an existing file shows why and asks again. The
         # folder browser starts in the open project's folder, else
@@ -360,7 +360,7 @@ class ProjectManager(QMainWindow):
                     # Underlying Qt object already deleted
                     pass
                 setattr(self, attr, None)
-        # BUILD 116: Render Manager windows belong to the project too (closed before
+        # Render Manager windows belong to the project too (closed before
         # the timelines, so a running render is cancelled, not failed)
         try:
             import render_manager
@@ -405,7 +405,7 @@ class ProjectManager(QMainWindow):
             QMessageBox.warning(self, "Settings", "global_settings.py not found")
             return
         self.settings_window = GlobalSettingsWindow(self)
-        # BUILD 228: under the menu bar on first open / monitor change
+        # Under the menu bar on first open / monitor change
         place_from_project_manager(self.settings_window, self, "global_settings")
         self.settings_window.show()
 
@@ -560,14 +560,14 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setApplicationName("LaddVideoEditor")
-    # BUILD 114: camera button over every top-level window's title bar
+    # Camera button over every top-level window's title bar
     try:
         from window_snapshot import install_window_snapshots
         install_window_snapshots(app)
     except Exception as e:
         # print("window snapshot install failed: %s" % e)
         pass
-    # BUILD 115: immersive dark title bars on Windows in dark mode
+    # Immersive dark title bars on Windows in dark mode
     try:
         from dark_titlebar import install_dark_titlebars
         install_dark_titlebars(app)

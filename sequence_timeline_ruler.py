@@ -19,7 +19,7 @@ def _tic_setting(key, default):
 
 CLIPS_COL = 2   # Clips column index, shared with sequence_timeline.py
 RULER_HEIGHT = 24
-# BUILD 130: scrub auto-scroll. Within SCRUB_EDGE_PX of either edge of the
+# Scrub auto-scroll. Within SCRUB_EDGE_PX of either edge of the
 # visible Clips area the view pans and the playhead stays SCRUB_EDGE_PX in.
 # While the button is held in (or past) a margin, a SCRUB_TICK_MS timer keeps
 # panning at SCRUB_TICK_GAIN px per tick per px of depth (depth capped at
@@ -29,7 +29,7 @@ SCRUB_TICK_MS = 30
 SCRUB_TICK_GAIN = 0.25
 SCRUB_DEPTH_MAX = 240
 PREVIEW_BAR_HEIGHT = 3   # preview cache bar drawn under the ruler marks
-AUDIO_BAR_HEIGHT = PREVIEW_BAR_HEIGHT   # BUILD 137: audio mix bar below it
+AUDIO_BAR_HEIGHT = PREVIEW_BAR_HEIGHT   # Audio mix bar below it
 
 
 class RulerHeader(QHeaderView):
@@ -41,7 +41,7 @@ class RulerHeader(QHeaderView):
         self.setSectionsMovable(False)
         self.setFixedHeight(RULER_HEIGHT + PREVIEW_BAR_HEIGHT + AUDIO_BAR_HEIGHT)
         self._dragging = False
-        # BUILD 130: scrub auto-scroll state
+        # Scrub auto-scroll state
         self._scrub_x = None        # last mouse x in the Clips area
         self._scrub_rem = 0.0       # sub-frame pan remainder (px)
         self._scrub_panned = False  # view moved during this drag
@@ -118,7 +118,7 @@ class RulerHeader(QHeaderView):
                 sec += interval
         # Preview cache bar under the ruler: red = missing or dirty,
         # green = clean row in {ProjectName}_{sequence_id}_Preview.db. One range query.
-        # BUILD 137: the video bar sits right above the audio bar
+        # The video bar sits right above the audio bar
         bar_y = rect.bottom() - AUDIO_BAR_HEIGHT - PREVIEW_BAR_HEIGHT + 1
         # Clamped to the sequence: nothing drawn before frame 0 (left
         # spacer) or past the last frame
@@ -127,11 +127,11 @@ class RulerHeader(QHeaderView):
         if bar_right > bar_left:
             painter.fillRect(bar_left, bar_y, bar_right - bar_left,
                              PREVIEW_BAR_HEIGHT, QColor(170, 40, 40))
-            # BUILD 137: audio mix bar, one state for the whole sequence:
+            # Audio mix bar, one state for the whole sequence:
             # green = {ProjectName}_{id}_PreviewAudio.wav current, red = dirty / missing /
             # mixing / failed. Same extent as the video bar. Cached state
             # only (sequence_preview_audio.audio_bar_ok): no query here.
-            # BUILD 139: ranges -- [] green, None all red, else green with
+            # Ranges -- [] green, None all red, else green with
             # the still-dirty frame ranges red (audio_bar_ranges, cached)
             audio_dirty = None
             if tl.sequence_id is not None:
@@ -217,13 +217,13 @@ class RulerHeader(QHeaderView):
             self._scrub_x = None
             self._scrub_rem = 0.0
             self._scrub_panned = False
-            # BUILD 335: a scrubber press while playback is running stops
+            # A scrubber press while playback is running stops
             # it before the seek, so the move stays on the stopped path
             tl = self.timeline
             if (getattr(tl, "_playing", False) or getattr(tl, "_play_filling", False)
                     or getattr(tl, "_play_mixing", False)):
                 tl._stop_play()
-            # BUILD 130: a click inside a margin pans at once (the clicked
+            # A click inside a margin pans at once (the clicked
             # frame ends SCRUB_EDGE_PX in); holding there keeps panning
             self._edge_scrub(x)
             self._edge_timer.start()
@@ -275,7 +275,7 @@ class RulerHeader(QHeaderView):
         self._edge_scrub(int(self._scrub_x + start), tick=True)
 
     def _scrub_to(self, frame):
-        # BUILD 111: move the playhead; if the frame changed (and not
+        # Move the playhead; if the frame changed (and not
         # playing), a one-frame audio burst from the preview mix WAV
         tl = self.timeline
         before = tl.current_frame
@@ -304,7 +304,7 @@ class RulerHeader(QHeaderView):
 
 def scrub_edge(x, last_x, width, view, ppf, total, visible, rem=0.0, tick=False,
                margin=SCRUB_EDGE_PX):
-    # BUILD 130: one scrub step. x / last_x: mouse x in the Clips area (may
+    # One scrub step. x / last_x: mouse x in the Clips area (may
     # be < 0 or > width when past the widget); last_x None = press.
     # Returns (view_start_frame, playhead frame, sub-frame remainder px).
     # Middle region: frame under the mouse, view unchanged. In a margin
@@ -480,20 +480,20 @@ class PlayheadOverlay(QWidget):
             painter = QPainter(self)
             painter.fillRect(sx, 0, 1, self.height(), QColor(255, 80, 80))
             painter.end()
-        # BUILD 125: footage drop preview boxes
+        # Footage drop preview boxes
         if getattr(tl, "_drop_preview", None):
             from sequence_timeline_droppreview import paint_preview
             painter = QPainter(self)
             paint_preview(tl, painter)
             painter.end()
-        # BUILD 131: slice-mode line (yellow, 1 px) on the clip under the
+        # Slice-mode line (yellow, 1 px) on the clip under the
         # mouse and its link partners
         if getattr(tl, "_slice_lines", None):
             from sequence_timeline_slice import paint_slice_lines
             painter = QPainter(self)
             paint_slice_lines(tl, painter)
             painter.end()
-        # BUILD 148: rubber-band selection box (white border)
+        # Rubber-band selection box (white border)
         if getattr(tl, "_rubber_rect", None) is not None:
             from sequence_timeline_rubber import paint_rubber
             painter = QPainter(self)

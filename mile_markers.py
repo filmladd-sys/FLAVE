@@ -1,13 +1,13 @@
 # mile_markers.py
-# BUILD 146: mile markers (change points). One sorted list of sequence
+# Mile markers (change points). One sorted list of sequence
 # frames where the composite (picture or sound) can change: every clip in /
 # out, every keyframe clip edge and key (scale, position X / Y, opacity,
-# volume; BUILD 147: crop_x / crop_y, BUILD 154: gamma / brightness /
-# contrast, BUILD 219: rotate, BUILD 222: border px / color, BUILD 294:
-# move x / y, BUILD 295: crop_xy x / y, BUILD 296: crop_edges,
-# BUILD 337: chroma r / g / b / tolerance, all via
+# volume;: crop_x / crop_y: gamma / brightness /
+# contrast: rotate: border px / color:
+# move x / y: crop_xy x / y: crop_edges
+# Chroma r / g / b / tolerance, all via
 # SnapshotIndex.effects), enable / disable, gain and proxy switches and
-# (BUILD 309) a text clip's text / style / position (attributes of a clip,
+# a text clip's text / style / position (attributes of a clip
 # so they change at its in / out). Between two markers the structure is
 # constant (same clips, same keyframe interpolation segment); only the
 # interpolated value moves (existing linear evaluation).
@@ -96,7 +96,7 @@ def _candidates(changed, new_edges, new_rel, old_table):
 
 
 def _clip_deltas(old, new):
-    # BUILD 258: start deltas of the clips found in both snapshots (same
+    # Start deltas of the clips found in both snapshots (same
     # clip id) that moved, most frequent first. A ripple delete moves every
     # clip right of the cut by one delta, and a new span can start inside
     # an old span (a clip on another track that did not move ends there),
@@ -194,7 +194,7 @@ class AudioIndex(object):
     # gain, same written footprint inside the frame, same volume segment
     # for the frame and for its first sample, which the volume mask may
     # count in the frame before), so equal descriptors = equal samples.
-    # BUILD 303: a row may carry a 10th element, its clip speed (older
+    # A row may carry a 10th element, its clip speed (older
     # layouts: 100); a speed other than 100 joins the source offset, since
     # sample a0 + i reads source position src0 + i * speed / 100.
     def __init__(self, layout):

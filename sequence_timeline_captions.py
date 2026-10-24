@@ -91,7 +91,7 @@ def caption_label(painter, label, text_rect):
         max(0, text_rect.width() - 6))
 
 
-# ---- BUILD 236: open caption clip = metadata title bar + text in the pane
+# ---- open caption clip = metadata title bar + text in the pane
 
 CAPTION_TEXT_COLOR = QColor(230, 230, 230)   # same as clip names on the bar
 UNLINKED_TEXT = "Unlinked"
@@ -284,7 +284,7 @@ DEFAULT_CAPTION_TYPE = "WebVTT"
 
 
 class CaptionTrackDialog(QDialog):
-    # BUILD 101: one popup for Name, Language and Type
+    # One popup for Name, Language and Type
     def __init__(self, parent, default_name):
         from PySide6.QtWidgets import (QFormLayout, QLineEdit, QComboBox,
                                        QDialogButtonBox)
@@ -322,7 +322,7 @@ class CaptionTrackDialog(QDialog):
 
 
 def caption_type_text(language, caption_type, flags=""):
-    # BUILD 101: Type column text for a caption track, three lines
+    # Type column text for a caption track, three lines
     return "CC%s\n%s\n%s" % (flags, language or "",
                               caption_type or DEFAULT_CAPTION_TYPE)
 
@@ -445,9 +445,9 @@ def edit_caption(self, clip):
     self._after_clip_change("Caption updated")
 
 
-# ---- Generate Captions (BUILD 225): audio clip right-click
+# ---- Generate Captions: audio clip right-click
 
-_active = set()     # BUILD 233: (sequence_id, clip_id) of runs with an open window
+_active = set()     # (sequence_id, clip_id) of runs with an open window
 
 
 def caption_job_active(sequence_id):
@@ -531,7 +531,7 @@ def generate_captions(self, clip):
         return
     if info is None:
         return
-    # BUILD 231: a model missing from the local cache is downloaded only
+    # A model missing from the local cache is downloaded only
     # after Yes here (the check is local only)
     info["allow_download"] = False
     if not cg.model_present():
@@ -561,7 +561,7 @@ def generate_captions(self, clip):
             pass   # timeline closed
 
     def work():
-        # BUILD 232: model download (after Yes) as its own step, then the
+        # Model download (after Yes) as its own step, then the
         # local-only transcription
         try:
             if info["allow_download"]:
@@ -592,7 +592,7 @@ def _mmss(seconds):
 
 
 def _open_progress(self, cid, job):
-    # BUILD 232: one progress window for the whole run, under the
+    # One progress window for the whole run, under the
     # timeline's menu bar (window_place key caption_progress). Text and bar
     # per stage (_on_stage; the download bytes from a 250 ms timer); Cancel
     # (the title bar X, or Esc) cancels the run (_cancel_generate).
@@ -699,7 +699,7 @@ def _on_stage(self, cid, name, a, b):
     dlg = job["dlg"]
     clip = job["info"]["basename"] or "clip"
     if name.startswith("device:"):
-        # BUILD 275: the device text ("CUDA float16", "CPU int8, N threads",
+        # The device text ("CUDA float16", "CPU int8, N threads"
         # with the CUDA failure note on a fallback) for the labels below
         job["device"] = name[len("device:"):]
         return

@@ -1,5 +1,5 @@
 # sequence_timeline_clips.py
-# BUILD 162: clip parts of the Sequence Timeline window, split out of
+# Clip parts of the Sequence Timeline window, split out of
 # sequence_timeline.py with no behavior change: ClipDelegate and its paint
 # helpers (clip backgrounds, collapsed clip bars, clip names, sequence clip
 # icons), clip hit tests, click selection, move drag / edge trim (snap,
@@ -32,10 +32,10 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QPainter, QColor, QPixmap
 
 
-# BUILD 108: clip backgrounds
+# Clip backgrounds
 VIDEO_CLIP_BG = QColor(70, 90, 130)
 AUDIO_CLIP_BG = QColor(80, 80, 80)
-TEXT_CLIP_BG = QColor(110, 70, 120)   # BUILD 308: WYSIWYG Text clips
+TEXT_CLIP_BG = QColor(110, 70, 120)   # WYSIWYG Text clips
 
 # Zoomed-out drawing: clips narrower than TINY_CLIP_W px are one solid bar in
 # the outline color (adjacent ones merged), plus their markers. Clips
@@ -58,9 +58,9 @@ class ClipDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         if index.column() == COLLAPSE_COL:
-            # BUILD 126: down triangle = open, right triangle = collapsed
+            # Down triangle = open, right triangle = collapsed
             super().paint(painter, option, index)
-            paint_collapse_cell(self.timeline, painter, option, index)   # BUILD 161
+            paint_collapse_cell(self.timeline, painter, option, index)
             return
         if index.column() != CLIPS_COL:
             super().paint(painter, option, index)
@@ -80,10 +80,10 @@ class ClipDelegate(QStyledItemDelegate):
         track_id = name_item.data(Qt.UserRole) if name_item is not None else None
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower() if name_item is not None else ""
         bg = name_item.data(Qt.UserRole + 3) if name_item is not None else ""
-        # BUILD 52 stored #403050 on keyframe tracks; treat like caption/video default (none)
+        # Stored #403050 on keyframe tracks; treat like caption/video default (none)
         if bg and track_type == "keyframe" and bg.lower() == "#403050":
             bg = ""
-        # BUILD 331: hover fill for the Clips lane (style covers Name/Type/
+        # Hover fill for the Clips lane (style covers Name/Type/
         # collapse; custom track bg would otherwise cover the style fill)
         if getattr(tl, "_hover_track_row", -1) == index.row():
             painter.fillRect(rect, TRACK_HOVER_BG)
@@ -93,7 +93,7 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.fillRect(rect, color)
         ppf = tl.pixels_per_frame
         markers = getattr(tl, "_markers", None)
-        # BUILD 303: clip speed (clip_speed.py): label suffix, and the out
+        # Clip speed (clip_speed.py): label suffix, and the out
         # icon / waveform cover the clip's source span
         from clip_speed import speed_of, speed_label, source_span
         speeds = getattr(tl, "_clip_speeds", None)
@@ -124,9 +124,9 @@ class ClipDelegate(QStyledItemDelegate):
             # Disabled clips draw dimmer
             painter.setOpacity(1.0 if clip_enabled else 0.4)
             if collapsed:
-                # BUILD 126: bar + outline + name only (no icons, waveform,
+                # Bar + outline + name only (no icons, waveform
                 # key boxes or markers)
-                # BUILD 305: keyframe clips use their timeline title
+                # Keyframe clips use their timeline title
                 if track_type == "keyframe":
                     from keyframe import keyframe_clip_title
                     cname = keyframe_clip_title(
@@ -148,7 +148,7 @@ class ClipDelegate(QStyledItemDelegate):
                 keys = clip[9] if len(clip) > 9 else []
                 ktype = clip[10] if len(clip) > 10 else ""
                 linked = len(clip) > 8 and clip[8] is not None
-                # BUILD 305: "<name> (unlinked) <N> keys" from the entry's
+                # "<name> (unlinked) <N> keys" from the entry's
                 # name, link_id and in-memory keys, plus the speed suffix
                 paint_keyframe_clip(
                     painter, clip_rect,
@@ -168,7 +168,7 @@ class ClipDelegate(QStyledItemDelegate):
                 painter.drawRect(clip_rect.adjusted(0, 0, -1, -1))
                 painter.setOpacity(1.0)
                 continue
-            # BUILD 128: keyframe-style title bar (black, 1 px white border,
+            # Keyframe-style title bar (black, 1 px white border
             # white name) on top; the content (thumbnails, waveform, caption
             # bar, SEQ icons, markers) is drawn in the rect below it
             from keyframe import split_title_rect, paint_title_bar
@@ -180,27 +180,27 @@ class ClipDelegate(QStyledItemDelegate):
             elif track_type == "text":
                 painter.fillRect(clip_rect, TEXT_CLIP_BG)
             else:
-                # BUILD 108: audio clips gray; video / image keep (70, 90, 130)
+                # Audio clips gray; video / image keep (70, 90, 130)
                 painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
                                  else VIDEO_CLIP_BG)
             text_rect = QRect(clip_rect)
             seq_ref = (getattr(tl, "_seq_refs", None) or {}).get(clip_id)
             src_len = source_span(length_frames, speed_of(speeds, clip_id))
             if track_type == "caption":
-                # Caption: plain bar, no icon, no waveform. BUILD 236: with a
+                # Caption: plain bar, no icon, no waveform. With a
                 # title bar the text is drawn in the pane (word-wrapped);
                 # without one (short row) the old one-line name below
                 if title_rect is not None and detail:
                     from sequence_timeline_captions import paint_caption_text
                     paint_caption_text(painter, clip_rect, filename or "", rect)
             elif track_type == "text":
-                # BUILD 308: WYSIWYG Text: plain bar, the name (first line of
+                # WYSIWYG Text: plain bar, the name (first line of
                 # the text) in the title bar; no icon, waveform or markers
                 pass
             elif seq_ref is not None:
-                # BUILD 105: sequence clip, left / right sequence icons and
+                # Sequence clip, left / right sequence icons and
                 # the child name (no footage icon, waveform or peaks)
-                # BUILD 108: track colors (video blue / audio gray)
+                # Track colors (video blue / audio gray)
                 painter.fillRect(clip_rect, AUDIO_CLIP_BG if track_type == "audio"
                                  else VIDEO_CLIP_BG)
                 ih = ch
@@ -302,16 +302,16 @@ class ClipDelegate(QStyledItemDelegate):
                 label = filename or ""
                 if clip_solo:
                     label += " [S]"
-                # BUILD 165: non-zero clip gain after the name
+                # Non-zero clip gain after the name
                 gain_db = (getattr(tl, "_clip_gains", None) or {}).get(clip_id, 0.0)
                 if gain_db:
                     from clip_gain import gain_label
                     label += gain_label(gain_db)
-                # BUILD 303: speed != 100 after the name / gain (" 200%")
+                # Speed != 100 after the name / gain (" 200%")
                 label += speed_label(speed_of(speeds, clip_id))
             if title_rect is not None:
-                # BUILD 128: the name lives in the title bar (sticky left,
-                # elided); no in-content name. BUILD 236: caption title =
+                # The name lives in the title bar (sticky left
+                # elided); no in-content name. caption title =
                 # "Caption | For Clip | In - Out" (+ [S]), text in the pane
                 if track_type == "caption" and detail:
                     from sequence_timeline_captions import caption_title
@@ -319,7 +319,7 @@ class ClipDelegate(QStyledItemDelegate):
                         speed_of(speeds, clip_id)) + (" [S]" if clip_solo else "")
                 paint_title_bar(painter, title_rect, label, rect)
             elif clip_rect.width() > 0 and detail:
-                # Row too short for a bar: BUILD 127 in-content name
+                # Row too short for a bar: in-content name
                 draw_clip_name(painter, text_rect, rect, label,
                                caption=(track_type == "caption"),
                                backing=(track_type == "audio" and seq_ref is None),
@@ -424,7 +424,7 @@ NAME_MIN_PX = 24   # narrower than this between the icons: draw over them
 
 def draw_clip_name(painter, text_rect, visible_rect, label, caption=False,
                    backing=False, pad=4, fallback_rect=None):
-    # BUILD 127: clip name, left-aligned with padding, sticky to the
+    # Clip name, left-aligned with padding, sticky to the
     # visible left edge of the Clips area, elided at the clip / visible
     # right edge; vertically centered in text_rect as before. Same font and
     # color (230, 230, 230). backing: subtle dark box behind the text.
@@ -454,8 +454,8 @@ def draw_clip_name(painter, text_rect, visible_rect, label, caption=False,
 
 def paint_collapsed_clip(painter, clip_rect, track_type, selected, label,
                          visible_rect=None):
-    # BUILD 126: collapsed track clip: bar, outline, name in a font that
-    # fits the 16 px row, and nothing else. BUILD 127: name left-aligned
+    # Collapsed track clip: bar, outline, name in a font that
+    # fits the 16 px row, and nothing else. name left-aligned
     # and sticky like open clips (draw_clip_name).
     from PySide6.QtGui import QFont
     painter.fillRect(clip_rect, COLLAPSED_BAR_COLORS.get(track_type, VIDEO_CLIP_BG))
@@ -472,7 +472,7 @@ def paint_collapsed_clip(painter, clip_rect, track_type, selected, label,
 
 
 def moving_marker_frames(markers, group, drag_clip, speeds=None):
-    # BUILD 110: timeline frames, at delta 0, of the visible markers on the
+    # Timeline frames, at delta 0, of the visible markers on the
     # clips of a move drag (group entries {"clip", "start", ...}; the
     # dragged clip itself if the group lacks it). Positive clip ids only
     # (video / image / audio), like marker drawing. speeds: clip speed map
@@ -500,7 +500,7 @@ def moving_marker_frames(markers, group, drag_clip, speeds=None):
 
 
 def sequence_clip_icon(height, right):
-    # BUILD 105: square in / out icon for sequence clips, drawn once per
+    # Square in / out icon for sequence clips, drawn once per
     # height: a stack of three frames with 'SEQ'; the right icon is the
     # mirror image (like the video in / out icons at the clip edges)
     height = int(height)
@@ -607,7 +607,7 @@ def _clear_selection(self):
 def _select_clip(self, clip, mode):
     # mode: "normal" = clip + link partners, "solo" = only clip with
     # selection solo on, "add" = add clip and its link partners (keep
-    # existing selection; drop nothing), "add_one" = BUILD 329 Alt+Shift:
+    # existing selection; drop nothing), "add_one" = Alt+Shift:
     # toggle ONLY this clip into / out of the multi-set (no link partners)
     if mode == "add_one":
         # Premiere-style additive toggle of the clicked clip alone
@@ -671,7 +671,7 @@ def _drag_group(self, clip, edge="move"):
     from keyframe import is_keyframe_clip_id
     for c in members:
         prev_end, next_start = self._neighbor_bounds(c, c[2], c[3], ignore_ids=ids)
-        # BUILD 134: every non-moving clip on this member's track, for
+        # Every non-moving clip on this member's track, for
         # the jump-past-a-blocker move (clip_drag.py)
         blocks = [(o[2], o[2] + o[3])
                   for o in self.clips_by_track.get(self._clip_track_id(c), [])
@@ -680,7 +680,7 @@ def _drag_group(self, clip, edge="move"):
                  "prev_end": prev_end, "next_start": next_start,
                  "blocks": blocks,
                  "free_in": _no_source_floor(self, c),
-                 # BUILD 303: clip speed percent (clip_speed.py)
+                 # Clip speed percent (clip_speed.py)
                  "speed": (getattr(self, "_clip_speeds", None) or {}).get(c[0], 100)}
         if is_keyframe_clip_id(c[0]) and len(c) > 9:
             entry["keys"] = list(c[9])
@@ -691,7 +691,7 @@ def _drag_group(self, clip, edge="move"):
 
 
 def _add_source_caps(self, group):
-    # BUILD 301: for a right trim, each video / audio footage clip gets
+    # For a right trim, each video / audio footage clip gets
     # "src_end", the cap on its source out-point (in + length, sequence
     # frames): footage.duration rounded up to a whole second
     # (sequence_timeline_sql.source_cap_frames). Image, caption, keyframe
@@ -734,8 +734,8 @@ def _no_source_floor(self, clip):
     return self._track_type(self._clip_track_id(clip)) == "image"
 
 
-# BUILD 238: edge auto-scroll while a clip / selection / link group is
-# moved or (BUILD 300) edge-trimmed, left or right edge, with the scrub's
+# Edge auto-scroll while a clip / selection / link group is
+# moved or edge-trimmed, left or right edge, with the scrub's
 # rule and margin
 # (sequence_timeline_ruler.scrub_edge, SCRUB_EDGE_PX, SCRUB_TICK_MS timer):
 # in a margin the view pans by the mouse travel into it plus a timer tick
@@ -752,7 +752,7 @@ def _move_pan(self, drag, pos, tick=False):
                        self.table.viewport().width() - left))
     xc = pos.x() - left
     last = xc if tick else drag.get("pan_x")
-    # BUILD 300: the scroll limit is the sequence end or the dragged group's
+    # The scroll limit is the sequence end or the dragged group's
     # live end, whichever is later, so a clip moved or trimmed past the end
     # keeps the view scrolling (the end's right pad stays ahead of it)
     total = self.total_frames()
@@ -817,7 +817,7 @@ def _edge_drag_move(self, pos, tick=False):
     group = drag.get("group") or self._drag_group(clip)
     drag["group"] = group
     edge = drag["edge"]
-    # BUILD 238 (moves) / BUILD 300 (trims): pan at the edges first, then
+    # (moves) / (trims): pan at the edges first, then
     # use the frame under the cursor in the (possibly scrolled) view
     drag["pan_pos"] = pos
     timer = _move_pan_timer(self)
@@ -856,7 +856,7 @@ def _edge_drag_move(self, pos, tick=False):
         delta = max(delta, -min(m["start"] for m in group))
         drag["cur_delta"] = delta
     elif edge == "move" and all("blocks" in m for m in group):
-        # BUILD 134: waits at a blocking clip's edge, jumps past it
+        # Waits at a blocking clip's edge, jumps past it
         # once the mouse is past it and the whole group fits there
         from clip_drag import legal_components, move_delta
         comps = drag.get("legal")
@@ -880,7 +880,7 @@ def _edge_drag_move(self, pos, tick=False):
         elif edge == "left":
             # Start trim: keyframe keys keep their sequence frames (the
             # edge reveals or hides them); only a move shifts them
-            # BUILD 303: the in-point moves by the source frames delta
+            # The in-point moves by the source frames delta
             # timeline frames cover at the clip's speed
             from clip_speed import source_offset
             c[2] = m["start"] + delta
@@ -928,7 +928,7 @@ def _snap_drag_delta(self, drag, group, pos, delta):
         if edge == "move":
             raw = (frame_f - drag["grab_offset"]) - start
             edges = [start, start + length]
-            # BUILD 110: visible markers of every clip moving together
+            # Visible markers of every clip moving together
             # are snap sources too, at their drag-start (delta 0)
             # frames. Listed after the edges so an edge wins a tie.
             edges += moving_marker_frames(
@@ -985,7 +985,7 @@ def _group_delta_range(self, group, edge):
             # clips with source media in + d >= 0. Keyframe, caption and
             # image clips (free_in) have no source floor, so a linked
             # stack is held only by its video / audio members' in-points.
-            # BUILD 303: at speed s the in-point moves by floor(d * s /
+            # At speed s the in-point moves by floor(d * s /
             # 100), so in + that >= 0 is d >= -floor(in * 100 / s).
             lo = max(lo, max(0, prev_end) - start)
             speed = m.get("speed", 100)
@@ -993,10 +993,10 @@ def _group_delta_range(self, group, edge):
                 lo = max(lo, -in_f if speed == 100 else -((in_f * 100) // speed))
             hi = min(hi, length - 1)
         else:
-            # length + d >= 1; end + d <= next_start; BUILD 301: in +
+            # length + d >= 1; end + d <= next_start;: in +
             # length + d <= src_end (footage clips, _add_source_caps), so
             # the group stops at the tightest cap. A clip already past its
-            # cap may not grow but is not cut back. BUILD 303: at speed s
+            # cap may not grow but is not cut back. At speed s
             # the source used is clip_speed.source_span(length, s), so the
             # longest length is max_length_for_source(src_end - in, s).
             lo = max(lo, 1 - length)
@@ -1092,7 +1092,7 @@ def _relocate_clip(self, clip, track_id):
 
 # Track moves keep time and move the whole drag group (a linked stack, or
 # the selection): the dragged clip goes to the track under the mouse.
-# BUILD 259: pack move first (_pack_plan): every member, captions and
+# Pack move first (_pack_plan): every member, captions and
 # keyframes included, moves by the same number of rows in the track list,
 # so a stack on V1, C1, A1, A2 lands on the next V2, C2, A3, A4 laid out
 # the same way. It is used when every destination row has its member's
@@ -1117,7 +1117,7 @@ def _tracks_of_type(self, ttype):
 
 
 def _pack_plan(self, drag, target, src_tracks):
-    # BUILD 259: {clip id: track id} moving every member by the row offset
+    # {clip id: track id} moving every member by the row offset
     # from the dragged clip's track to target, or None when a destination
     # row is missing, has another track type, or holds a clip that is not
     # moving over that member's drag-start frames
@@ -1269,7 +1269,7 @@ def _move_drag_release(self):
         if refused:
             self._after_clip_change("Move refused: overlaps a clip on the target track")
         else:
-            # BUILD 139: a track move changes the layer order only where
+            # A track move changes the layer order only where
             # the stack differs; the snapshot diff at the refresh marks
             # exactly those frames (was: the clip's whole range)
             self._after_clip_change(f"Clip moved to track {target}")
@@ -1283,7 +1283,7 @@ def _move_drag_release(self):
         # Shift held at the drop: slice and push every track to make room
         insert_drop(self, group)
         return
-    # BUILD 134: drop guard -- a final position that overlaps a clip on
+    # Drop guard -- a final position that overlaps a clip on
     # any moved clip's track (or is below 0) is refused, nothing saved
     from clip_drag import overlaps
     if all("blocks" in m for m in group) and overlaps(
@@ -1310,13 +1310,13 @@ def _move_drag_release(self):
         # clean frames with it (run right after the next forced
         # retarget, see _retarget_preview); otherwise old and new
         # ranges go dirty
-        # BUILD 146: no per-edit plan: the mile-marker diff at the
+        # No per-edit plan: the mile-marker diff at the
         # refresh finds the pure move (and its dirty spans) by itself
         # ranges = self._move_preview_ranges(group, drag)
         # plan = self._preview_shift_plan(group, drag)
         # if plan is not None:
         #     self._preview_pending_shift = (plan, ranges)
-        # BUILD 139: otherwise the snapshot diff at the refresh marks
+        # Otherwise the snapshot diff at the refresh marks
         # only the frames that changed (was: old and new ranges)
     except Exception as e:
         QMessageBox.warning(self, "Move Clip", f"Could not save clip: {e}")
@@ -1394,7 +1394,7 @@ def _preview_shift_plan(self, group, drag):
             if is_keyframe_clip_id(c[0]) or kind in ("video", "image"):
                 visual = visual or kind in ("video", "image")
                 span.append((old, old + max(1, int(c[3])) - 1))
-        # BUILD 139: an unlinked clip (group of one) may shift too; the
+        # An unlinked clip (group of one) may shift too; the
         # snapshot check (shift_ok) proves the move before it runs
         if len(deltas) != 1 or not visual or not span:
             return None
@@ -1446,18 +1446,18 @@ def _clip_context_menu(self, clip, pos):
     from keyframe import is_keyframe_clip_id, add_key as _add_key
     if is_keyframe_clip_id(clip[0]):
         menu = QMenu(self)
-        clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
+        clip_acts = self._add_clipboard_actions(menu)     # Top
         key_menu = menu.addMenu("Key")
         key_click_action = key_menu.addAction("Add At Mouse Click")
         key_tick_action = key_menu.addAction("Add At Playhead")
-        # BUILD 270: paste a copied key (Copy Keyframe on a key box)
+        # Paste a copied key (Copy Keyframe on a key box)
         from keyframe import can_paste_key, paste_frame, paste_key
         paste_menu = key_menu.addMenu("Paste")
         paste_acts = {paste_menu.addAction("At Mouse Click"): "mouse",
                       paste_menu.addAction("At Playhead"): "playhead",
                       paste_menu.addAction("At Clip Center"): "center"}
         paste_menu.setEnabled(can_paste_key(clip))
-        # BUILD 260: keys outside the clip's [in, out) of the right-clicked
+        # Keys outside the clip's [in, out) of the right-clicked
         # keyframe clip, or of every selected keyframe clip when it is
         # selected; disabled when there are none
         from keyframe import keys_beyond_horizon
@@ -1467,31 +1467,31 @@ def _clip_context_menu(self, clip, pos):
                               if c[0] != clip[0] and is_keyframe_clip_id(c[0])]
         horizon_action = key_menu.addAction("Delete Keys Beyond Event Horizon")
         horizon_action.setEnabled(any(keys_beyond_horizon(c) for c in horizon_clips))
-        # BUILD 263 / 266: listed when a clip in the same scope has a key
+        # Listed when a clip in the same scope has a key
         # beyond the horizon; in each such clip the nearest one is centered
         # and the other keys beyond it are deleted
         center_action = None
         if any(keys_beyond_horizon(c) for c in horizon_clips):
             center_action = key_menu.addAction("Center Key Beyond Event Horizon")
-        # BUILD 303: clip speed, whole link stack (clip_speed.py)
+        # Clip speed, whole link stack (clip_speed.py)
         speed_action = menu.addAction("Speed...")
         rename_action = menu.addAction("Rename")
-        # BUILD 221: a new keyframe clip of any type on this track, starting
+        # A new keyframe clip of any type on this track, starting
         # at this clip's out frame (the Add Keyframe Clip dialog; it fills
         # the free gap after this clip, see keyframe.add_keyframe_clip)
         add_after_action = menu.addAction("Add Keyframe Clip After")
-        # BUILD 133: Link / Unlink from the whole selection
+        # Link / Unlink from the whole selection
         link_action, unlink_action = self._add_link_actions(menu, clip)
         menu.addSeparator()
-        # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+        # clip_acts = self._add_clipboard_actions(menu) #
         # menu.addSeparator()
         delete_action = menu.addAction("Delete")
-        ripple_action = menu.addAction("Ripple Delete")     # BUILD 245
+        ripple_action = menu.addAction("Ripple Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action is None:
             return
         # if self._run_clipboard_action(action, clip_acts, clip):
-        if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
+        if self._run_clipboard_action(action, clip_acts, clip, pos):
             return
         if action in paste_acts:
             click_frame = self.view_start_frame + self._x_in_clips(pos) / self.pixels_per_frame
@@ -1530,24 +1530,24 @@ def _clip_context_menu(self, clip, pos):
     from text_clip import is_text_clip_id
     if is_caption_id(clip[0]) or is_text_clip_id(clip[0]):
         # Caption clip menu: Edit, Slice, Link or Unlink, Delete
-        # (BUILD 133: one of the two, same rule as the other clip menus).
-        # BUILD 308: WYSIWYG Text clips use it without Edit (their text
+        # (one of the two, same rule as the other clip menus).
+        # WYSIWYG Text clips use it without Edit (their text
         # and style are edited in the text style window)
         menu = QMenu(self)
-        clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
+        clip_acts = self._add_clipboard_actions(menu)     # Top
         edit_action = (menu.addAction("Edit") if is_caption_id(clip[0])
                        else None)
         slice_action = menu.addAction("Slice")
-        speed_action = menu.addAction("Speed...")     # BUILD 303
+        speed_action = menu.addAction("Speed...")
         link_action, unlink_action = self._add_link_actions(menu, clip)
         menu.addSeparator()
-        # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+        # clip_acts = self._add_clipboard_actions(menu) #
         # menu.addSeparator()
         delete_action = menu.addAction("Delete")
-        ripple_action = menu.addAction("Ripple Delete")     # BUILD 245
+        ripple_action = menu.addAction("Ripple Delete")
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         # if self._run_clipboard_action(action, clip_acts, clip):
-        if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
+        if self._run_clipboard_action(action, clip_acts, clip, pos):
             return
         if edit_action is not None and action == edit_action:
             self.edit_caption(clip)
@@ -1567,30 +1567,30 @@ def _clip_context_menu(self, clip, pos):
         return
     enabled = bool(clip[5])
     menu = QMenu(self)
-    clip_acts = self._add_clipboard_actions(menu)     # BUILD 159: top
+    clip_acts = self._add_clipboard_actions(menu)     # Top
     # Gain... on audio-track clips only (the only rows the preview audio
     # mixes); right-clicked clip only, like Enable / Solo
     gain_action = None
     gen_caps_action = None
-    # BUILD 105: sequence clips have no footage: no Gain / Proxy
+    # Sequence clips have no footage: no Gain / Proxy
     is_seq_clip = clip[0] in (getattr(self, "_seq_refs", None) or {})
     if self._track_type(self._clip_track_id(clip)) == "audio" and not is_seq_clip:
         gain_action = menu.addAction("Gain...")
-        # BUILD 225: transcribe into a new caption track above this track
+        # Transcribe into a new caption track above this track
         gen_caps_action = menu.addAction("Generate Captions")
         menu.addSeparator()
     slice_action = menu.addAction("Slice")
-    # BUILD 283: Scene Detect (Slice) on video-track clips with footage
+    # Scene Detect (Slice) on video-track clips with footage
     # (sequence_timeline_scenes; slices this clip and its link partners)
     scene_action = None
     if self._track_type(self._clip_track_id(clip)) == "video" and not is_seq_clip:
         scene_action = menu.addAction("Scene Detect (Slice)")
-    # BUILD 303: clip speed, whole link stack (clip_speed.py)
+    # Clip speed, whole link stack (clip_speed.py)
     speed_action = menu.addAction("Speed...")
     marker_menu = menu.addMenu("Marker")
     marker_click_action = marker_menu.addAction("Add To Mouse Click")
     marker_tick_action = marker_menu.addAction("Add to Time Tick")
-    # BUILD 133: Link / Unlink from the whole selection
+    # Link / Unlink from the whole selection
     link_action, unlink_action = self._add_link_actions(menu, clip)
     menu.addSeparator()
     enable_action = menu.addAction("Disable" if enabled else "Enable")
@@ -1604,14 +1604,14 @@ def _clip_context_menu(self, clip, pos):
         from clip_proxy import add_clip_proxy_submenu
         proxy_actions = add_clip_proxy_submenu(self, menu, clip)
     menu.addSeparator()
-    # clip_acts = self._add_clipboard_actions(menu)     # BUILD 156
+    # clip_acts = self._add_clipboard_actions(menu) #
     # menu.addSeparator()
     delete_action = menu.addAction("Delete")
-    # BUILD 245: Delete, then close the gaps (sequence_timeline_sql.ripple_delete_clips)
+    # Delete, then close the gaps (sequence_timeline_sql.ripple_delete_clips)
     ripple_action = menu.addAction("Ripple Delete")
     action = menu.exec(self.table.viewport().mapToGlobal(pos))
     # if self._run_clipboard_action(action, clip_acts, clip):
-    if self._run_clipboard_action(action, clip_acts, clip, pos):   # BUILD 160
+    if self._run_clipboard_action(action, clip_acts, clip, pos):
         return
     if action is not None and action in proxy_actions:
         from clip_proxy import apply_clip_proxy
@@ -1684,7 +1684,7 @@ def _edge_drag_release(self):
                 continue
             table, row_id = clip_table_and_id(c[0])
             if table != "clips":
-                # captions / BUILD 308 text_clips: time only
+                # captions / text_clips: time only
                 cur.execute(
                     f"UPDATE {table} SET start_frame = ?, length_frames = ? WHERE id = ?",
                     (c[2], c[3], row_id)
@@ -1697,7 +1697,7 @@ def _edge_drag_release(self):
             )
         conn.commit()
         conn.close()
-        # Preview (BUILD 139): the snapshot diff at the refresh below
+        # Preview: the snapshot diff at the refresh below
         # marks only the frames the trim changes (the added / removed
         # end, or the whole clip when its source or keys shift); was:
         # old and new ranges of trimmed clips and linked partners
@@ -1738,7 +1738,7 @@ def _clip_track_id(self, clip):
 
 
 def _clip_press_select(self, event, press_pos):
-    # BUILD 162: the click-selection part of eventFilter's left press
+    # The click-selection part of eventFilter's left press
     # (normal / Alt / Shift / Alt+Shift / already selected / empty space).
     # Returns hit_clip for the caller, which still uses it after the key
     # check.
@@ -1751,7 +1751,7 @@ def _clip_press_select(self, event, press_pos):
     mods = event.modifiers() | QApplication.queryKeyboardModifiers()
     if hit_clip is None:
         if self._x_in_clips(press_pos) >= 0:
-            # BUILD 336: a Shift marquee was just armed on this press.
+            # A Shift marquee was just armed on this press.
             # Leave the selection so the box adds to it, and so the next
             # drag while Shift is still held can add again. A plain click
             # (no Shift) still clears.
@@ -1759,7 +1759,7 @@ def _clip_press_select(self, event, press_pos):
             if not (rb is not None and rb.get("add")):
                 self._clear_selection()
     elif (mods & Qt.AltModifier) and (mods & Qt.ShiftModifier):
-        # BUILD 329: Alt+Shift = toggle ONLY this clip into the multi-set
+        # Alt+Shift = toggle ONLY this clip into the multi-set
         # (not its linked stack). Accumulate across stacks; toggle off if
         # already selected.
         self._select_clip(hit_clip, "add_one")
@@ -1779,7 +1779,7 @@ def _clip_press_select(self, event, press_pos):
 
 
 def _clip_press_drag(self, event):
-    # BUILD 162: eventFilter's left press, edge trim / move drag start.
+    # EventFilter's left press, edge trim / move drag start.
     # True when a drag started (the caller returns True then).
     hit = self._clip_edge_at(event.position().toPoint())
     if hit is not None:
@@ -1814,7 +1814,7 @@ def _clip_press_drag(self, event):
 
 
 def _clip_edge_cursor(self, obj, pos):
-    # BUILD 162: eventFilter's mouse move, edge-resize pointer over a clip edge
+    # EventFilter's mouse move, edge-resize pointer over a clip edge
     if self._clip_edge_at(pos) is not None:
         obj.setCursor(Qt.SplitHCursor)
     else:
@@ -1822,8 +1822,8 @@ def _clip_edge_cursor(self, obj, pos):
 
 
 def _clip_drag_release(self):
-    # BUILD 162: eventFilter's left release of a clip drag (move or edge)
-    _move_pan_stop(self, self._edge_drag)     # BUILD 238
+    # EventFilter's left release of a clip drag (move or edge)
+    _move_pan_stop(self, self._edge_drag)
     if self._edge_drag["edge"] == "move":
         self._move_drag_release()
     else:

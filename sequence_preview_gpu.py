@@ -1,5 +1,5 @@
 # sequence_preview_gpu.py
-# BUILD 141: headless GPU composite for the preview worker, so
+# Headless GPU composite for the preview worker, so
 # {ProjectName}_{sequence_id}_Preview.db fills in the background with no Sequence Player
 # open. No window and no GL: the process-wide CUDA primary context
 # (cuda_context, the same one an open player attaches to), one stream and
@@ -11,14 +11,14 @@
 # _GEN_LOCK; released when a player for the sequence is open (one set of
 # decoders / NVDEC sessions), when the worker goes idle on a closed
 # timeline, or when it switches sequence. ASCII only.
-# BUILD 142: the render uses its own composer of this class (new_composer /
+# The render uses its own composer of this class (new_composer /
 # free_composer): own decoders and buffers, no Sequence Player, no GL.
-# BUILD 145: the frame engine. _COMPOSER is the one composer of the preview
+# The frame engine. _COMPOSER is the one composer of the preview
 # fill whether or not a Sequence Player is open (the player only presents
 # and holds no decoders), so opening or closing the player no longer tears
 # down and rebuilds the decoders. It is released only when the worker goes
 # idle on a closed timeline or switches sequence (not on player open, as
-# the BUILD 141 note above said). The render keeps a private composer:
+# the note above said). The render keeps a private composer:
 # it decodes the originals (the preview decodes proxies) at full speed, and
 # sharing one decoder set would make each side prune the other's decoders
 # (_prune_decoders keeps only the snapshot's clips) and seek every batch.
@@ -171,7 +171,7 @@ def _sequence_size(project, sequence_id):
 
 def headless_for(project, sequence_id):
     # Worker thread: the headless composer for this sequence (created on
-    # first use, replaced when the sequence or its size changes; BUILD 145:
+    # first use, replaced when the sequence or its size changes;:
     # kept while a player opens and closes), or None
     # when the GPU setup failed (not retried for that key this session).
     w, h = _sequence_size(project, sequence_id)
@@ -190,7 +190,7 @@ def headless_for(project, sequence_id):
             _borrow()
         comp = HeadlessComposer(project, sequence_id, w, h)
         import time
-        import preview_log      # BUILD 247
+        import preview_log
         t_setup = time.perf_counter()
         try:
             comp.setup()
@@ -224,7 +224,7 @@ def release_headless():
 
 
 def new_composer(project, sequence_id):
-    # BUILD 142: a private headless composer (the render's), not the
+    # A private headless composer (the render's), not the
     # preview worker's slot: own decoders, images and buffers on the shared
     # context. Raises when the GPU setup fails (nothing left allocated).
     w, h = _sequence_size(project, sequence_id)
@@ -242,7 +242,7 @@ def new_composer(project, sequence_id):
 
 
 def free_composer(comp):
-    # BUILD 142: free a composer from new_composer (any thread)
+    # Free a composer from new_composer (any thread)
     if comp is None:
         return
     with _GEN_LOCK:

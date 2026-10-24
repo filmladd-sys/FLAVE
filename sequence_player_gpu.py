@@ -24,7 +24,7 @@ _gui_wants = [0]
 _gui_last = [0.0]
 _GUI_QUIET = [0.25]
 _worker_burst = [False]
-# BUILD 170: explicit refresh pass running: the worker takes the lock at
+# Explicit refresh pass running: the worker takes the lock at
 # once (no wait for GUI activity); set by the preview worker
 _worker_fast = [False]
 
@@ -78,7 +78,7 @@ def _check(err, name):
 
 
 def _cuda_toolkit_dir():
-    # BUILD 231: the CUDA toolkit install folder under Program Files
+    # The CUDA toolkit install folder under Program Files
     # (%ProgramW6432% / %ProgramFiles%), "" when neither is set (not Windows)
     base = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles") or ""
     return os.path.join(base, "NVIDIA GPU Computing Toolkit", "CUDA") if base else ""
@@ -179,7 +179,7 @@ class _NvJpegEncoder(object):
     # nvJPEG allocates a state's device memory at its first encode, not
     # at create; the refresh warms its states in reserve_refresh_pool
     # (sequence_player_preview) before it measures free VRAM.
-    # BUILD 317: max_states (per encoder, 1..STATES_MAX) is the real cap
+    # Max_states (per encoder, 1..STATES_MAX) is the real cap
     # on states; sequence_player_preview sets it from the state cost at
     # the encode size (set_max_states), so a big frame size cannot fill
     # the card with states. STATES_MAX stays the upper bound.
@@ -293,7 +293,7 @@ class _NvJpegEncoder(object):
                 self.lib.nvjpegEncoderStateDestroy(st)
 
     def set_max_states(self, n):
-        # BUILD 317: cap on encode_many's states, clamped to
+        # Cap on encode_many's states, clamped to
         # 1..STATES_MAX; states beyond it are freed now
         self.max_states = max(1, min(self.STATES_MAX, int(n)))
         self.trim(self.max_states)
@@ -419,12 +419,12 @@ def _libs():
     cudart.cudaMalloc.restype = c.c_int
     cudart.cudaFree.argtypes = [c.c_void_p]
     cudart.cudaFree.restype = c.c_int
-    # BUILD 170: free / total device memory (refresh batch size)
+    # Free / total device memory (refresh batch size)
     cudart.cudaMemGetInfo.argtypes = [c.POINTER(c.c_size_t), c.POINTER(c.c_size_t)]
     cudart.cudaMemGetInfo.restype = c.c_int
     cudart.cudaMemcpy.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t, c.c_int]
     cudart.cudaMemcpy.restype = c.c_int
-    # BUILD 339: stacked chroma keys, host to device on the blend stream
+    # Stacked chroma keys, host to device on the blend stream
     cudart.cudaMemcpyAsync.argtypes = [c.c_void_p, c.c_void_p, c.c_size_t,
                                        c.c_int, c.c_void_p]
     cudart.cudaMemcpyAsync.restype = c.c_int
@@ -538,7 +538,7 @@ GL_QUADS = 0x0007
 # opacity (0..1) multiplies the layer alpha (opacity keyframes).
 # Sampling is at pixel centers (x + 0.5 in, - 0.5 out): identical at
 # inv_scale 1, and a scaled proxy frames to the same pixels as the original.
-# BUILD 219: rot_cos / rot_sin (cos and sin of the rotate keyframe angle;
+# Rot_cos / rot_sin (cos and sin of the rotate keyframe angle
 # 1, 0 = no rotation). The layer turns about its center on screen (the
 # dest center plus pos_dx / pos_dy); a positive angle turns the picture
 # clockwise (y down). Per dest pixel the offset from that center
@@ -551,7 +551,7 @@ GL_QUADS = 0x0007
 # u starts as dx * cos (mul.rn) and adds dy * sin (fma.rn); v likewise
 # from dy * cos and dx * -sin. At cos 1, sin 0 both are exact (x * 1 = x,
 # x + y * 0 = x), so no rotation is bit-exact with the unrotated kernel.
-# BUILD 220: outline_w / outline_rgba (border outline keyframes; width in
+# Outline_w / outline_rgba (border outline keyframes; width in
 # sequence pixels, 0 = off; color r | g << 8 | b << 16 | a << 24). A dest
 # pixel the layer does not draw (its sample is outside the source or the
 # crop) goes to OUTLINE instead of DONE. With width 0 it ends there
@@ -567,14 +567,14 @@ GL_QUADS = 0x0007
 # with the clip); it then blends the outline RGB at alpha outline_a *
 # opacity through the same COLOR_DONE math (color keyframes do not apply
 # to it). Pixels the layer draws are unchanged.
-# BUILD 154: color_flags / contrast / brightness / inv_gamma: per source
+# Color_flags / contrast / brightness / inv_gamma: per source
 # RGB channel c = v / 255, in this order, each step only when its flag bit
 # is set (identity = not set): 1 contrast (c - 0.5) * contrast + 0.5,
 # clamp 0..1; 2 brightness c + brightness (-1..1), clamp 0..1; 4 gamma
 # c ** inv_gamma (inv_gamma = 1 / gamma). Back to round(c * 255). Alpha and
 # the opacity blend after it are unchanged; flags 0 skips it all.
-# BUILD 337: jokey classic chroma key on the source RGB, before color and
-# the opacity blend. BUILD 339: chroma_n / chroma_ptr. chroma_n 0 skips it
+# Jokey classic chroma key on the source RGB, before color and
+# the opacity blend. chroma_n / chroma_ptr. chroma_n 0 skips it
 # (bit-exact, chroma_ptr is not read). Otherwise chroma_ptr is n tightly
 # packed keys, each four floats r, g, b, tolerance (0..255; tolerance is
 # Euclidean distance in that space). A pixel whose distance to any key is
@@ -582,16 +582,16 @@ GL_QUADS = 0x0007
 # alpha 0. Keys combine: punching color A then color B. No spill
 # suppression. Edges stay rough. The outline band is not keyed (it joins
 # at COLOR_DONE, after this test).
-# BUILD 152: crop_y is the same real crop on y: drawn only if the source
+# Crop_y is the same real crop on y: drawn only if the source
 # pixel center lies in [crop_y, sh - crop_y] (top and bottom; picture in
-# place; <= 0 = no crop; >= sh / 2 hides the layer). The BUILD 147 y shift
+# place; <= 0 = no crop; >= sh / 2 hides the layer). The y shift
 # below no longer applies either.
-# BUILD 151: crop_x is a real crop: a source pixel is drawn only if its
+# Crop_x is a real crop: a source pixel is drawn only if its
 # center lies in [crop_x, sw - crop_x] (crop_x source pixels removed from
 # the left and from the right; the picture does not move; crop_x <= 0 = no
-# crop; crop_x >= sw / 2 hides the layer). crop_y keeps the BUILD 147 rule
-# below. The BUILD 147 note (crop_x part no longer applies):
-# BUILD 147: crop_x / crop_y (source pixels, f32; 0 = unchanged). The layer
+# crop; crop_x >= sw / 2 hides the layer). crop_y keeps the rule
+# below. The note (crop_x part no longer applies):
+# Crop_x / crop_y (source pixels, f32; 0 = unchanged). The layer
 # box is tested at the uncropped source position (sx, sy) as before; the
 # pixel is then read at (sx + crop_x, sy + crop_y), and a read outside the
 # source leaves the destination as it is (cropped away). Positive crop_x
@@ -663,7 +663,7 @@ PTX = b"""
     sub.f32 fx, fx, fdx;
     sub.f32 fy, fy, fcy;
     sub.f32 fy, fy, fdy;
-    // BUILD 219: inverse rotation of (dx, dy) about the layer center,
+    // Inverse rotation of (dx, dy) about the layer center
     // u = c * dx + s * dy, v = -s * dx + c * dy (exact at c 1, s 0)
     ld.param.f32 frc, [rot_cos];
     ld.param.f32 frs, [rot_sin];
@@ -696,7 +696,7 @@ PTX = b"""
     @p bra OUTLINE;
     ld.param.f32 fcrx, [crop_x];
     ld.param.f32 fcry, [crop_y];
-    // BUILD 151: crop_x removes fcrx source px from the left and from the
+    // Crop_x removes fcrx source px from the left and from the
     // right of the source (the picture stays in place); was a shift:
     // add.f32 fx, fx, fcrx;
     cvt.rn.f32.s32 fsx, sx;
@@ -707,7 +707,7 @@ PTX = b"""
     sub.f32 fsw, fsw, fcrx;
     setp.gt.f32 p, fsx, fsw;
     @p bra OUTLINE;
-    // BUILD 152: crop_y the same way, top and bottom (was a shift):
+    // Crop_y the same way, top and bottom (was a shift):
     // add.f32 fy, fy, fcry;
     cvt.rn.f32.s32 fsy, sy;
     add.f32 fsy, fsy, 0f3F000000;
@@ -742,7 +742,7 @@ PTX = b"""
     @p bra BLEND;
     ld.global.u8 a, [addr+3];
 BLEND:
-    // BUILD 339: jokey chroma stack. chroma_n 0 skips (bit-exact, pointer
+    // Jokey chroma stack. chroma_n 0 skips (bit-exact, pointer
     // not read). Else each key at chroma_ptr (16 bytes: r, g, b, tol) is
     // tested; (dr*dr + dg*dg + db*db) <= tol*tol sets alpha 0. Later keys
     // still run, so a second color punches out too. No spill suppression.
@@ -778,7 +778,7 @@ CHROMA_LOOP:
     add.u32 cki, cki, 1;
     bra CHROMA_LOOP;
 CHROMA_DONE:
-    // BUILD 154: color keyframes on the source RGB (not alpha), before the
+    // Color keyframes on the source RGB (not alpha), before the
     // opacity / alpha blend. flags 0 (all identity): skipped, bit-exact.
     // c = channel / 255; bit 1: contrast (c - 0.5) * contrast + 0.5, clamp
     // 0..1; bit 2: brightness c + brightness (-1..1), clamp 0..1; bit 4:
@@ -873,7 +873,7 @@ COLOR_DONE:
     st.global.u8 [addr+2], b;
     bra DONE;
 OUTLINE:
-    // BUILD 220: border outline for a pixel the layer does not draw
+    // Border outline for a pixel the layer does not draw
     ld.param.f32 fow, [outline_w];
     setp.gt.f32 p, fow, 0f00000000;
     @!p bra DONE;

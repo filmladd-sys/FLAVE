@@ -35,7 +35,7 @@ SEQUENCE_MIME = "application/x-ladd-sequence-id"
 
 
 class SequenceTable(QTableWidget):
-    # BUILD 106: drag source only (drop a sequence on a Sequence Timeline).
+    # Drag source only (drop a sequence on a Sequence Timeline).
     # Accepts no drops; the old row-on-row nesting drop is removed.
     def __init__(self, manager):
         super().__init__()
@@ -49,7 +49,7 @@ class SequenceTable(QTableWidget):
         self.setDragDropOverwriteMode(False)
 
     def mimeData(self, items):
-        # BUILD 105: default row data plus the
+        # Default row data plus the
         # sequence id for a drop onto a Sequence Timeline
         mime = super().mimeData(items)
         try:
@@ -80,7 +80,7 @@ def sequence_stats(cur):
     def get(sid):
         return out.setdefault(int(sid), {"frames": 0, "video": 0, "image": 0,
                                          "audio": 0, "caption": 0})
-    # BUILD 105: sequence clips (sequence_id_ref set) count toward length
+    # Sequence clips (sequence_id_ref set) count toward length
     # but not toward Video / Image / Audio; Sequences is sequence_children
     rows = cur.execute(
         "SELECT t.sequence_id, LOWER(COALESCE(t.track_type, '')), "
@@ -103,7 +103,7 @@ def sequence_stats(cur):
             "GROUP BY sequence_id").fetchall():
         st = get(sid)
         st["frames"] = max(st["frames"], int(end or 0))
-    # BUILD 308: WYSIWYG Text clips count toward length only
+    # WYSIWYG Text clips count toward length only
     for sid, end in cur.execute(
             "SELECT sequence_id, MAX(start_frame + length_frames) "
             "FROM text_clips GROUP BY sequence_id").fetchall():
@@ -126,7 +126,7 @@ def format_duration(frames, fps):
 
 
 def _captions_busy(parent, sequence_id, title):
-    # BUILD 233: refuse while Generate Captions runs on that sequence
+    # Refuse while Generate Captions runs on that sequence
     try:
         from sequence_timeline_captions import caption_job_active
         busy = caption_job_active(sequence_id)
@@ -175,7 +175,7 @@ class SequenceManager(QMainWindow):
         self.table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
         self._loading = False
         self.table.itemChanged.connect(self._name_changed)
-        # BUILD 281: selecting a row selects that sequence; its Sequence
+        # Selecting a row selects that sequence; its Sequence
         # Player comes to the front (player_front)
         self.table.itemSelectionChanged.connect(self._row_selected)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -312,7 +312,7 @@ class SequenceManager(QMainWindow):
         self.status_bar.showMessage(f"Renamed to {new}")
 
     def _row_context_menu(self, pos):
-        # BUILD 323: "New Sequence" on top (same handler as the Sequence
+        # "New Sequence" on top (same handler as the Sequence
         # menu's Add New Sequence); on empty space it is the only item
         sequence_id = None
         item = self.table.itemAt(pos)

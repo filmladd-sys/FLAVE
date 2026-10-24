@@ -70,7 +70,7 @@ def get_display_rows(project_db, id_list):
 
         icon_widget = _make_icon_widget(project_db, fid, path, ftype, max_w, max_h)
 
-        # #Proxies: count for video / image footage (clickable), empty for audio
+        # Proxies: count for video / image footage (clickable), empty for audio
         proxy_item = QTableWidgetItem("")
         proxy_item.setTextAlignment(Qt.AlignCenter)
         ext = os.path.splitext(path or filename or "")[1].lower()
@@ -173,7 +173,7 @@ _ICONS_DROPPED = set()   # (project_db, footage_id) whose stale icons were dropp
 
 
 def _display_aspect(path, ftype, project_db=None, footage_id=None):
-    # BUILD 325/326: display (w, h) of non-square-pixel video footage, else
+    # Display (w, h) of non-square-pixel video footage, else
     # None (square pixels, stills, audio, unreadable: icons exactly as
     # before). Prefers footage.pixel_aspect; probes only when missing.
     if ftype not in VIDEO_EXTS or not path:
@@ -186,7 +186,7 @@ def _display_aspect(path, ftype, project_db=None, footage_id=None):
 
 
 def _stretch_to_display(pixmap, disp):
-    # BUILD 325: grabbed frame (original or proxy, coded aspect) stretched
+    # Grabbed frame (original or proxy, coded aspect) stretched
     # to the display aspect; height kept
     h = pixmap.height()
     w = max(1, int(round(h * float(disp[0]) / float(disp[1]))))
@@ -196,7 +196,7 @@ def _stretch_to_display(pixmap, disp):
 
 
 def _aspect_ok(pixmap, disp):
-    # BUILD 325: True if a stored icon has the display aspect (within the
+    # True if a stored icon has the display aspect (within the
     # 1 px rounding of a resize), False for an old squeezed one
     w, h = pixmap.width(), pixmap.height()
     if w <= 0 or h <= 0:
@@ -206,7 +206,7 @@ def _aspect_ok(pixmap, disp):
 
 
 def _drop_stale_icons(conn, project_db, footage_id):
-    # BUILD 325: icons cached before BUILD 325 for non-square footage are
+    # Icons cached earlier for non-square footage are
     # squeezed; drop that footage's icon rows once per session so they are
     # grabbed again (only this footage, no schema change). Returns False if
     # already dropped this session (then the icon found is used as is).
@@ -320,7 +320,7 @@ def _ensure_footage_icon_impl(project_db, footage_id, path=None, ftype=None, max
                 if ftype in IMAGE_EXTS and path and os.path.isfile(path):
                     original = QPixmap(path)
                 elif ftype in VIDEO_EXTS and path and os.path.isfile(path):
-                    # BUILD 302: from the smallest usable proxy
+                    # From the smallest usable proxy
                     # (_icon_proxy) at the matching proxy frame, else the
                     # original; full frame of that file from NVDEC, no
                     # scale, no ffmpeg. The stored full frame (is_original
@@ -410,7 +410,7 @@ _decoders = {}         # path -> (file stamp, SimpleDecoder), one per file
 
 
 def _icon_proxy(conn, footage_id, frame_number, need_h=None):
-    # BUILD 302: (proxy path, proxy frame index) for a new video icon grab,
+    # (proxy path, proxy frame index) for a new video icon grab
     # or None (grab the original). Proxies rows of the footage whose file
     # exists and that NVDEC can decode (sequence_player._proxy_decodable),
     # at the smallest percentage whose frame is at least need_h tall (the
@@ -490,10 +490,10 @@ def _load_cudart():
 
 
 def _get_decoder(path):
-    # One decoder per path (originals and, BUILD 302, proxies); later
+    # One decoder per path (originals and, proxies); later
     # frames of the same file reuse it. A file rewritten in place (new
     # mtime or size, e.g. a regenerated proxy) gets a new decoder.
-    # BUILD 342: if NVDEC cannot open this path, CPU decode for this path
+    # If NVDEC cannot open this path, CPU decode for this path
     # only. Other footage still opens NVDEC.
     key = os.path.normcase(os.path.abspath(path))
     try:
@@ -545,7 +545,7 @@ def _video_frame_full(path, frame_number=0):
 
 def _video_frame_full_impl(path, frame_number=0):
     # Full native-size RGB frame at 0-based frame_number as a QPixmap.
-    # NVDEC decode, or (BUILD 342) CPU decode when NVDEC cannot open this
+    # NVDEC decode, or CPU decode when NVDEC cannot open this
     # file, then cudaMemcpy device-to-host, no scaling. Returns None if
     # cudart is missing or the grab fails.
     frame_number = max(0, int(frame_number or 0))

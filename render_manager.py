@@ -1,11 +1,11 @@
 # render_manager.py
-# BUILD 116: Render Manager, first version. MP4 only (H.264 High + AAC,
+# Render Manager, first version. MP4 only (H.264 High + AAC
 # optional mov_text captions). Whole sequence, no progress bar, no in/out.
-# BUILD 319: progress bar in the window (frame N of M, busy while the
+# Progress bar in the window (frame N of M, busy while the
 # preview pauses and the audio mixes; RenderJob.on_progress, throttled).
-# BUILD 117: Codec choice H.264 (h264_nvenc / libx264, High) or H.265
+# Codec choice H.264 (h264_nvenc / libx264, High) or H.265
 # (hevc_nvenc / libx265, Main, -tag:v hvc1); default output is a full path.
-# BUILD 344: that default is {ProjectName}_{SequenceName}_vNN.mp4 (the
+# That default is {ProjectName}_{SequenceName}_vNN.mp4 (the
 # sequence name, not the sequence id). NN starts at 01 and is one higher
 # than any vNN already in the folder for that name. 'Export subtitles as
 # .srt' writes the same stem as an .srt beside the mp4, from enabled
@@ -14,18 +14,18 @@
 # Video: the preview composite (timeline_snapshot(tl, use_proxies=False),
 # same CUDA blend_layer, scale / position / opacity keyframes) run on the
 # open Sequence Player's CUDA context from a render thread, raw RGB frames
-# (BUILD 142: on the render's own headless composer, sequence_preview_gpu,
+# (: on the render's own headless composer, sequence_preview_gpu
 # through the preview's batch loop composite_batch; no player window)
 # copied to the host and piped to ffmpeg (rawvideo rgb24); ffmpeg converts
 # to yuv420p. Captions are not burned in.
 # Audio: the preview mix code (audio tracks, gain_db, volume keyframes)
 # rendered fresh into a temp WAV, mono or stereo (duplicated).
-# BUILD 120: 'MKV: Use 100% deinterlaced proxies' (auto-checked when the
+# 'MKV: Use 100% deinterlaced proxies' (auto-checked when the
 # sequence has an MKV clip with a 100% deinterlace / IVTC proxy file):
 # those clips decode that proxy (timeline_snapshot(tl, use_proxies=False,
 # render_deint=True)); every other clip and percent stays the original.
 # Scale math stays based on the original size.
-# BUILD 318: H.264 over 4096 pixels wide or high never uses h264_nvenc
+# H.264 over 4096 pixels wide or high never uses h264_nvenc
 # (the NVENC H.264 hardware limit): that render uses hevc_nvenc when its
 # test encode works, else libx264, with a non-modal warning at the start
 # (encoder_for); the codec choice itself is unchanged. While a render
@@ -48,14 +48,14 @@ from fractions import Fraction
 SAMPLE_RATE = 48000
 AAC_STEREO = "192k"
 AAC_MONO = "128k"
-PLAYER_WAIT_S = 15.0        # wait for the Sequence Player GPU setup (unused since BUILD 142)
+PLAYER_WAIT_S = 15.0        # wait for the Sequence Player GPU setup (unused since)
 DEFAULT_GOP = 15
 DEFAULT_TARGET_MBPS = 5.0
 DEFAULT_BURST_MBPS = 10.0
 
 _open_windows = {}          # sequence_id -> RenderManagerWindow
-_nvenc_ok = {}              # BUILD 117: NVENC encoder name -> test encode ok
-# BUILD 117: codec choice -> (NVENC encoder, CPU fallback)
+_nvenc_ok = {}              # NVENC encoder name -> test encode ok
+# Codec choice -> (NVENC encoder, CPU fallback)
 CODECS = (("H.264", "h264_nvenc", "libx264"), ("H.265", "hevc_nvenc", "libx265"))
 
 # 2-letter -> ISO 639-2 for the MP4 language tag (3-letter kept as is)
@@ -362,7 +362,7 @@ def pick_encoder(codec="H.264", ffmpeg="ffmpeg"):
     return cpu
 
 
-# BUILD 318: largest width / height the NVENC H.264 encoder takes (all
+# Largest width / height the NVENC H.264 encoder takes (all
 # NVIDIA GPUs); H.265 NVENC goes to 8192 on Pascal and newer
 H264_NVENC_MAX = 4096
 H264_LIMIT_TEXT = ("H.264 hardware encoding is limited to %d pixels. "
@@ -370,7 +370,7 @@ H264_LIMIT_TEXT = ("H.264 hardware encoding is limited to %d pixels. "
 
 
 def encoder_for(codec, width, height, ffmpeg="ffmpeg"):
-    # BUILD 318: (encoder, warning text or "") for a render of width x
+    # (encoder, warning text or "") for a render of width x
     # height. pick_encoder, except that h264_nvenc over H264_NVENC_MAX
     # in either direction becomes hevc_nvenc (its test encode works) or
     # libx264, with the warning text for the user.
@@ -389,7 +389,7 @@ def encoder_for(codec, width, height, ffmpeg="ffmpeg"):
 # ---------------------------------------------------------------- DB reads
 
 def render_length_frames(project_db, sequence_id):
-    # BUILD 100 duration: latest out-point of clips, captions, keyframe clips
+    # Duration: latest out-point of clips, captions, keyframe clips
     import sqlite3
     from sequence_manager import sequence_stats
     conn = sqlite3.connect(project_db)
@@ -457,12 +457,12 @@ def mix_mono_pcm(project_db, sequence_id, fps, total_frames):
 # ---------------------------------------------------------------- GPU frames
 
 class _RenderGpu(object):
-    # BUILD 142: the render's own headless GPU composer
+    # The render's own headless GPU composer
     # (sequence_preview_gpu.new_composer: shared CUDA context, own decoders,
     # images and device buffers; no Sequence Player, no OpenGL). Frames go
     # through the same batch loop as the preview fill
     # (sequence_player_preview.composite_batch) with the host RGB sink.
-    # Was (BUILD 116-141): render decoders swapped into the open player.
+    # Was (-141): render decoders swapped into the open player.
 
     def __init__(self, composer):
         self.comp = composer
@@ -530,7 +530,7 @@ class _RenderGpu(object):
 
 # ---------------------------------------------------------------- render job
 
-# BUILD 319: render progress. RenderJob.on_progress(done, total) from the
+# Render progress. RenderJob.on_progress(done, total) from the
 # render thread: PROGRESS_BUSY while the audio mixes, then frames written
 # (0 .. total), at most one call per PROGRESS_MIN_S (first / last always)
 PROGRESS_BUSY = -1
@@ -539,7 +539,7 @@ PROGRESS_MIN_S = 0.1
 
 
 def _set_progress_bar(bar, done, total):
-    # BUILD 319: QProgressBar state (GUI thread): busy (indeterminate),
+    # QProgressBar state (GUI thread): busy (indeterminate)
     # idle (empty) or frame done of total with the percent
     if bar is None:
         return
@@ -566,8 +566,8 @@ class RenderJob(object):
         self.p = params
         self.frame_source = frame_source
         self.on_done = on_done            # on_done(ok, message), any thread
-        self.on_warn = None               # BUILD 318: on_warn(text), any thread
-        self.on_progress = None           # BUILD 319: on_progress(done, total)
+        self.on_warn = None               # On_warn(text), any thread
+        self.on_progress = None           # On_progress(done, total)
         self._progress_t = None
         self.cancelled = False
         self.proc = None
@@ -587,7 +587,7 @@ class RenderJob(object):
                 pass
 
     def _progress(self, done, total, force=False):
-        # BUILD 319: throttled on_progress (render thread)
+        # Throttled on_progress (render thread)
         cb = self.on_progress
         if cb is None:
             return
@@ -627,7 +627,7 @@ class RenderJob(object):
         out_path = p["out_path"]
         if not out_path:
             return False, "No output path."
-        # BUILD 223: system temp folder {ProjectName}_{sequence_id}_Render_<random>
+        # System temp folder {ProjectName}_{sequence_id}_Render_<random>
         # holding {ProjectName}_{sequence_id}_RenderAudio.wav, _RenderCaptions.srt
         # and _RenderStderr.txt; removed after the render
         _base = "%s_%d" % (os.path.splitext(os.path.basename(
@@ -636,7 +636,7 @@ class RenderJob(object):
         err_path = os.path.join(tmp, _base + "_RenderStderr.txt")
         try:
             # audio (fresh mix of the whole range)
-            self._progress(PROGRESS_BUSY, total, True)  # BUILD 319: no audio progress
+            self._progress(PROGRESS_BUSY, total, True)  # No audio progress
             t0 = time.perf_counter()
             wav = None
             if p.get("mono_pcm") is not None:
@@ -661,7 +661,7 @@ class RenderJob(object):
                 return False, "Render cancelled."
             enc = p.get("encoder")
             if not enc:
-                # BUILD 318: H.264 over 4096 falls back (encoder_for)
+                # H.264 over 4096 falls back (encoder_for)
                 enc, warn = encoder_for(p.get("codec", "H.264"), p["width"],
                                         p["height"], p.get("ffmpeg", "ffmpeg"))
                 if warn and self.on_warn is not None:
@@ -689,7 +689,7 @@ class RenderJob(object):
                     return False, "Could not start ffmpeg: %s" % e
                 broken = False
                 f = 0
-                self._progress(0, total, True)      # BUILD 319
+                self._progress(0, total, True)
                 try:
                     while f < total and not self.cancelled:
                         frames = list(range(f, min(total, f + chunk)))
@@ -711,7 +711,7 @@ class RenderJob(object):
                             break
                         t_pipe += time.perf_counter() - c1
                         f += len(frames)
-                        self._progress(f, total, f >= total)  # BUILD 319
+                        self._progress(f, total, f >= total)
                 except Exception as e:
                     # Composite failed (player closed, CUDA error): stop ffmpeg
                     try:
@@ -735,7 +735,7 @@ class RenderJob(object):
                                "stderr (last 15 lines):\n%s"
                                % (code, subprocess.list2cmdline(cmd), _tail(err_path)))
             el = time.perf_counter() - t_start
-            # BUILD 312: the render timing summary prints only with
+            # The render timing summary prints only with
             # RENDER_LOG (the result message still names frames and time)
             import preview_log
             if preview_log.RENDER_LOG:
@@ -748,7 +748,7 @@ class RenderJob(object):
                      ("stereo" if p["stereo"] else "mono") if wav else "no audio"]
             if srt:
                 parts.append("captions" + (" (%s)" % lang if lang else ""))
-            # BUILD 344: sidecar .srt only after the mp4 exists, and only
+            # Sidecar.srt only after the mp4 exists, and only
             # when the checkbox is on. No cues, or a write error, leaves
             # the finished video in place.
             if p.get("export_srt"):
@@ -794,8 +794,8 @@ def _make_window_class():
 
     class _Bridge(QObject):
         done = Signal(bool, str)
-        warn = Signal(str)      # BUILD 318: encoder fallback warning
-        progress = Signal(int, int)     # BUILD 319: frames done, total
+        warn = Signal(str)      # Encoder fallback warning
+        progress = Signal(int, int)     # Frames done, total
 
     class RenderManagerWindow(QMainWindow):
         def __init__(self, timeline):
@@ -810,7 +810,7 @@ def _make_window_class():
             self._bridge.warn.connect(self._on_warn, Qt.QueuedConnection)
             self._bridge.progress.connect(self._on_progress, Qt.QueuedConnection)
             self._render_total = 0
-            # BUILD 318: [True] while this window holds the preview export
+            # [True] while this window holds the preview export
             # pause (set_export_pause); _unpause clears it exactly once
             self._pause = None
             self._pause_wait = False
@@ -825,7 +825,7 @@ def _make_window_class():
                 project_db = timeline._project_db()
             except Exception:
                 project_db = ""
-            # BUILD 344: next free {ProjectName}_{SequenceName}_vNN.mp4;
+            # Next free {ProjectName}_{SequenceName}_vNN.mp4
             # refilled by refresh_output_path (window shown again, render
             # finished). A path the user typed is replaced only then, same
             # as before.
@@ -883,8 +883,8 @@ def _make_window_class():
             outer.addLayout(form)
             row = QHBoxLayout()
             row.addStretch(1)
-            # BUILD 143: Cancel cancels a running render, else closes the window
-            # BUILD 144: Cancel sits left of Render
+            # Cancel cancels a running render, else closes the window
+            # Cancel sits left of Render
             self.cancel_btn = QPushButton("Cancel")
             self.cancel_btn.clicked.connect(self._cancel)
             row.addWidget(self.cancel_btn)
@@ -896,7 +896,7 @@ def _make_window_class():
             self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.status.setWordWrap(True)
             outer.addWidget(self.status)
-            # BUILD 319: render progress (frame N of M)
+            # Render progress (frame N of M)
             self.progress_bar = QProgressBar()
             self.progress_bar.setTextVisible(True)
             _set_progress_bar(self.progress_bar, PROGRESS_IDLE, 0)
@@ -928,12 +928,12 @@ def _make_window_class():
             else:
                 self.unsetCursor()
             self.status.setText(text)
-            # BUILD 319: busy bar while busy (until frames report), else empty
+            # Busy bar while busy (until frames report), else empty
             _set_progress_bar(getattr(self, "progress_bar", None),
                               PROGRESS_BUSY if busy else PROGRESS_IDLE, 0)
 
         def _unpause(self, token):
-            # BUILD 318: release this render's preview export pause once
+            # Release this render's preview export pause once
             # (any thread); the last release wakes the preview worker
             if token is not None and token[0]:
                 token[0] = False
@@ -947,7 +947,7 @@ def _make_window_class():
             if self.job is not None or self._pause_wait:
                 return
             self._user_cancel = False
-            # BUILD 318: the preview worker stops rendering for the whole
+            # The preview worker stops rendering for the whole
             # render; the GPU composer is created once its pass has stopped
             try:
                 from sequence_preview_worker import set_export_pause
@@ -961,7 +961,7 @@ def _make_window_class():
             self._render_when_paused()
 
         def _render_when_paused(self):
-            # BUILD 318: poll (50 ms, GUI thread) until the preview worker
+            # Poll (50 ms, GUI thread) until the preview worker
             # is out of its pass, then start; Cancel / close stop the wait
             if not self._pause_wait:
                 return
@@ -982,7 +982,7 @@ def _make_window_class():
             self._render_start()
 
         def _render_start(self):
-            # BUILD 142: no Sequence Player and no OpenGL wait: the render
+            # No Sequence Player and no OpenGL wait: the render
             # composites on its own headless GPU composer
             # from sequence_player import open_player_for
             self._set_busy(True, "Starting the GPU compositor...")
@@ -995,7 +995,7 @@ def _make_window_class():
             self._start(comp)
 
         def _start(self, player):
-            # player: the render's headless composer (BUILD 142; seq_w /
+            # player: the render's headless composer (; seq_w /
             # seq_h, freed by _RenderGpu.close)
             from sequence_player import timeline_snapshot
             tl = self.timeline
@@ -1046,7 +1046,7 @@ def _make_window_class():
                 self._fail("Could not prepare the render: %s" % e)
                 return
             gpu = _RenderGpu(player)
-            token = self._pause     # BUILD 318: released by done() (or _fail)
+            token = self._pause     # Released by done (or _fail)
 
             def source(frames):
                 return gpu.frames_rgb(frames, snapshot)
@@ -1056,7 +1056,7 @@ def _make_window_class():
                     gpu.close()
                 except Exception:
                     pass
-                # BUILD 318: render GPU memory freed: the preview resumes
+                # Render GPU memory freed: the preview resumes
                 self._unpause(token)
                 self._bridge.done.emit(bool(ok), str(msg))
 
@@ -1064,21 +1064,21 @@ def _make_window_class():
             self.job.on_warn = self._bridge.warn.emit
             self._render_total = total
             if hasattr(self._bridge, "progress"):
-                self.job.on_progress = self._bridge.progress.emit  # BUILD 319
+                self.job.on_progress = self._bridge.progress.emit
             self._set_busy(True, "Rendering %d frames to %s ..." % (total, params["out_path"]))
             self.job.start()
-            self._pause = None      # BUILD 318: done() owns the release now
+            self._pause = None      # Done owns the release now
 
         def _fail(self, msg):
             self.job = None
-            self._unpause(self._pause)      # BUILD 318
+            self._unpause(self._pause)
             self._pause = None
             self._set_busy(False, "")
             from proxy_manager import show_message
             show_message(self, "Render Manager", msg)
 
         def _on_warn(self, text):
-            # BUILD 318: encoder fallback (encoder_for): status line and a
+            # Encoder fallback (encoder_for): status line and a
             # non-modal message box; the render goes on
             if self._closing:
                 return
@@ -1095,7 +1095,7 @@ def _make_window_class():
                 print(f"Render warning failed: {e}")
 
         def _on_progress(self, done, total):
-            # BUILD 319: queued from the render thread (throttled there)
+            # Queued from the render thread (throttled there)
             if self._closing or self.job is None:
                 return
             _set_progress_bar(getattr(self, "progress_bar", None), done, total)
@@ -1115,7 +1115,7 @@ def _make_window_class():
             if ok:
                 self._set_busy(False, msg)
                 total = int(getattr(self, "_render_total", 0) or 0)
-                if total > 0:   # BUILD 319: success ends at 100%
+                if total > 0:   # Success ends at 100%
                     _set_progress_bar(getattr(self, "progress_bar", None), total, total)
                 # the next render suggests the next version
                 self.refresh_output_path()
@@ -1125,7 +1125,7 @@ def _make_window_class():
                 show_message(self, "Render Manager", msg)
 
         def _cancel(self):
-            # BUILD 143: running render -> cancel it (RenderJob.cancel: flag
+            # Running render -> cancel it (RenderJob.cancel: flag
             # + kill ffmpeg; the thread ends after the current GPU batch and
             # _on_done restores the idle UI); idle -> close the window
             if self.job is not None:
@@ -1134,7 +1134,7 @@ def _make_window_class():
                 self.status.setText("Cancelling the render...")
                 return
             if self._pause_wait:
-                # BUILD 318: still waiting for the preview to pause
+                # Still waiting for the preview to pause
                 self._pause_wait = False
                 self._unpause(self._pause)
                 self._pause = None
@@ -1148,7 +1148,7 @@ def _make_window_class():
             if self.job is not None:
                 self.job.cancel()
             if self._pause_wait:
-                # BUILD 318: closed while waiting for the preview to pause
+                # Closed while waiting for the preview to pause
                 self._pause_wait = False
                 self._unpause(self._pause)
                 self._pause = None
@@ -1171,12 +1171,12 @@ def open_render_manager(timeline):
             _window_class.append(_make_window_class())
         win = _window_class[0](timeline)
         _open_windows[sid] = win
-        # BUILD 229: under the timeline's menu bar (no geometry memory:
+        # Under the timeline's menu bar (no geometry memory:
         # every new window)
         from window_place import place_under_parent
         place_under_parent(win, timeline, "render_manager")
     else:
-        # BUILD 224: opened again: suggest the next free version
+        # Opened again: suggest the next free version
         win.refresh_output_path()
     win.show()
     win.raise_()
@@ -1185,7 +1185,7 @@ def open_render_manager(timeline):
 
 
 def close_all_render_managers():
-    # New Project: close every Render Manager (BUILD 83 pattern)
+    # New Project: close every Render Manager (pattern)
     for win in list(_open_windows.values()):
         try:
             win.close()

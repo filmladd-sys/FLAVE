@@ -1,7 +1,7 @@
 # new_project.py
 # Project database creation for Ladd Video Editor (_init_db: every project
 # table). Project Manager's File > New Project picks a folder and a name and
-# calls create_project_db (BUILD 226); NewProjectWindow (one full-path text
+# calls create_project_db; NewProjectWindow (one full-path text
 # box) also creates through _init_db. ASCII only.
 
 import os
@@ -22,14 +22,14 @@ PROJECT_EXT = ".db"
 ICONS_INDEX_NAME = "idx_icons_lookup"
 ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
                    "ON icons (footage_id, frame_number, is_original, height)")
-# BUILD 222: keys of type-border keyframe clips (one row per key: absolute
+# Keys of type-border keyframe clips (one row per key: absolute
 # sequence frame like keyframes.frame, border px and its RGBA color 0..255).
-# BUILD 294: keys of type-move keyframe clips (absolute sequence frame, x and
-# y the layer center in sequence px). BUILD 295: keys of type-crop_xy
+# Keys of type-move keyframe clips (absolute sequence frame, x and
+# y the layer center in sequence px). Keys of type-crop_xy
 # keyframe clips (absolute sequence frame, x and y the crop_x / crop_y
-# values in source pixels). BUILD 296: keys of type-crop_edges keyframe
+# values in source pixels). Keys of type-crop_edges keyframe
 # clips (absolute sequence frame, top, bottom, left, right crop in source
-# pixels). BUILD 337: keys of type-chroma keyframe clips (absolute sequence
+# pixels). Keys of type-chroma keyframe clips (absolute sequence
 # frame, r / g / b the key color 0..255, tolerance the Euclidean distance
 # in that same 0..255 RGB space). Other types keep their keys in
 # keyframes. Run by _init_db.
@@ -74,7 +74,7 @@ KEYFRAME_CROP_EDGES_SQL = """
         right REAL NOT NULL
     )
 """
-# BUILD 337: one row per chroma key. r / g / b are the key color (0..255).
+# One row per chroma key. r / g / b are the key color (0..255).
 # tolerance is Euclidean distance in that RGB space. A new key defaults to
 # green 0, 255, 0 and tolerance 80 (keyframe.py): a modest green-screen gag.
 # The farthest 0..255 RGB color is sqrt(3) * 255, about 441.67, so a
@@ -90,10 +90,10 @@ KEYFRAME_CHROMA_SQL = """
         tolerance REAL NOT NULL
     )
 """
-# BUILD 308: WYSIWYG Text clips (track_type 'text'): one text box per clip,
+# WYSIWYG Text clips (track_type 'text'): one text box per clip
 # burned into the picture. start_frame / length_frames like captions;
 # font_size and x / y (the box center) in sequence pixels; color '#RRGGBB'.
-# BUILD 311: drop shadow: shadow_on 0 / 1, shadow_color '#RRGGBBAA',
+# Drop shadow: shadow_on 0 / 1, shadow_color '#RRGGBBAA'
 # shadow_blur (blur radius, sequence px), shadow_angle (direction the
 # shadow falls, degrees clockwise from straight up, like the Premiere /
 # After Effects Drop Shadow direction: 90 = right, 135 = down-right,
@@ -152,10 +152,9 @@ def project_path_for(folder, name):
 
 
 def ensure_project_schema(db_path):
-    # BUILD 337: project-load schema check, run by Project Manager when a
-    # project is opened (startup autoload and File > Open) before any window
-    # reads the project. Never raises.
-    # TEMP MIGRATION (BUILD 337): creates keyframe_chroma on old projects. Safe to delete once all projects have been opened in BUILD 337+; new_project.py _init_db already creates it.
+    # On project open (startup autoload and File > Open), make sure tables
+    # added after the project's original create exist. CREATE IF NOT EXISTS
+    # is a no-op when the table is already there. Never raises.
     try:
         conn = sqlite3.connect(db_path)
         try:
@@ -165,7 +164,6 @@ def ensure_project_schema(db_path):
             conn.close()
     except sqlite3.Error:
         pass
-    # END TEMP MIGRATION (BUILD 337)
     return None
 
 
@@ -231,7 +229,7 @@ class NewProjectWindow(QMainWindow):
         self.close()
 
     def _init_db(self, db_path):
-        # The one definition of every project-db table (BUILD 78). Side
+        # The one definition of every project-db table. Side
         # databases (_AudioTmp.db, _Undo.db, _Preview.db, global settings)
         # are created by their own modules.
         conn = sqlite3.connect(db_path)
@@ -274,11 +272,11 @@ class NewProjectWindow(QMainWindow):
                 enabled INTEGER DEFAULT 1,
                 solo INTEGER DEFAULT 0,
                 height_px INTEGER DEFAULT 64,
-                -- BUILD 126: 0 = open, 1 = collapsed (16 px row, bars + names)
+                -- 0 = open, 1 = collapsed (16 px row, bars + names)
                 collapsed INTEGER NOT NULL DEFAULT 0,
                 bg_color TEXT,
                 language TEXT DEFAULT '',
-                -- BUILD 101: caption stream type for caption tracks.
+                -- Caption stream type for caption tracks.
                 -- Allowed (documented, not enforced): 'CEA-608', 'CEA-708',
                 -- 'mov_text', 'WebVTT'. NULL is shown as WebVTT.
                 caption_type TEXT DEFAULT 'WebVTT'
@@ -299,11 +297,11 @@ class NewProjectWindow(QMainWindow):
                 file_type TEXT,
                 proxy_percent INTEGER NOT NULL DEFAULT 0,
                 codec TEXT,
-                -- BUILD 119: MKV import probe (footage_importer.py):
+                -- MKV import probe (footage_importer.py):
                 -- 'progressive' / 'interlaced' / 'telecine' / 'unknown';
                 -- NULL = not probed (every non-MKV file)
                 field_order TEXT,
-                -- BUILD 326: sample / pixel aspect of V:0 as "N:D"
+                -- Sample / pixel aspect of V:0 as "N:D"
                 -- (1:1, 8:9, 32:27, 4:3); NULL = still / audio / not probed
                 pixel_aspect TEXT
             )
@@ -335,10 +333,10 @@ class NewProjectWindow(QMainWindow):
                 link_id INTEGER,
                 gain_db REAL DEFAULT 0,
                 proxy_percent INTEGER NOT NULL DEFAULT 0,
-                -- BUILD 105: sequence clip = sequences.id of the nested child
+                -- Sequence clip = sequences.id of the nested child
                 -- (footage_id is NULL then); NULL for footage clips
                 sequence_id_ref INTEGER,
-                -- BUILD 303: clip speed percent, 1 .. 1000 (clip_speed.py)
+                -- Clip speed percent, 1.. 1000 (clip_speed.py)
                 speed_percent INTEGER NOT NULL DEFAULT 100
             )
         """)
@@ -396,7 +394,7 @@ class NewProjectWindow(QMainWindow):
             )
         """)
 
-        # BUILD 222 / 294: keys of type-border and type-move keyframe clips
+        # Keys of type-border and type-move keyframe clips
         # (KEYFRAME_BORDER_SQL, KEYFRAME_MOVE_SQL, KEYFRAME_CROP_SQL,
         # KEYFRAME_CROP_EDGES_SQL, KEYFRAME_CHROMA_SQL above)
         cur.execute(KEYFRAME_BORDER_SQL)
@@ -404,11 +402,11 @@ class NewProjectWindow(QMainWindow):
         cur.execute(KEYFRAME_CROP_SQL)
         cur.execute(KEYFRAME_CROP_EDGES_SQL)
         cur.execute(KEYFRAME_CHROMA_SQL)
-        # BUILD 308: WYSIWYG Text clips
+        # WYSIWYG Text clips
         cur.execute(TEXT_CLIPS_SQL)
 
         # Proxies of footage (path to the proxy file, size percentage).
-        # BUILD 119: proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc';
+        # Proxy_mode 'normal' / 'deint' / 'deint2x' / 'ivtc'
         # deinterlace 1 = deinterlaced or inverse-telecined. proxy_fps /
         # proxy_frames: the proxy file's rate and frame count; source_fps:
         # the original's rate when the proxy was made. Clip edit points

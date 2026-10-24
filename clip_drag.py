@@ -1,5 +1,5 @@
 # clip_drag.py
-# BUILD 134: time-move position for a clip drag that may jump past a
+# Time-move position for a clip drag that may jump past a
 # blocking clip. Pure functions (no Qt). ASCII only.
 #
 # Deltas are whole frames added to every moved clip's drag-start start.

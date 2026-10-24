@@ -1,5 +1,5 @@
 # player_captions.py
-# BUILD 102: soft-caption overlay for the Sequence Player. Captions are
+# Soft-caption overlay for the Sequence Player. Captions are
 # drawn with QPainter on top of the presented GL picture, right before the
 # buffer swap. They are never part of the CUDA composite, the preview JPEGs
 # or {ProjectName}_{sequence_id}_Preview.db. ASCII only.
@@ -11,13 +11,13 @@
 # scale (all exist in new_project._init_db). NULL font/size/pos/scale
 # means the default style: bottom-centered white text on a dark
 # translucent box. pos_x/pos_y are sequence pixels (the caption edit
-# window leaves them NULL unless set). Per axis (BUILD 103): a set X
+# window leaves them NULL unless set). Per axis: a set X
 # centers the box on that X, blank X is horizontal center; a set Y centers
 # the box on that Y, blank Y uses the default bottom stack. font_size is in sequence pixels, times scale.
 # Font size, wrap width, padding and position all scale with the displayed
 # picture (sequence px times picture height / sequence height), so a
 # windowed player shows a scaled-down copy of the full screen layout.
-# BUILD 298: text is measured with the painter that draws it (the overlay
+# Text is measured with the painter that draws it (the overlay
 # image) and laid out in the same wrap-width rect, so the wrapping drawn is
 # the wrapping measured and no line falls outside its box.
 
@@ -127,7 +127,7 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
             fpx = seq_h * DEFAULT_SIZE_FRAC * sc * k
         font = QFont(fam or DEFAULT_FONT_FAMILY)
         font.setPixelSize(max(6, int(round(fpx))))
-        # BUILD 298: measured on the painter's own device (not the screen's
+        # Measured on the painter's own device (not the screen's
         # QFontMetricsF, whose widths can differ from what the image draws)
         painter.setFont(font)
         br = painter.boundingRect(QRectF(0, 0, wrap_w, 100000), flags,
@@ -163,7 +163,7 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
         painter.fillRect(r, box)
         painter.setFont(font)
         painter.setPen(white)
-        # BUILD 298: lines laid out in the wrap-width rect they were
+        # Lines laid out in the wrap-width rect they were
         # measured in, centered on the box (the box is the measured text
         # plus pad), never clipped. The tight box rect used before re-wrapped
         # the last word onto a hidden line when drawn text came out a
@@ -177,7 +177,7 @@ def paint_captions(painter, snap, frame, pic_x, pic_y, pic_w, pic_h,
 
 
 def caption_image(snap, frame, pw, ph, seq_w, seq_h):
-    # BUILD 104: captions for the frame painted on the CPU into a
+    # Captions for the frame painted on the CPU into a
     # transparent premultiplied image the size of the displayed picture
     # (device pixels). The player uploads it as an overlay texture.
     from PySide6.QtGui import QImage, QPainter

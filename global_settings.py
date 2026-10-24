@@ -177,7 +177,7 @@ def apply_dark_mode(enabled):
         app.setStyleSheet(style)
     else:
         app.setStyleSheet("")
-    # BUILD 115: Windows title bars follow the theme (no-op elsewhere)
+    # Windows title bars follow the theme (no-op elsewhere)
     try:
         from dark_titlebar import set_dark_titlebars
         set_dark_titlebars(bool(enabled))
@@ -243,7 +243,7 @@ class GlobalSettingsWindow(QMainWindow):
         self.jpeg_q_edit.setPlaceholderText("90")
         layout.addWidget(self.jpeg_q_edit)
 
-        # BUILD 177: preview burst / idle / batch seconds / GPU batch frames
+        # Preview burst / idle / batch seconds / GPU batch frames
         # fields removed (their code defaults apply); Preview Frame Cap: the
         # largest N of the explicit preview refresh (F5 / Play on dirty)
         frame_cap_label = QLabel("Preview Frame Cap")

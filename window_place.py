@@ -1,5 +1,5 @@
 # window_place.py
-# BUILD 228 / 229: where a secondary window first appears.
+# Where a secondary window first appears.
 # place_under_parent(win, parent, key, saved_keys) runs after the window
 # restored its own remembered geometry and before it is shown; parent is
 # the window that opened it (place_from_project_manager: Project Manager).
@@ -127,5 +127,5 @@ def place_under_parent(win, parent, key, saved_keys=()):
 
 
 def place_from_project_manager(win, pm, key, saved_keys=()):
-    # Windows opened from Project Manager (BUILD 228)
+    # Windows opened from Project Manager
     return place_under_parent(win, pm, key, saved_keys)

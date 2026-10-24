@@ -24,12 +24,12 @@ import threading
 # at most DEC_MAX are open (each may hold an NVDEC session), fewer when
 # free VRAM is short (sequence_player_preview.decoder_capacity).
 DEC_MAX = 8
-DEC_SKIP_MAX = 4      # BUILD 119: decode through gaps up to this, else seek
+DEC_SKIP_MAX = 4      # Decode through gaps up to this, else seek
 
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QImage, QWindow, QOpenGLContext, QCursor
 
-import preview_log      # BUILD 247: preview generation timing lines
+import preview_log      # Preview generation timing lines
 from sequence_timeline_sql import (
     _get_global_setting, _set_global_setting, _load_sequence_name,
     _add_open_player_id, _remove_open_player_id,
@@ -105,7 +105,7 @@ class PreviewReader(object):
                                self.player.sequence_id)
         if not os.path.isfile(path):
             return
-        # BUILD 257: reader thread; waits out a commit's lock (no WAL), a
+        # Reader thread; waits out a commit's lock (no WAL), a
         # timeout is a skipped batch (see _run)
         from sequence_preview import PREVIEW_BUSY_SEC
         self.conn = sqlite3.connect(path, timeout=PREVIEW_BUSY_SEC)
@@ -199,7 +199,7 @@ _ORIG_SIZE_CACHE = {}   # original path -> (w, h) probed once
 
 def _original_size(path, w, h):
     # Original footage box: footage.width/height, else ffprobe once (cached)
-    # BUILD 324: a non-square-pixel original reports its display size
+    # A non-square-pixel original reports its display size
     if w and h:
         return _stretched_size(path, (int(w), int(h)))
     if path in _ORIG_SIZE_CACHE:
@@ -222,7 +222,7 @@ _SAR_DB_SEEDED = set()   # project_db paths already loaded into _SAR_CACHE
 
 
 def seed_sar_cache(project_db):
-    # BUILD 326: load footage.pixel_aspect into _SAR_CACHE so playback /
+    # Load footage.pixel_aspect into _SAR_CACHE so playback /
     # resolve_proxies do not ffprobe every original after migration
     if not project_db or project_db in _SAR_DB_SEEDED:
         return
@@ -249,7 +249,7 @@ def seed_sar_cache(project_db):
 
 
 def _sar_info(path):
-    # BUILD 324/326: SAR of a video original once (cached); prefers values
+    # SAR of a video original once (cached); prefers values
     # seeded from footage.pixel_aspect, else ffprobe. None for stills or
     # when unreadable (treated as square pixels).
     if path not in _SAR_CACHE:
@@ -266,7 +266,7 @@ def _sar_info(path):
 
 
 def _stretched_size(path, size):
-    # BUILD 324: (w, h) widened by the original's SAR (height unchanged);
+    # (w, h) widened by the original's SAR (height unchanged)
     # square pixels or no probe -> size unchanged
     if size is None:
         return None
@@ -278,7 +278,7 @@ def _stretched_size(path, size):
 
 
 def anamorphic_size(path):
-    # BUILD 324: display (w, h) of a non-square-pixel video original, else
+    # Display (w, h) of a non-square-pixel video original, else
     # None. Passed as the layer's orig_size so _blend stretches the decoded
     # frame on the GPU (per-axis scale); square footage keeps None, so its
     # math is exactly as before.
@@ -323,7 +323,7 @@ def _proxy_decodable(path):
     return decodable_size(_PROXY_SIZE_CACHE[key])
 
 
-# BUILD 119: when several proxies share a percent (Normal and Deinterlace
+# When several proxies share a percent (Normal and Deinterlace
 # 50%, ...), the composite uses the first of this order: an in-place
 # deinterlace keeps the source frame count; IVTC and double rate are
 # frame-mapped by time; a combed Normal proxy is used last.
@@ -415,7 +415,7 @@ def clip_source_frame(seq_src, conform=None, proxy_ratio=None,
     # is relative to the footage rate, so both together map sequence time
     # to footage time to the proxy index in one step:
     # floor(seq_src * footage_fps / seq_fps * proxy_fps / source_fps + eps).
-    # seq_src may be fractional (clip speed, BUILD 303: in + rel * speed /
+    # seq_src may be fractional (clip speed: in + rel * speed /
     # 100); it is floored once, here or inside that mapping.
     ratio = proxy_ratio
     if conform:
@@ -423,14 +423,14 @@ def clip_source_frame(seq_src, conform=None, proxy_ratio=None,
     return map_source_frame(max(0, seq_src), ratio, proxy_frames)
 
 
-# BUILD 241: out-of-range source frames (BUILD 240) are learned from the
+# Out-of-range source frames are learned from the
 # decoder's own IndexError, never from len(SimpleDecoder): with
 # need_scanned_stream_metadata=True, len() waits for the background scan
 # of the whole file, which stalled preview generation (under _GEN_LOCK,
 # again at every decoder reopen). _SOURCE_END: (path, size, mtime) ->
 # smallest source index that raised (every index from there is past the
 # end). Nothing is known until a seek fails, so normal decoding is exactly
-# as before BUILD 240; after the first failure later frames past the end
+# as before; after the first failure later frames past the end
 # are skipped without asking the decoder (one native INVALID INDEX line
 # per file at most).
 _SOURCE_END = {}
@@ -455,7 +455,7 @@ def learn_source_end(key, src_frame):
 
 
 def source_index_ok(owner, key, dec, src_frame):
-    # BUILD 240/241: False when src_frame is negative or at / past an index
+    # False when src_frame is negative or at / past an index
     # this file's decoder already refused: the layer is skipped (fully
     # transparent) and lower layers show. Never calls into the decoder.
     if src_frame < 0:
@@ -468,7 +468,7 @@ def source_index_ok(owner, key, dec, src_frame):
 
 
 def is_out_of_range_error(exc):
-    # BUILD 240: fallback when the count was wrong: the decoder's own
+    # Fallback when the count was wrong: the decoder's own
     # out-of-range report (IndexError, "Index N is out of range",
     # "INVALID INDEX") is treated like a skipped layer, not a failure
     if isinstance(exc, IndexError):
@@ -489,7 +489,7 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
     # {clip_id: (proxy_path, (orig_w, orig_h), ratio, proxy_frames)}.
     # use_proxies: clips whose proxy_percent has a Proxies row with an
     # existing file (PROXY_MODE_PREFERENCE at that percent). render_deint
-    # (BUILD 119, final render with use_proxies False): MKV clips whose
+    # (final render with use_proxies False): MKV clips whose
     # footage has a 100% deinterlaced / IVTC proxy decode it, nothing else
     # (never another percent). Anything else (0, no row, no file,
     # unknown original size) is absent and the clip decodes its original;
@@ -537,7 +537,7 @@ def resolve_proxies(project_db, track_ids, use_proxies=True, render_deint=False)
 
 
 def crop_edge_rect(crop_x, crop_y, crop_edges, sw, sh, orig_size=None):
-    # BUILD 296: the crop of one layer with Edge Crop keys. crop_edges =
+    # The crop of one layer with Edge Crop keys. crop_edges =
     # (top, bottom, left, right) from the crop_edges keyframes, crop_x /
     # crop_y the X / Y / XY Crop values (None = 0), all in original source
     # pixels. Each edge is its own value plus crop_x (left, right) or
@@ -593,7 +593,7 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
         tid = item.data(Qt.UserRole)
         track_order[tid] = r
         kind = (item.data(Qt.UserRole + 4) or "").lower()
-        # BUILD 309: WYSIWYG Text tracks are layers too (kind "text")
+        # WYSIWYG Text tracks are layers too (kind "text")
         if kind not in ("video", "image", "text"):
             continue
         rows.append((tid, bool(item.data(Qt.UserRole + 1)),
@@ -612,27 +612,27 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
         project_db = tl._project_db()
     except Exception:
         project_db = None
-    # BUILD 326: prefer footage.pixel_aspect (no per-file ffprobe)
+    # Prefer footage.pixel_aspect (no per-file ffprobe)
     seed_sar_cache(project_db)
-    # render_deint (BUILD 119): final render override, MKV 100% deint only
+    # render_deint: final render override, MKV 100% deint only
     proxies = resolve_proxies(project_db, [r[0] for r in rows], use_proxies,
                               render_deint)
     from keyframe import collect_opacity_clips
     opacity_clips = collect_opacity_clips(tl.clips_by_track, track_order)
-    # BUILD 147: crop_x / crop_y keyframe clips (snapshot[8], snapshot[9])
+    # Crop_x / crop_y keyframe clips (snapshot[8], snapshot[9])
     from keyframe import collect_crop_x_clips, collect_crop_y_clips
     crop_x_clips = collect_crop_x_clips(tl.clips_by_track, track_order)
     crop_y_clips = collect_crop_y_clips(tl.clips_by_track, track_order)
-    # BUILD 154: gamma / brightness / contrast (snapshot[10], [11], [12])
+    # Gamma / brightness / contrast (snapshot[10], [11], [12])
     from keyframe import (collect_gamma_clips, collect_brightness_clips,
                           collect_contrast_clips)
     gamma_clips = collect_gamma_clips(tl.clips_by_track, track_order)
     brightness_clips = collect_brightness_clips(tl.clips_by_track, track_order)
     contrast_clips = collect_contrast_clips(tl.clips_by_track, track_order)
-    # BUILD 219: rotate keyframe clips (snapshot[13])
+    # Rotate keyframe clips (snapshot[13])
     from keyframe import collect_rotate_clips
     rotate_clips = collect_rotate_clips(tl.clips_by_track, track_order)
-    # BUILD 220 / 222: border outline width (snapshot[14]) and its color
+    # Border outline width (snapshot[14]) and its color
     # r / g / b / a channels (snapshot[15] .. [18]), all from the linked
     # type-border keyframe clips (keyframe.collect_outline_clips)
     from keyframe import collect_outline_clips
@@ -643,28 +643,28 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # Frame rate conform (snapshot[19]): {footage_id: footage_fps / seq_fps}
     # for footage whose rate differs from the sequence (clip_source_frame)
     fps_conform = resolve_fps_conform(project_db, getattr(tl, "fps", None))
-    # BUILD 294: move keyframe clips, x (snapshot[20]) and y (snapshot[21])
+    # Move keyframe clips, x (snapshot[20]) and y (snapshot[21])
     # (keyframe.collect_move_clips)
     from keyframe import collect_move_clips
     move_x_clips, move_y_clips = collect_move_clips(
         tl.clips_by_track, track_order)
-    # BUILD 295: crop_xy keyframe clips, x (snapshot[22]) and y
+    # Crop_xy keyframe clips, x (snapshot[22]) and y
     # (snapshot[23]) (keyframe.collect_crop_xy_clips)
     from keyframe import collect_crop_xy_clips
     crop_xy_x_clips, crop_xy_y_clips = collect_crop_xy_clips(
         tl.clips_by_track, track_order)
-    # BUILD 296: crop_edges keyframe clips, top, bottom, left, right
+    # Crop_edges keyframe clips, top, bottom, left, right
     # (snapshot[24] .. [27]) (keyframe.collect_crop_edge_clips)
     from keyframe import collect_crop_edge_clips
     crop_edge_clips = collect_crop_edge_clips(tl.clips_by_track, track_order)
-    # BUILD 337: chroma keyframe clips, r, g, b, tolerance
+    # Chroma keyframe clips, r, g, b, tolerance
     # (snapshot[30] .. [33]) (keyframe.collect_chroma_clips)
     from keyframe import collect_chroma_clips
     chroma_clips = collect_chroma_clips(tl.clips_by_track, track_order)
-    # BUILD 303: clip speed percent by clip id, only clips != 100
+    # Clip speed percent by clip id, only clips != 100
     # (snapshot[28], clip_speed.load_clip_speeds; _layer_items)
     clip_speeds = dict(getattr(tl, "_clip_speeds", None) or {})
-    # BUILD 309: text clip styles (snapshot[29], {text clip mem id: (text,
+    # Text clip styles (snapshot[29], {text clip mem id: (text
     # font_family, font_size, color, x, y, shadow_on, shadow_color,
     # shadow_blur, shadow_angle, shadow_offset)}, text_clip.load_text_styles),
     # read only when a text track is in the rows
@@ -682,7 +682,7 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
 
 
 def _chroma_key_rows(chroma):
-    # BUILD 339: None, one (r, g, b, tolerance), or a stack of those.
+    # None, one (r, g, b, tolerance), or a stack of those.
     # Invalid rows are dropped. Empty means the kernel skips chroma.
     if not chroma:
         return ()
@@ -709,7 +709,7 @@ def _chroma_key_rows(chroma):
 
 
 def _upload_chroma(self, flat):
-    # BUILD 339: device table of stacked chroma keys (r, g, b, tol floats).
+    # Device table of stacked chroma keys (r, g, b, tol floats).
     # The copy is queued on self.stream ahead of blend_layer, so one buffer
     # is enough across layers. The host array stays alive until _sync
     # (pageable cudaMemcpyAsync may still read it after this returns).
@@ -743,7 +743,7 @@ def _upload_chroma(self, flat):
 
 
 def _free_chroma_buf(self):
-    # BUILD 339: drop the stacked chroma table. Safe when chroma was never
+    # Drop the stacked chroma table. Safe when chroma was never
     # used. Caller has the CUDA context current.
     dev = getattr(self, "_chroma_dev", None)
     self._chroma_hold = []
@@ -800,7 +800,7 @@ class SequencePlayer(QWindow):
         self.decoders = {}               # (instance, path) -> SimpleDecoder
         self.dec_next = {}               # (instance, path) -> next index it yields
         self.dec_used = {}               # (instance, path) -> last sequence frame used
-        # BUILD 119: (instance, path) -> (index, frame, decoder) of the last
+        # (instance, path) -> (index, frame, decoder) of the last
         # single decode, reused when a frame-mapped proxy repeats an index
         self.dec_last = {}
         self.images = {}                 # path -> (ptr, w, h, stride) or None
@@ -820,7 +820,7 @@ class SequencePlayer(QWindow):
         self._play_free = []             # indexes into _play_bufs not in the ring
         self._play_lock = threading.Lock()
         self._preview_audio = None          # PreviewAudioPlayer for mix WAV
-        self._playback_pct = playback_size_percent()   # BUILD 256
+        self._playback_pct = playback_size_percent()
 
     # ---- geometry, same scheme as the other windows
 
@@ -881,7 +881,7 @@ class SequencePlayer(QWindow):
         return super().event(event)
 
     def _text_ui(self, make=True):
-        # BUILD 310: on-player text clip move / edit (player_text_edit),
+        # On-player text clip move / edit (player_text_edit)
         # made on first use; make=False returns None until then
         ui = getattr(self, "_text_edit_ui", None)
         if ui is None and make:
@@ -890,21 +890,21 @@ class SequencePlayer(QWindow):
         return ui
 
     def mousePressEvent(self, event):
-        # BUILD 256: right click anywhere in the player opens the Playback
+        # Right click anywhere in the player opens the Playback
         # Size menu (the QWindow itself gets the mouse; it is not inside a
         # widget container)
         if event.button() == Qt.RightButton:
             event.accept()
             self._playback_menu(event.globalPosition().toPoint())
             return
-        # BUILD 310: left press on the selected text clip's box starts a drag
+        # Left press on the selected text clip's box starts a drag
         if event.button() == Qt.LeftButton and self._text_ui().press(event.position()):
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # BUILD 310: hover outline / text drag
+        # Hover outline / text drag
         if self._text_ui().move(event.position()):
             event.accept()
             return
@@ -917,7 +917,7 @@ class SequencePlayer(QWindow):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        # BUILD 310: double-click on the selected text clip's box edits it
+        # Double-click on the selected text clip's box edits it
         if event.button() == Qt.LeftButton and self._text_ui().double_click(event.position()):
             event.accept()
             return
@@ -982,7 +982,7 @@ class SequencePlayer(QWindow):
         self._clear_wait()
         self._reader.stop_reader()
         self.stop_preview_audio()
-        # BUILD 112: scrub burst sink stopped, then deleteLater
+        # Scrub burst sink stopped, then deleteLater
         from sequence_player_audio import release_scrub_burst
         release_scrub_burst(self)
         self._save_geometry()
@@ -1147,7 +1147,7 @@ class SequencePlayer(QWindow):
         try:
             conn = sqlite3.connect(self.timeline._project_db())
             cur = conn.cursor()
-            # BUILD 326: pull pixel_aspect with the path so a newly imported
+            # Pull pixel_aspect with the path so a newly imported
             # clip does not need a separate ffprobe
             try:
                 cur.execute(
@@ -1190,18 +1190,18 @@ class SequencePlayer(QWindow):
         pos_y_clips = snapshot[5] if len(snapshot) >= 6 else []
         proxies = snapshot[6] if len(snapshot) >= 7 else {}
         opacity_clips = snapshot[7] if len(snapshot) >= 8 else []
-        # BUILD 147: crop keyframes; layer items gain crop_x, crop_y ([9], [10])
+        # Crop keyframes; layer items gain crop_x, crop_y ([9], [10])
         crop_x_clips = snapshot[8] if len(snapshot) >= 9 else []
         crop_y_clips = snapshot[9] if len(snapshot) >= 10 else []
-        # BUILD 154: color keyframes; layer items gain gamma, brightness,
+        # Color keyframes; layer items gain gamma, brightness
         # contrast ([11], [12], [13])
         gamma_clips = snapshot[10] if len(snapshot) >= 11 else []
         brightness_clips = snapshot[11] if len(snapshot) >= 12 else []
         contrast_clips = snapshot[12] if len(snapshot) >= 13 else []
-        # BUILD 219: rotate keyframes; layer items gain rotate degrees ([14])
+        # Rotate keyframes; layer items gain rotate degrees ([14])
         rotate_clips = snapshot[13] if len(snapshot) >= 14 else []
         from keyframe import rotate_degrees_for_link
-        # BUILD 220: outline keyframes; layer items gain the outline
+        # Outline keyframes; layer items gain the outline
         # (width, r, g, b, a) or None ([15])
         outline_clips = snapshot[14] if len(snapshot) >= 15 else []
         outline_rgba_clips = tuple(snapshot[i] if len(snapshot) > i else []
@@ -1209,31 +1209,31 @@ class SequencePlayer(QWindow):
         from keyframe import outline_for_link
         # Frame rate conform by footage id (snapshot[19], clip_source_frame)
         fps_conform = snapshot[19] if len(snapshot) > 19 else {}
-        # BUILD 294: move keyframes (snapshot[20] x, [21] y); their offset
+        # Move keyframes (snapshot[20] x, [21] y); their offset
         # is added to the position X / Y offsets in pos_dx / pos_dy
         move_x_clips = snapshot[20] if len(snapshot) > 20 else []
         move_y_clips = snapshot[21] if len(snapshot) > 21 else []
         from keyframe import move_offset_for_link
-        # BUILD 295: crop_xy keyframes (snapshot[22] x, [23] y); their
+        # Crop_xy keyframes (snapshot[22] x, [23] y); their
         # values are added to the crop_x / crop_y values
         crop_xy_x_clips = snapshot[22] if len(snapshot) > 22 else []
         crop_xy_y_clips = snapshot[23] if len(snapshot) > 23 else []
         from keyframe import crop_xy_for_link
-        # BUILD 296: crop_edges keyframes (snapshot[24] .. [27]); layer
+        # Crop_edges keyframes (snapshot[24].. [27]); layer
         # items gain (top, bottom, left, right) or None ([17])
         crop_edge_clips = tuple(snapshot[i] if len(snapshot) > i else []
                                 for i in (24, 25, 26, 27))
         from keyframe import crop_edges_for_link
-        # BUILD 337: chroma keyframes (snapshot[30] .. [33]); layer items
-        # gain a stack of (r, g, b, tolerance) or None ([18]). BUILD 339:
+        # Chroma keyframes (snapshot[30].. [33]); layer items
+        # gain a stack of (r, g, b, tolerance) or None ([18]).:
         # every linked chroma clip above the layer, not only the nearest.
         chroma_clips = tuple(snapshot[i] if len(snapshot) > i else []
                              for i in (30, 31, 32, 33))
         from keyframe import chroma_for_link
-        # BUILD 303: clip speed (snapshot[28], {clip id: percent != 100})
+        # Clip speed (snapshot[28], {clip id: percent != 100})
         speeds = snapshot[28] if len(snapshot) > 28 else {}
         from clip_speed import source_pos
-        # BUILD 309: text clip styles (snapshot[29]); a text layer's path is
+        # Text clip styles (snapshot[29]); a text layer's path is
         # its texture key (player_text.text_layer_path), source frame 0, and
         # every linked keyframe effect applies as to an image layer
         text_styles = snapshot[29] if len(snapshot) > 29 else {}
@@ -1264,13 +1264,13 @@ class SequencePlayer(QWindow):
                     path = self._footage_path(clip[1])
                 if path and kind != "text" and clip[0] in proxies:
                     # Proxy: same source frame, or (double rate / IVTC,
-                    # BUILD 119) the source frame mapped by time
+                    # ) the source frame mapped by time
                     pr = proxies[clip[0]]
                     path, orig_size = pr[0], pr[1]
                     if len(pr) > 3:
                         ratio, pframes = pr[2], pr[3]
                 elif path and kind == "video":
-                    # BUILD 324: non-square-pixel original -> display size
+                    # Non-square-pixel original -> display size
                     orig_size = anamorphic_size(path)
                 if path:
                     src = 0
@@ -1398,7 +1398,7 @@ class SequencePlayer(QWindow):
             if preview_log.RENDER_LOG:
                 print("DECODER close: %s #%d (%s; %d open)" % (
                     key[1], int(key[0] or 0), why, len(self.decoders)))
-            # BUILD 342: CPU fallback owns an ffmpeg process for this file.
+            # CPU fallback owns an ffmpeg process for this file.
             # NVDEC decoders are released by deleting them, as before.
             if getattr(dec, "cpu_fallback", False):
                 try:
@@ -1463,22 +1463,22 @@ class SequencePlayer(QWindow):
                     output_color_type=nvc.OutputColorType.RGB,
                 )
 
-            # BUILD 342: NVDEC open failure uses CPU decode for this file
+            # NVDEC open failure uses CPU decode for this file
             # only. The result is stored on this key. Other keys still open
             # NVDEC. No global CPU switch.
             dec = open_with_cpu_fallback(path, _nvdec, lambda: CpuDecoder(path))
             self.decoders[key] = dec
-            # BUILD 247: open time on the console (preview_log)
+            # Open time on the console (preview_log)
             preview_log.decoder_opened(path, _time.perf_counter() - t_open)
             if preview_log.RENDER_LOG:
                 print("DECODER open: %s #%d (%.0f ms; %d open)" % (
                     path, int(key[0] or 0), (_time.perf_counter() - t_open) * 1000.0,
                     len(self.decoders)))
             if getattr(self, "_refresh_hold", 0):
-                # BUILD 182: explicit refresh: hard VRAM exit check
-                # BUILD 183: full path (footage or proxy) logged at open
+                # Explicit refresh: hard VRAM exit check
+                # Full path (footage or proxy) logged at open
                 from sequence_player_preview import vram_fatal_check
-                # BUILD 187: refresh instrumentation silenced (speed); uncomment to trace
+                # Refresh instrumentation silenced (speed); uncomment to trace
                 # fv = free_vram()
                 # print("WORKER refresh decoder open: %s | free %s of %s MB" % (
                 #     path, (fv[0] >> 20) if fv else "?", (fv[1] >> 20) if fv else "?"))
@@ -1536,11 +1536,11 @@ class SequencePlayer(QWindow):
         except (TypeError, ValueError):
             op = 1.0
         opacity_f = ctypes.c_float(op)
-        # BUILD 151: crop_x = px cut off the left AND the right of the source
+        # Crop_x = px cut off the left AND the right of the source
         # (picture stays in place, kernel draws [crop_x, sw - crop_x]);
-        # negative = no crop. (BUILD 151: crop_y kept the BUILD 147 shift.)
-        # BUILD 152: crop_y is the same crop on y (top AND bottom).
-        # BUILD 147: crop keyframes in ORIGINAL source pixels (None = 0).
+        # negative = no crop. (crop_y kept the shift.)
+        # Crop_y is the same crop on y (top AND bottom).
+        # Crop keyframes in ORIGINAL source pixels (None = 0).
         # The kernel samples the source shifted by (crop_x, crop_y) inside
         # the unchanged layer box; what leaves the source is transparent.
         # A proxy is shifted by the same fraction of its own size.
@@ -1553,12 +1553,12 @@ class SequencePlayer(QWindow):
             if c and orig_size is not None and orig_size[orig_i]:
                 c = c * float(size) / float(orig_size[orig_i])
             # if orig_i == 0:
-            #     # BUILD 151: crop_x crops both sides; negative = no crop
+            # crop_x crops both sides; negative = no crop
             #     c = max(0.0, c)
-            # BUILD 152: crop_y too (top and bottom); negative = no crop
+            # Crop_y too (top and bottom); negative = no crop
             c = max(0.0, c)
             crops.append(ctypes.c_float(c))
-        # BUILD 296: Edge Crop (crop_edges = (top, bottom, left, right) or
+        # Edge Crop (crop_edges = (top, bottom, left, right) or
         # None = no edge keys, the crop above unchanged). Equal left / right
         # and top / bottom stay the kernel's symmetric crop. Otherwise the
         # kernel gets only the kept source rectangle (crop_edge_rect): the
@@ -1588,7 +1588,7 @@ class SequencePlayer(QWindow):
                 rect = (lo_x - px, lo_y - py, hi_x - lo_x + 1 + 2 * px,
                         hi_y - lo_y + 1 + 2 * py)
                 crops = [ctypes.c_float(px), ctypes.c_float(py)]
-        # BUILD 154: color keyframes (None = no change). The kernel runs, per
+        # Color keyframes (None = no change). The kernel runs, per
         # RGB channel of the source pixel before the opacity / alpha blend,
         # c = channel / 255, then contrast (c - 0.5) * contrast + 0.5 clamped
         # 0..1, then brightness c + brightness / 100 clamped 0..1, then gamma
@@ -1607,7 +1607,7 @@ class SequencePlayer(QWindow):
         k_ = _num(contrast, 1.0, 0.0, 5.0)
         cflags = ((1 if k_ != 1.0 else 0) | (2 if b_ != 0.0 else 0)
                   | (4 if g_ != 1.0 else 0))
-        # BUILD 219: rotate keyframe in degrees (None = 0), positive =
+        # Rotate keyframe in degrees (None = 0), positive =
         # clockwise on screen, about the layer center (sequence center plus
         # pos_dx / pos_dy). The kernel gets cos / sin and samples the source
         # at the inverse rotation. Multiples of 90 degrees use exact 0 / +-1
@@ -1620,7 +1620,7 @@ class SequencePlayer(QWindow):
         else:
             rad = math.radians(rot)
             rot_cs = (math.cos(rad), math.sin(rad))
-        # BUILD 220: border outline (width, r, g, b, a) from the outline
+        # Border outline (width, r, g, b, a) from the outline
         # keyframes, or None = off. The kernel draws a band `width` sequence
         # pixels thick just outside the clip's visible rectangle (after crop,
         # scale, rotate and position, so it turns with the clip) in the RGBA
@@ -1635,7 +1635,7 @@ class SequencePlayer(QWindow):
                               << (8 * i))
             except (TypeError, ValueError, IndexError):
                 ow, orgba = 0.0, 0
-        # BUILD 337 / 339: chroma keys (r, g, b, tolerance), one or a stack,
+        # Chroma keys (r, g, b, tolerance), one or a stack
         # or None = off. The kernel punches source pixels within Euclidean
         # distance tolerance of any key (0..255) down to alpha 0. chroma_n
         # 0 skips it (bit-exact with no chroma key). Jokey and rough: no
@@ -1668,7 +1668,7 @@ class SequencePlayer(QWindow):
         cy = (sh - self.seq_h) // 2 if sh > self.seq_h else 0
         ox, oy = cx - dx, cy - dy
         if rect is not None:
-            # BUILD 296: the kept source rectangle (see above)
+            # The kept source rectangle (see above)
             src_ptr = int(src_ptr) + rect[1] * int(stride) + rect[0] * int(bpp)
             sw, sh = rect[2], rect[3]
             ox, oy = ox - rect[0], oy - rect[1]
@@ -1699,7 +1699,7 @@ class SequencePlayer(QWindow):
         _check(cudart.cudaEventRecord(ev, self.stream), "record")
         _check(cudart.cudaEventSynchronize(ev), "sync")
         cudart.cudaEventDestroy(ev)
-        # BUILD 339: chroma host tables are done once the stream finishes
+        # Chroma host tables are done once the stream finishes
         if getattr(self, "_chroma_hold", None):
             self._chroma_hold = []
 
@@ -1767,7 +1767,7 @@ class SequencePlayer(QWindow):
             if not kept:
                 return []
             try:
-                # BUILD 255: a JPEG of another size (Preview Size) is
+                # A JPEG of another size (Preview Size) is
                 # scaled to the sequence size on the card as it decodes
                 decode_play_jpegs(self, dec, [jpeg for _f, jpeg in kept], bufs)
             except Exception as e:
@@ -1783,7 +1783,7 @@ class SequencePlayer(QWindow):
         path = preview_db_path(self.timeline._project_db(), self.sequence_id)
         if not os.path.isfile(path):
             return 0
-        # BUILD 257: GUI thread; the preview file has no WAL, so a commit
+        # GUI thread; the preview file has no WAL, so a commit
         # can lock it briefly: a short busy wait, then nothing this time
         from sequence_preview import PREVIEW_GUI_BUSY_SEC
         try:
@@ -1955,7 +1955,7 @@ class SequencePlayer(QWindow):
             from sequence_preview import PreviewBusy
             try:
                 from sequence_preview import FrameRetrieve, clean_set
-                # BUILD 153: a frame an edit just marked dirty is a miss
+                # A frame an edit just marked dirty is a miss
                 # (the database mark is queued for the worker thread, so
                 # its old row still reads clean until then)
                 if frame not in clean_set(self.timeline._project_db(),
@@ -1966,7 +1966,7 @@ class SequencePlayer(QWindow):
             except LookupError:
                 jpeg = None
             except PreviewBusy:
-                # BUILD 257: a preview commit holds the file (no WAL): keep
+                # A preview commit holds the file (no WAL): keep
                 # the picture and read again shortly; the worker is not
                 # asked (the frame is there)
                 self._present(dark, self.shown_frame is not None)
@@ -1997,13 +1997,13 @@ class SequencePlayer(QWindow):
         self._arm_retry()
 
     def _busy_retry_frame(self):
-        # BUILD 257: the read after a busy preview file
+        # The read after a busy preview file
         self._busy_retry = False
         if not self.closed:
             self.request_frame(force=True)
 
     def redraw_edited(self, frame, snapshot):
-        # BUILD 153: an edit dirtied the shown frame: compose it now from
+        # An edit dirtied the shown frame: compose it now from
         # the edit's snapshot (one frame, same composite as the worker) and
         # draw it; the worker rebuilds its JPEG. Not while playing (the
         # reader owns the picture) or hidden. A failure waits for the worker.
@@ -2124,15 +2124,15 @@ class SequencePlayer(QWindow):
             pos_dy = layer[5] if len(layer) > 5 else None
             orig_size = layer[7] if len(layer) > 7 else None
             opacity = layer[8] if len(layer) > 8 else None
-            crop_x = layer[9] if len(layer) > 9 else None      # BUILD 147
+            crop_x = layer[9] if len(layer) > 9 else None
             crop_y = layer[10] if len(layer) > 10 else None
-            gamma = layer[11] if len(layer) > 11 else None     # BUILD 154
+            gamma = layer[11] if len(layer) > 11 else None
             brightness = layer[12] if len(layer) > 12 else None
             contrast = layer[13] if len(layer) > 13 else None
-            rotate = layer[14] if len(layer) > 14 else None    # BUILD 219
-            outline = layer[15] if len(layer) > 15 else None   # BUILD 220
-            crop_edges = layer[17] if len(layer) > 17 else None  # BUILD 296
-            chroma = layer[18] if len(layer) > 18 else None      # BUILD 337
+            rotate = layer[14] if len(layer) > 14 else None
+            outline = layer[15] if len(layer) > 15 else None
+            crop_edges = layer[17] if len(layer) > 17 else None
+            chroma = layer[18] if len(layer) > 18 else None
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
@@ -2145,7 +2145,7 @@ class SequencePlayer(QWindow):
                                 crop_edges=crop_edges, chroma=chroma)
                 continue
             if kind == "text":
-                # BUILD 309: the text clip's image (player_text), blended
+                # The text clip's image (player_text), blended
                 # like a still with the same layer effects
                 from player_text import text_texture
                 styles = snapshot[29] if len(snapshot) > 29 else {}
@@ -2178,13 +2178,13 @@ class SequencePlayer(QWindow):
                 continue
             dec = self._decoder(dkey, frame)
             if not source_index_ok(self, dkey, dec, src_frame):
-                # BUILD 240: past the source's last frame: transparent layer
+                # Past the source's last frame: transparent layer
                 continue
             nxt = self.dec_next.get(dkey)
             last = self.dec_last.get(dkey)
             if (last is not None and last[0] == src_frame and last[2] is dec
                     and nxt == src_frame + 1):
-                # BUILD 119: frame-mapped proxy repeats the index (IVTC);
+                # Frame-mapped proxy repeats the index (IVTC)
                 # nothing decoded on this decoder since, reuse the frame
                 f = last[1]
             else:
@@ -2203,8 +2203,8 @@ class SequencePlayer(QWindow):
                         self.dec_next.pop(dkey, None)
                         self.dec_last.pop(dkey, None)
                         if is_out_of_range_error(e):
-                            learn_source_end(dkey, src_frame)   # BUILD 241
-                            continue        # BUILD 240: transparent layer
+                            learn_source_end(dkey, src_frame)
+                            continue        # Transparent layer
                         raise
                 if prefetched:
                     # In a batch pass: a new decode can hand this decoder's
@@ -2217,7 +2217,7 @@ class SequencePlayer(QWindow):
                     self.dec_next.pop(dkey, None)
                     self.dec_last.pop(dkey, None)
                     if is_out_of_range_error(e):
-                        continue            # BUILD 240: transparent layer
+                        continue            # Transparent layer
                     raise
                 if not batch:
                     self.dec_next.pop(dkey, None)
@@ -2228,7 +2228,7 @@ class SequencePlayer(QWindow):
                     self.dec_last.pop(dkey, None)
                     continue
                 self.dec_next[dkey] = src_frame + 1
-                preview_log.first_decode(dkey, len(batch))   # BUILD 247
+                preview_log.first_decode(dkey, len(batch))
                 f = batch[-1]
                 self.dec_last[dkey] = (src_frame, f, dec)
             shape = [int(v) for v in f.shape]
@@ -2281,7 +2281,7 @@ class SequencePlayer(QWindow):
             else:
                 vw = 1.0
                 vh = win_aspect / seq_aspect
-            # BUILD 256: Playback Size (right-click menu), centered; the
+            # Playback Size (right-click menu), centered; the
             # captions below use the same vw / vh
             vw, vh = playback_rect(vw, vh, self._playback_pct)
             gl.glEnable(GL_TEXTURE_2D)
@@ -2298,7 +2298,7 @@ class SequencePlayer(QWindow):
             gl.glEnd()
             gl.glBindTexture(GL_TEXTURE_2D, 0)
             gl.glDisable(GL_TEXTURE_2D)
-            # BUILD 102/104: soft captions on top of the presented picture
+            # Soft captions on top of the presented picture
             # (CPU-painted overlay texture, never in the composite or cache)
             try:
                 self._paint_captions(vw, vh, win_w, win_h, ratio)
@@ -2317,7 +2317,7 @@ class SequencePlayer(QWindow):
         return snap
 
     def _paint_captions(self, vw, vh, win_w, win_h, ratio):
-        # BUILD 104: captions are painted on the CPU into a transparent
+        # Captions are painted on the CPU into a transparent
         # premultiplied QImage the size of the displayed picture, uploaded
         # to their own GL texture and drawn as one blended quad. No QPainter
         # on the GL surface (its glyph-cache uploads inherited our
@@ -2391,7 +2391,7 @@ class SequencePlayer(QWindow):
         # Never raises. Re-bind CUDA on this thread after audio start so the
         # next play_fill/present still sees the shared context.
         try:
-            # BUILD 112: no scrub burst sounding over Play
+            # No scrub burst sounding over Play
             from sequence_player_audio import stop_scrub_burst
             stop_scrub_burst(self)
         except Exception:
@@ -2404,7 +2404,7 @@ class SequencePlayer(QWindow):
             project_db = self.timeline._project_db()
             fps = float(getattr(self.timeline, "fps", 30) or 30)
             total = int(self.timeline.total_frames())
-            # BUILD 136: never mixes here (the timeline's Play waits for the
+            # Never mixes here (the timeline's Play waits for the
             # background mix, sequence_preview_audio.start_mix). Play the
             # WAV only if it matches the timeline; otherwise video plays
             # silent (e.g. the mix failed) rather than an old mix.
@@ -2458,7 +2458,7 @@ class SequencePlayer(QWindow):
             return None
 
     def resync_preview_audio(self, frame):
-        # Neutralized: audio drives the play clock (BUILD 45).
+        # Neutralized: audio drives the play clock.
         # try:
         #     if self._preview_audio is not None:
         #         self._preview_audio.resync_if_drift(int(frame))
@@ -2488,7 +2488,7 @@ def open_player_for(timeline):
         return player
     player = SequencePlayer(timeline)
     timeline._player = player
-    # BUILD 229: top-level QWindow; only its geometry is set here, before
+    # Top-level QWindow; only its geometry is set here, before
     # show: under the timeline's menu bar on first open / monitor change /
     # off-screen (window_place), memory per sequence like the geometry
     sid = getattr(timeline, "sequence_id", None)
@@ -2510,7 +2510,7 @@ def close_player_for(timeline):
 
 
 def sync_player_size(timeline):
-    # BUILD 316: the player keeps its sequence size (GL texture, CUDA
+    # The player keeps its sequence size (GL texture, CUDA
     # buffers) from when it opened. When the sequence size changed
     # (Sequence Settings resolution, or an undo / redo of it), the open
     # player is closed and opened again at the new size (geometry and

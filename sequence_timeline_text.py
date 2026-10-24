@@ -1,5 +1,5 @@
 # sequence_timeline_text.py
-# WYSIWYG Text track wiring for SequenceTimeline (BUILD 308): + WYSIWYG
+# WYSIWYG Text track wiring for SequenceTimeline: + WYSIWYG
 # Text (track type "text") and Add Text Clip on an empty spot of a text
 # track. Data, ids and the text image: text_clip.py. Style window:
 # text_style_window.py. Every other clip edit (move, trim, slice, copy /
@@ -19,7 +19,7 @@ def _add_text_track(self):
 def add_text_clip(self, track_id, click_frame):
     # Add Text Clip: a DEFAULT_SECONDS text clip at the mouse mark with the
     # defaults (text_clip.insert_text_clip), one undo step; refused when it
-    # would overlap a text clip on this track. BUILD 315: its style is the
+    # would overlap a text clip on this track. Its style is the
     # last used text style (text_clip.remembered_text_style; each missing
     # or invalid field its default).
     from text_clip import insert_text_clip, remembered_text_style, DEFAULT_SECONDS

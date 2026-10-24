@@ -1,11 +1,11 @@
 # sequence_timeline_slice.py
-# BUILD 131: slice mode for the Sequence Timeline. C enters, Escape / V /
-# right-click exit, and so does a cut (BUILD 269). A 1 px yellow line shows
+# Slice mode for the Sequence Timeline. C enters, Escape / V /
+# right-click exit, and so does a cut. A 1 px yellow line shows
 # where the cut lands on the clip under the mouse and its link-group
 # partners; left-click cuts through the existing slice path (slice_clip,
 # the right-click Slice item). Functions take the SequenceTimeline as tl.
 # ASCII only.
-# BUILD 132: keyframe clips slice too (slice_clip -> keyframe.
+# Keyframe clips slice too (slice_clip -> keyframe.
 # slice_keyframe_clip_db). Every tl attribute is read with getattr so a
 # call before SequenceTimeline.__init__ finishes cannot raise.
 
@@ -13,14 +13,14 @@ from PySide6.QtCore import Qt, QRect, QEvent
 from PySide6.QtGui import QColor
 
 SLICE_LINE_COLOR = QColor(255, 255, 0)
-# BUILD 134: slice mode leaves the normal arrow pointer (no cursor set)
+# Slice mode leaves the normal arrow pointer (no cursor set)
 
 
 def slice_split_frame(clip, x_in_clips, view_start, ppf):
     # The frame slice_clip cuts at for this clips-column x, or None when
     # slice_clip would do nothing (same math and guards: length < 2, mark
     # outside the clip; inside, never the first frame and the right part
-    # keeps at least one frame). BUILD 132: keyframe clips included.
+    # keeps at least one frame). keyframe clips included.
     if clip is None or len(clip) < 4:
         return None
     start, length = clip[2], clip[3]
@@ -125,7 +125,7 @@ def slice_hover(tl, pos):
 
 def slice_click(tl, pos):
     # Left-click: the existing slice path at this x, then back to regular
-    # mode (BUILD 269; the button release of this click is still swallowed,
+    # mode (; the button release of this click is still swallowed
     # see slice_event). True if cut.
     if getattr(tl, "sequence_id", None) is None:
         return False
@@ -214,7 +214,7 @@ def slice_event(tl, obj, event):
     try:
         return _slice_event(tl, obj, event)
     except AttributeError as e:
-        # BUILD 132: never let a half-built timeline crash the filter
+        # Never let a half-built timeline crash the filter
         print(f"Slice mode event skipped: {e}")
         return None
 

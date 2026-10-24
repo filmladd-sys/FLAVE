@@ -43,7 +43,7 @@ from sequence_timeline_sql import (
     slice_clip, ripple_delete, _toggle_clip_flag,
     ripple_delete_clips, ripple_gap,
 )
-# BUILD 161: track parts of the window (same names, re-exported here)
+# Track parts of the window (same names, re-exported here)
 from sequence_timeline_tracks import (
     _TRACK_STRIP_STATES, _plain_option, _NoTrackHighlightStyle, _track_table_style,
     paint_collapse_triangle, paint_collapse_cell, TrackDisplayDialog,
@@ -52,7 +52,7 @@ from sequence_timeline_tracks import (
     _toggle_collapse_at, _setup_collapse_column, NameCellDelegate,
     _track_name_click, _set_hover_track_row,
 )
-# BUILD 162: clip parts of the window (same names, re-exported here)
+# Clip parts of the window (same names, re-exported here)
 from sequence_timeline_clips import (
     VIDEO_CLIP_BG, AUDIO_CLIP_BG, ClipDelegate, _SEQ_ICON_CACHE,
     COLLAPSED_BAR_COLORS, NAME_MIN_PX, draw_clip_name, paint_collapsed_clip,
@@ -79,10 +79,10 @@ from PySide6.QtGui import (
 )
 
 
-# BUILD 138: debounce after the last completed edit before the audio state
+# Debounce after the last completed edit before the audio state
 # check (which also starts the background mix); quick edits -> one mix
 AUDIO_SETTLE_MS = 500
-# BUILD 244: Play A/V lock. Audio position is the master clock. The tick
+# Play A/V lock. Audio position is the master clock. The tick
 # used to show one queued frame per tick (the frame after the last one
 # shown), so when ticks plus present ran slower than the frame rate the
 # video fell behind the audio and never caught up. Now: (1) each tick, if
@@ -94,15 +94,15 @@ AUDIO_SETTLE_MS = 500
 # until the clock reaches the next one (no stepping back, no decode).
 RESYNC_INTERVAL_S = 1.0
 
-# BUILD 158 no-track-highlight style (_TRACK_STRIP_STATES, _plain_option,
-# _NoTrackHighlightStyle, _track_table_style): BUILD 161 moved it to
+# No-track-highlight style (_TRACK_STRIP_STATES, _plain_option
+# _NoTrackHighlightStyle, _track_table_style): moved it to
 # sequence_timeline_tracks.py (imported above)
 
 
-# BUILD 161: paint_collapse_triangle -> sequence_timeline_tracks.py
+# Paint_collapse_triangle -> sequence_timeline_tracks.py
 
 
-# BUILD 161: TrackDisplayDialog -> sequence_timeline_tracks.py
+# TrackDisplayDialog -> sequence_timeline_tracks.py
 
 
 # Shared registry so Sequence Manager and Project Manager never open duplicates
@@ -143,7 +143,7 @@ def open_timeline(parent, sequence_id):
         return win
     win = SequenceTimeline(parent, sequence_id)
     _open_windows[sequence_id] = win
-    # BUILD 229: under the opener's menu bar on first open / monitor change
+    # Under the opener's menu bar on first open / monitor change
     # / off-screen (window_place); memory per sequence like the geometry
     from window_place import place_under_parent
     place_under_parent(win, parent, "SequenceTimeline_%d" % int(sequence_id),
@@ -173,7 +173,7 @@ class SequenceTimeline(QMainWindow):
     _add_image_track = _add_image_track
     # Keyframe methods live in sequence_timeline_keyframe.py / keyframe.py
     _add_keyframe_track = _add_keyframe_track
-    # WYSIWYG Text methods live in sequence_timeline_text.py (BUILD 308)
+    # WYSIWYG Text methods live in sequence_timeline_text.py
     _add_text_track = _add_text_track
     add_text_clip = add_text_clip
 
@@ -184,7 +184,7 @@ class SequenceTimeline(QMainWindow):
     _add_track = _add_track
     _save_track_display = _save_track_display
     _move_track = _move_track
-    _move_track_to = _move_track_to   # BUILD 124: Move > To Top / To Bottom
+    _move_track_to = _move_track_to   # Move > To Top / To Bottom
     _toggle_track_flag = _toggle_track_flag
     drop_footage = drop_footage
     drop_sequence = drop_sequence
@@ -193,9 +193,9 @@ class SequenceTimeline(QMainWindow):
     delete_selected_clip = delete_selected_clip
     slice_clip = slice_clip
     ripple_delete = ripple_delete
-    ripple_delete_clips = ripple_delete_clips   # BUILD 245: clip menu
+    ripple_delete_clips = ripple_delete_clips   # Clip menu
     _toggle_clip_flag = _toggle_clip_flag
-    # BUILD 161: track style / collapse / menus / row height live in
+    # Track style / collapse / menus / row height live in
     # sequence_timeline_tracks.py
     TRACK_ADD_ITEMS = TRACK_ADD_ITEMS
     _track_add_items = _track_add_items
@@ -208,7 +208,7 @@ class SequenceTimeline(QMainWindow):
     _setup_collapse_column = _setup_collapse_column
     _track_name_click = _track_name_click
     _set_hover_track_row = _set_hover_track_row
-    # BUILD 162: clip selection / drag / trim / menu live in
+    # Clip selection / drag / trim / menu live in
     # sequence_timeline_clips.py
     _linked_clips = _linked_clips
     _clip_edge_at = _clip_edge_at
@@ -242,26 +242,26 @@ class SequenceTimeline(QMainWindow):
 
     def __init__(self, parent=None, sequence_id=None):
         super().__init__(parent)
-        # BUILD 132: state read by eventFilter / the delegate / the overlay /
+        # State read by eventFilter / the delegate / the overlay /
         # the slice, marker, key and drop-preview modules, set before any
         # widget exists. The viewport filter is installed mid-__init__ and
         # Qt sends it events (setAcceptDrops, setMouseTracking, Resize ...)
         # before the rest of __init__ runs. Later assignments below re-set
         # the same defaults.
         self.sequence_id = sequence_id
-        self._slice_mode = False      # BUILD 131 slice mode on
-        self._slice_lines = []        # BUILD 131 yellow line rects (viewport)
+        self._slice_mode = False      # Slice mode on
+        self._slice_lines = []        # Yellow line rects (viewport)
         self._edge_drag = None
         self._key_drag = None
         self._marker_drag = None
         self._hover_marker_id = None
-        self._hover_track_row = -1   # BUILD 331: track row under mouse
+        self._hover_track_row = -1   # Track row under mouse
         self._snap_frame = None
-        self._drop_info = None        # BUILD 125 drop preview
+        self._drop_info = None        # Drop preview
         self._drop_preview = []
-        self._rubber = None           # BUILD 148 rubber band (armed / drag)
-        self._rubber_rect = None      # BUILD 148 box drawn by the overlay
-        # self._rubber_eat_menu = False   # BUILD 148 (right button), unused
+        self._rubber = None           # Rubber band (armed / drag)
+        self._rubber_rect = None      # Box drawn by the overlay
+        # self._rubber_eat_menu = False # (right button), unused
         self.clips_by_track = {}
         self._selected_clip_ids = set()
         self._selection_order = []
@@ -278,13 +278,13 @@ class SequenceTimeline(QMainWindow):
         self._play_filling = False
         self._preview_center = None
         self._preview_seen = -1
-        self._preview_status = None   # BUILD 129 label, created below
-        self._play_mixing = False     # BUILD 136: Play waits for the audio mix
-        self._audio_mix_job = None    # BUILD 136: sequence_preview_audio.MixJob
-        self._audio_mix_timer = None  # BUILD 136: GUI-thread poll of the job
-        self._audio_bar_timer = None  # BUILD 137: debounced audio state check
-        self._audio_auto_failed = False  # BUILD 138: no auto retry until an edit / Play
-        self._audio_auto_wanted = False  # BUILD 138: auto mix waits for the global slot
+        self._preview_status = None   # Label, created below
+        self._play_mixing = False     # Play waits for the audio mix
+        self._audio_mix_job = None    # Sequence_preview_audio.MixJob
+        self._audio_mix_timer = None  # GUI-thread poll of the job
+        self._audio_bar_timer = None  # Debounced audio state check
+        self._audio_auto_failed = False  # No auto retry until an edit / Play
+        self._audio_auto_wanted = False  # Auto mix waits for the global slot
         name = _load_sequence_name(sequence_id)
         if name:
             self.setWindowTitle(f"Sequence Timeline: {name}: #{sequence_id}")
@@ -303,14 +303,14 @@ class SequenceTimeline(QMainWindow):
         self._restore_view_state()
 
         self.table = QTableWidget()
-        self.table._hover_track_row = -1   # BUILD 331: read by track style
+        self.table._hover_track_row = -1   # Read by track style
         self.ruler = RulerHeader(self)
         self.table.setHorizontalHeader(self.ruler)
-        # BUILD 126: 4th logical column = collapse triangle, shown far left
+        # 4th logical column = collapse triangle, shown far left
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Name", "Type", "", ""])
         # self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # BUILD 158: no track highlight. No row selection at all (nothing
+        # No track highlight. No row selection at all (nothing
         # reads the table selection: menus / Name edit use the clicked row)
         # and the cell panels drop Selected / hover / focus states.
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -336,7 +336,7 @@ class SequenceTimeline(QMainWindow):
         self.ruler.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         # Clips fills the remaining window width; the ruler is virtual
         self.ruler.setSectionResizeMode(CLIPS_COL, QHeaderView.Stretch)
-        # BUILD 161: triangle column / collapsed row sizes:
+        # Triangle column / collapsed row sizes:
         # sequence_timeline_tracks._setup_collapse_column
         self._setup_collapse_column()
         # Central area: track table on top, play control row pinned bottom left
@@ -349,7 +349,7 @@ class SequenceTimeline(QMainWindow):
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(0)
         controls_row.addStretch(0)
-        self._control_buttons = {}   # BUILD 163: name -> button (active cue)
+        self._control_buttons = {}   # Name -> button (active cue)
         for label, name in (("<<", "Jump to home"),
                             ("|<", "Jump to previous edit"),
                             ("<", "Play in reverse"),
@@ -407,7 +407,7 @@ class SequenceTimeline(QMainWindow):
         self._out_paint_miss = {}   # clip_id -> (frame, height) last printed miss
         self.table.setItemDelegateForColumn(CLIPS_COL, ClipDelegate(self))
         self.table.setItemDelegateForColumn(COLLAPSE_COL, ClipDelegate(self))
-        # BUILD 163: Name cell outline while the track menu is open
+        # Name cell outline while the track menu is open
         self._menu_track_row = -1
         # Track selection (Name cell click / Shift+click): track ids
         self._selected_track_ids = set()
@@ -429,7 +429,7 @@ class SequenceTimeline(QMainWindow):
         self.status_bar.setContextMenuPolicy(Qt.CustomContextMenu)
         self.status_bar.customContextMenuRequested.connect(
             self._status_bar_menu)
-        # BUILD 129: 'Generating preview NN%' in a permanent label at the
+        # 'Generating preview NN%' in a permanent label at the
         # right of the status bar (showMessage, the play clock / frame text,
         # is untouched). Polled on the GUI thread at 4 per second.
         self._preview_status = QLabel("")
@@ -449,7 +449,7 @@ class SequenceTimeline(QMainWindow):
         # Space = Play / Pause for this timeline. Window shortcut only; text
         # fields and spin boxes take Space first (shortcut override)
         QShortcut(QKeySequence(Qt.Key_Space), self, activated=self._toggle_play)
-        # BUILD 131: slice mode. C enters, V exits (window shortcuts: a text
+        # Slice mode. C enters, V exits (window shortcuts: a text
         # field or item editor takes plain letters first via shortcut
         # override); Escape exits in keyPressEvent; right-click exits in
         # the viewport filter
@@ -457,7 +457,7 @@ class SequenceTimeline(QMainWindow):
         self._slice_lines = []
         QShortcut(QKeySequence(Qt.Key_C), self, activated=self._slice_enter)
         QShortcut(QKeySequence(Qt.Key_V), self, activated=self._slice_exit_key)
-        # BUILD 156: Ctrl+C / Ctrl+X / Ctrl+V = Copy / Cut / Paste To Tic
+        # Ctrl+C / Ctrl+X / Ctrl+V = Copy / Cut / Paste To Tic
         # (window shortcuts; a text field / spin box / item editor takes
         # its own copy / cut / paste first via shortcut override, and the
         # handlers also do nothing while one has focus). Not tied to slice
@@ -465,16 +465,16 @@ class SequenceTimeline(QMainWindow):
         QShortcut(QKeySequence("Ctrl+C"), self, activated=self._key_copy)
         QShortcut(QKeySequence("Ctrl+X"), self, activated=self._key_cut)
         QShortcut(QKeySequence("Ctrl+V"), self, activated=self._key_paste)
-        # BUILD 166: F5 = Refresh Preview (dirty video frames + audio mix)
+        # F5 = Refresh Preview (dirty video frames + audio mix)
         QShortcut(QKeySequence(Qt.Key_F5), self, activated=self.refresh_preview)
-        # BUILD 280: Ctrl+F = Edit > Find... (captions); F3 / Shift+F3 =
+        # Ctrl+F = Edit > Find... (captions); F3 / Shift+F3 =
         # next / previous match
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._caption_find)
         QShortcut(QKeySequence(Qt.Key_F3), self, activated=self._caption_find_next)
         QShortcut(QKeySequence("Shift+F3"), self, activated=self._caption_find_prev)
 
         self._create_menus()
-        # BUILD 281: activating this window selects its sequence; its
+        # Activating this window selects its sequence; its
         # Sequence Player stays in front of the other FLAVE windows
         from player_front import install as _player_front_install
         _player_front_install()
@@ -491,7 +491,7 @@ class SequenceTimeline(QMainWindow):
         # File menu: Exit quits FLAVE the same way as Project Manager's
         # File > Exit (its closeEvent saves the open windows, then quits)
         file_menu = menubar.addMenu("File")
-        # BUILD 330: Render under File (was a top-level menubar action)
+        # Render under File (was a top-level menubar action)
         render_action = QAction("Render", self)
         render_action.triggered.connect(
             lambda checked=False: self.open_render_manager())
@@ -503,7 +503,7 @@ class SequenceTimeline(QMainWindow):
 
         # Edit menu (in-memory clipboard per sequence, timeline_clipboard.py)
         edit_menu = menubar.addMenu("Edit")
-        # BUILD 156: the shortcut text only (the keys are the QShortcuts
+        # The shortcut text only (the keys are the QShortcuts
         # above; a second binding on the action would make them ambiguous)
         self._copy_action = QAction("Copy\tCtrl+C", self)
         self._copy_action.triggered.connect(self._clip_copy)
@@ -513,11 +513,11 @@ class SequenceTimeline(QMainWindow):
         self._paste_end_action.triggered.connect(self._clip_paste_end)
         self._cut_action = QAction("Cut\tCtrl+X", self)
         self._cut_action.triggered.connect(self._clip_cut)
-        # BUILD 288: the clipboard from any sequence of the project, pasted
+        # The clipboard from any sequence of the project, pasted
         # at the playhead on new tracks (timeline_clipboard.paste_new_tracks)
         self._paste_new_tracks_action = QAction("Paste w/New Tracks", self)
         self._paste_new_tracks_action.triggered.connect(self._clip_paste_new_tracks)
-        # BUILD 289: the same, after inserting the pasted span at the
+        # The same, after inserting the pasted span at the
         # playhead on every existing track (paste_new_tracks insert=True)
         self._paste_insert_new_tracks_action = QAction(
             "Paste Insert w/New Tracks", self)
@@ -527,7 +527,7 @@ class SequenceTimeline(QMainWindow):
                   self._paste_end_action, self._paste_new_tracks_action,
                   self._paste_insert_new_tracks_action, self._cut_action):
             edit_menu.addAction(a)
-        # BUILD 280: Find in captions (sequence_timeline_find.py); the keys
+        # Find in captions (sequence_timeline_find.py); the keys
         # are the QShortcuts above, shown as text only
         edit_menu.addSeparator()
         find_action = QAction("Find...\tCtrl+F", self)
@@ -536,7 +536,7 @@ class SequenceTimeline(QMainWindow):
         edit_menu.aboutToShow.connect(self._update_edit_actions)
         self._update_edit_actions()
 
-        # Tracks menu (BUILD 123: same items / handlers as the right-click
+        # Tracks menu (: same items / handlers as the right-click
         # menu on empty timeline space, from TRACK_ADD_ITEMS)
         tracks_menu = menubar.addMenu("Tracks")
         for label, handler in self._track_add_items():
@@ -549,8 +549,8 @@ class SequenceTimeline(QMainWindow):
         player_action.triggered.connect(lambda checked=False: self.open_player())
         menubar.addAction(player_action)
 
-        # BUILD 166: Refresh Preview (also F5, the QShortcut above).
-        # BUILD 178: under a Preview menu, with Clear Video / Clear Audio
+        # Refresh Preview (also F5, the QShortcut above).
+        # Under a Preview menu, with Clear Video / Clear Audio
         # (mark everything dirty, no refresh; for timing refreshes)
         preview_menu = menubar.addMenu("Preview")
         refresh_action = QAction("Refresh (F5)", self)
@@ -564,7 +564,7 @@ class SequenceTimeline(QMainWindow):
         preview_menu.addAction(clear_audio_action)
 
     def clear_preview_video(self):
-        # BUILD 178: every preview frame dirty (0 .. last frame); the next
+        # Every preview frame dirty (0.. last frame); the next
         # refresh rebuilds them all. Starts no refresh.
         if self.sequence_id is None or not self._project_db():
             return
@@ -579,7 +579,7 @@ class SequenceTimeline(QMainWindow):
             print(f"Clear preview video failed: {e}")
 
     def clear_preview_audio(self):
-        # BUILD 178: preview audio dirty; the next refresh mixes it in full
+        # Preview audio dirty; the next refresh mixes it in full
         # (no partial mix). Starts no refresh.
         if self.sequence_id is None or not self._project_db():
             return
@@ -592,14 +592,14 @@ class SequenceTimeline(QMainWindow):
             print(f"Clear preview audio failed: {e}")
 
     def refresh_preview(self):
-        # BUILD 166: explicit refresh. The worker builds every not-clean
+        # Explicit refresh. The worker builds every not-clean
         # preview frame (dirty marks kept as before) and the audio mix
         # starts; normal editing only rebuilds the playhead frame
         if self.sequence_id is None:
             return
-        if self._export_refused():      # BUILD 318
+        if self._export_refused():
             return
-        # BUILD 169: the audio mix thread starts first, then runs alongside
+        # The audio mix thread starts first, then runs alongside
         # the image pass
         self._audio_auto_failed = False
         self._audio_mix_kick()
@@ -608,14 +608,14 @@ class SequenceTimeline(QMainWindow):
             set_refresh_all(True)
         except Exception as e:
             print(f"Refresh preview failed: {e}")
-        # BUILD 172: window up (and painted) before the retarget, so it
+        # Window up (and painted) before the retarget, so it
         # shows even while the refresh pass keeps the GPU busy
         self._show_refresh_dialog()
         self._retarget_preview(force=True)
         self.status_bar.showMessage("Refreshing preview", 3000)
 
     def _export_refused(self):
-        # BUILD 318: True (and a status bar note) while a render runs: the
+        # True (and a status bar note) while a render runs: the
         # preview worker renders nothing then (set_export_pause)
         try:
             from sequence_preview_worker import export_paused, EXPORT_PAUSE_TEXT
@@ -627,17 +627,17 @@ class SequenceTimeline(QMainWindow):
             return False
 
     def _show_refresh_dialog(self):
-        # BUILD 167: progress window, closes itself when both are done
+        # Progress window, closes itself when both are done
         try:
             from refresh_preview_dialog import RefreshPreviewDialog
             if getattr(self, "_refresh_dialog", None) is None:
                 self._refresh_dialog = RefreshPreviewDialog(self)
-                # BUILD 229: under this timeline's menu bar when created
+                # Under this timeline's menu bar when created
                 # (no geometry memory: every new dialog)
                 from window_place import place_under_parent
                 place_under_parent(self._refresh_dialog, self, "refresh_preview")
             self._refresh_dialog.start()
-            QApplication.processEvents()    # BUILD 172: paint it now
+            QApplication.processEvents()    # Paint it now
         except Exception as e:
             print(f"Refresh preview window failed: {e}")
 
@@ -660,7 +660,7 @@ class SequenceTimeline(QMainWindow):
         # Copy/Cut need a selection; Paste needs a clipboard from this
         # sequence, or from another one with matching tracks selected
         # (timeline_clipboard.has_clipboard); Paste w/New Tracks one from
-        # any sequence of the project. BUILD 308: first, the text style
+        # any sequence of the project. First, the text style
         # window follows the selection (text_style_window.py)
         from text_style_window import sync_text_style_window
         sync_text_style_window(self)
@@ -712,7 +712,7 @@ class SequenceTimeline(QMainWindow):
         paste(self, end_anchor(self), False)
         self._update_edit_actions()
 
-    # BUILD 156: keyboard Copy / Cut / Paste (Ctrl+C / X / V)
+    # Keyboard Copy / Cut / Paste (Ctrl+C / X / V)
     def _key_copy(self):
         from sequence_timeline_slice import text_input_focused
         if text_input_focused(self):
@@ -732,29 +732,29 @@ class SequenceTimeline(QMainWindow):
         self._clip_paste_tic()
 
     def _add_clipboard_actions(self, menu):
-        # BUILD 156: Copy / Cut / Paste on a clip's right-click menu. Paste
+        # Copy / Cut / Paste on a clip's right-click menu. Paste
         # only when has_clipboard (this sequence's clipboard, or another
         # sequence's with matching tracks selected; hidden, not disabled). Returns (copy, cut, paste or None).
-        # BUILD 159: called first on a new menu: Copy, Cut, Paste at the top,
+        # Called first on a new menu: Copy, Cut, Paste at the top
         # then one separator before the rest of the menu
         from timeline_clipboard import has_clipboard
         copy_action = menu.addAction("Copy")
         cut_action = menu.addAction("Cut")
         # paste_action = menu.addAction("Paste") if has_clipboard(self) else None
-        # BUILD 160: Paste is a submenu: To Mouse, To Tick; paste_action is
+        # Paste is a submenu: To Mouse, To Tick; paste_action is
         # then the (to mouse, to tick) pair, or None when hidden
         paste_action = self._add_paste_submenu(menu) if has_clipboard(self) else None
         menu.addSeparator()
         return copy_action, cut_action, paste_action
 
     def _add_paste_submenu(self, menu):
-        # BUILD 160: Paste > To Mouse (the frame under the right-click) /
+        # Paste > To Mouse (the frame under the right-click) /
         # To Tick (the playhead). Returns (to mouse, to tick) actions.
         paste_menu = menu.addMenu("Paste")
         return (paste_menu.addAction("To Mouse"), paste_menu.addAction("To Tick"))
 
     def _paste_mouse_frame(self, pos):
-        # BUILD 160: frame under the right-click, the same x -> frame
+        # Frame under the right-click, the same x -> frame
         # conversion as drop (whole frames, never below 0); a click left of
         # the Clips column (below-tracks space) counts as its left edge
         return self._frame_at_clips_x(max(0, self._x_in_clips(pos)))
@@ -764,7 +764,7 @@ class SequenceTimeline(QMainWindow):
         paste(self, self._paste_mouse_frame(pos), True)
 
     def _run_paste_pair(self, action, pair, pos):
-        # BUILD 160: True when action is To Mouse / To Tick of pair (run it)
+        # True when action is To Mouse / To Tick of pair (run it)
         if pair is None or action is None:
             return False
         if action == pair[0]:
@@ -776,9 +776,9 @@ class SequenceTimeline(QMainWindow):
         return False
 
     def _add_empty_paste_action(self, menu):
-        # BUILD 157: Paste on the empty-space / empty track menus, after a
+        # Paste on the empty-space / empty track menus, after a
         # separator at the end; None (not added) when the clipboard is empty
-        # BUILD 159: called first on a new menu: Paste at the top, then a
+        # Called first on a new menu: Paste at the top, then a
         # separator; nothing at all (no separator) when the clipboard is empty
         from timeline_clipboard import has_clipboard
         if not has_clipboard(self):
@@ -786,18 +786,18 @@ class SequenceTimeline(QMainWindow):
         # menu.addSeparator()
         # return menu.addAction("Paste")
         # paste_action = menu.addAction("Paste")
-        # BUILD 160: Paste submenu (To Mouse, To Tick); returns the pair
+        # Paste submenu (To Mouse, To Tick); returns the pair
         paste_action = self._add_paste_submenu(menu)
         menu.addSeparator()
         return paste_action
 
     # def _run_clipboard_action(self, action, acts, clip):
     def _run_clipboard_action(self, action, acts, clip, pos=None):
-        # BUILD 156: True when action was one of acts. Copy / Cut use the
+        # True when action was one of acts. Copy / Cut use the
         # selection (the right-click already selected an unselected clicked
         # clip with its link partners); with no selection, the clicked clip.
         # Paste: at the playhead (Paste To Tic).
-        # BUILD 160: paste_action is the (To Mouse, To Tick) pair; To Mouse
+        # Paste_action is the (To Mouse, To Tick) pair; To Mouse
         # pastes at the frame under pos (the right-click)
         copy_action, cut_action, paste_action = acts
         # if action is None or action not in [a for a in acts if a is not None]:
@@ -824,15 +824,15 @@ class SequenceTimeline(QMainWindow):
         item = self.table.item(row, 0)
         return item.data(Qt.UserRole) if item is not None else None
 
-    # BUILD 161: TRACK_ADD_ITEMS, _track_add_items, _add_track_actions ->
+    # TRACK_ADD_ITEMS, _track_add_items, _add_track_actions ->
     # sequence_timeline_tracks.py (attached above)
 
     def _empty_space_menu(self, pos):
         # Right-click below the last track (or in a sequence with no
         # tracks): only the Tracks menu items
         menu = QMenu(self)
-        # BUILD 157: Paste (at the playhead) when the clipboard has items
-        # BUILD 159: first item
+        # Paste (at the playhead) when the clipboard has items
+        # First item
         paste_action = self._add_empty_paste_action(menu)
         acts = self._add_track_actions(menu)
         # paste_action = self._add_empty_paste_action(menu)
@@ -840,7 +840,7 @@ class SequenceTimeline(QMainWindow):
         # if paste_action is not None and action == paste_action:
         #     self._clip_paste_tic()
         #     return
-        if self._run_paste_pair(action, paste_action, pos):     # BUILD 160
+        if self._run_paste_pair(action, paste_action, pos):
             return
         if action in acts:
             acts[action]()
@@ -881,7 +881,7 @@ class SequenceTimeline(QMainWindow):
             return
         item = self.table.itemAt(pos)
         if item is None:
-            # BUILD 123: empty space below the tracks -> Tracks menu items
+            # Empty space below the tracks -> Tracks menu items
             self._empty_space_menu(pos)
             return
         name_item = self.table.item(item.row(), 0)
@@ -897,14 +897,14 @@ class SequenceTimeline(QMainWindow):
             self._track_anchor_id = track_id
 
         menu = QMenu(self)
-        # BUILD 157: empty track space: Paste (at the playhead, same as
+        # Empty track space: Paste (at the playhead, same as
         # Ctrl+V) when the clipboard has items, hidden when empty
-        # BUILD 159: Paste first (then a separator), same empty-clip-area
+        # Paste first (then a separator), same empty-clip-area
         # rule as the Tracks items below
         paste_action = None
         if self._x_in_clips(pos) >= 0 and self._clip_edge_at(pos) is None:
             paste_action = self._add_empty_paste_action(menu)
-        # BUILD 161: Move > Up / Down / To Top / To Bottom, Disable / Enable,
+        # Move > Up / Down / To Top / To Bottom, Disable / Enable
         # Solo, Track Display Properties: sequence_timeline_tracks.py
         track_acts = self._add_track_menu_items(menu, name_item, enabled)
         menu.addSeparator()
@@ -915,9 +915,9 @@ class SequenceTimeline(QMainWindow):
         add_text_action = None
         x_in_clips = self._x_in_clips(pos)
         track_type = (name_item.data(Qt.UserRole + 4) or "").lower()
-        # BUILD 297 / 340: Ripple Delete (close the gap under the mouse,
+        # Ripple Delete (close the gap under the mouse
         # ripple_gap) on every edit track, keyframe tracks included.
-        # BUILD 340 moves every clip at or past the cut, on every track.
+        # Moves every clip at or past the cut, on every track.
         # Greyed out when there is no gap to close.
         if x_in_clips >= 0 and track_type == "keyframe":
             menu.addSeparator()
@@ -928,14 +928,14 @@ class SequenceTimeline(QMainWindow):
             if track_type == "caption":
                 add_caption_action = menu.addAction("Add Caption")
             elif track_type == "text":
-                add_text_action = menu.addAction("Add Text Clip")  # BUILD 308
+                add_text_action = menu.addAction("Add Text Clip")
             ripple_action = menu.addAction("Ripple Delete")
         if ripple_action is not None:
             gap_frame = max(0.0, self.view_start_frame
                             + x_in_clips / self.pixels_per_frame)
             ripple_action.setEnabled(
                 ripple_gap(self, track_id, gap_frame)[0] is not None)
-        # BUILD 123: empty clip area of a track row (not a clip body or
+        # Empty clip area of a track row (not a clip body or
         # edge; key boxes / markers / clips returned above) also lists the
         # Tracks menu items. The Name / Type header cells do not.
         add_track_acts = {}
@@ -943,10 +943,10 @@ class SequenceTimeline(QMainWindow):
         if x_in_clips >= 0 and self._clip_edge_at(pos) is None:
             menu.addSeparator()
             add_track_acts = self._add_track_actions(menu)
-            # BUILD 157: empty track space: Paste (at the playhead, same as
+            # Empty track space: Paste (at the playhead, same as
             # Ctrl+V) when the clipboard has items, hidden when empty
             # paste_action = self._add_empty_paste_action(menu)
-        # BUILD 163: yellow outline on this track's Name cell while open
+        # Yellow outline on this track's Name cell while open
         self._menu_track_row = item.row()
         self.table.viewport().update()
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -955,7 +955,7 @@ class SequenceTimeline(QMainWindow):
         # if paste_action is not None and action == paste_action:
         #     self._clip_paste_tic()
         #     return
-        if self._run_paste_pair(action, paste_action, pos):     # BUILD 160
+        if self._run_paste_pair(action, paste_action, pos):
             return
         if action in add_track_acts:
             add_track_acts[action]()
@@ -976,14 +976,14 @@ class SequenceTimeline(QMainWindow):
             click_frame = max(0.0, self.view_start_frame + x_in_clips / self.pixels_per_frame)
             self.ripple_delete(track_id, click_frame)
             return
-        # BUILD 161: Move / Enable / Solo / Track Display Properties in
+        # Move / Enable / Solo / Track Display Properties in
         # sequence_timeline_tracks._run_track_menu_action (same order)
         if self._run_track_menu_action(action, track_acts, track_id):
             return
         if action == delete_track_action:
             self.delete_track(track_id)
 
-    # BUILD 161: _track_display_properties -> sequence_timeline_tracks.py
+    # _track_display_properties -> sequence_timeline_tracks.py
 
 
     def _on_item_changed(self, item):
@@ -1042,7 +1042,7 @@ class SequenceTimeline(QMainWindow):
         pos = event.position().toPoint()
         row = self.table.rowAt(pos.y())
         x_in_clips = pos.x() - self.ruler.sectionViewportPosition(CLIPS_COL)
-        # BUILD 105: sequence from the Sequence Manager. Copy action so the
+        # Sequence from the Sequence Manager. Copy action so the
         # manager's row is never removed by a Move drop.
         child_id = sequence_id_from_mime(event.mimeData())
         if child_id is not None:
@@ -1060,10 +1060,10 @@ class SequenceTimeline(QMainWindow):
             event.ignore()
 
 
-    # BUILD 161: _track_row_height -> sequence_timeline_tracks.py
+    # _track_row_height -> sequence_timeline_tracks.py
 
     def _row_collapsed(self, pos):
-        # BUILD 126: True if the track row under pos is collapsed
+        # True if the track row under pos is collapsed
         row = self.table.rowAt(pos.y())
         if row < 0:
             return False
@@ -1084,7 +1084,7 @@ class SequenceTimeline(QMainWindow):
         from markers import hit_test_marker
         return hit_test_marker(self, pos)
 
-    # BUILD 161: _toggle_collapse_at -> sequence_timeline_tracks.py
+    # _toggle_collapse_at -> sequence_timeline_tracks.py
 
     def _read_icon_blob(self, footage_id, frame_number, height):
         # Stored resized icon for footage_id at frame_number that is exactly
@@ -1102,7 +1102,7 @@ class SequenceTimeline(QMainWindow):
             rows = cur.fetchall()
             disp = None
             if rows:
-                # BUILD 325: an old squeezed icon of non-square footage is
+                # An old squeezed icon of non-square footage is
                 # not used mid-drag; the next generate call grabs it again
                 from footage_manager_display import _display_aspect, _aspect_ok
                 cur.execute("SELECT original_path, file_type FROM footage WHERE id = ?",
@@ -1273,7 +1273,7 @@ class SequenceTimeline(QMainWindow):
         slice_key_exit(self)
 
     def keyPressEvent(self, event):
-        # BUILD 131: Escape leaves slice mode (keys a child did not take)
+        # Escape leaves slice mode (keys a child did not take)
         if (event.key() == Qt.Key_Escape and event.modifiers() == Qt.NoModifier
                 and self._slice_mode):
             from sequence_timeline_slice import slice_key_exit
@@ -1287,14 +1287,14 @@ class SequenceTimeline(QMainWindow):
             etype = event.type()
             if (getattr(self, "_slice_mode", False)
                     or getattr(self, "_slice_eat_release", False)):
-                # BUILD 131: slice mode takes the mouse first (BUILD 269:
+                # Slice mode takes the mouse first (:
                 # and the release of the click that cut and left it)
                 from sequence_timeline_slice import slice_event
                 handled = slice_event(self, obj, event)
                 if handled is not None:
                     return handled
-            # BUILD 148 / 149: left-drag rubber-band selection in empty
-            # track space (a plain left-click is unchanged). BUILD 150:
+            # Left-drag rubber-band selection in empty
+            # track space (a plain left-click is unchanged).:
             # link partners, edge auto-scroll, live selection borders
             from sequence_timeline_rubber import rubber_event
             handled = rubber_event(self, obj, event)
@@ -1307,7 +1307,7 @@ class SequenceTimeline(QMainWindow):
                 self.wheel_pan(event)
                 return True
             if etype in (QEvent.DragEnter, QEvent.DragMove):
-                # BUILD 125: footage drop preview (sequence drops: none)
+                # Footage drop preview (sequence drops: none)
                 from sequence_timeline_droppreview import drag_enter, drag_move, drag_end
                 if sequence_id_from_mime(event.mimeData()) is not None:
                     drag_end(self)
@@ -1330,7 +1330,7 @@ class SequenceTimeline(QMainWindow):
                         event.ignore()
                 return True
             if etype == QEvent.DragLeave:
-                # BUILD 125: leave / Esc cancel: no stale preview box
+                # Leave / Esc cancel: no stale preview box
                 from sequence_timeline_droppreview import drag_end
                 drag_end(self)
                 return False
@@ -1351,7 +1351,7 @@ class SequenceTimeline(QMainWindow):
                     edit_key(self, key_hit["clip"], key_hit["key_id"],
                              key_hit["frame"], key_hit["value"])
                     return True
-                # BUILD 236: open caption clip content pane: in-place text
+                # Open caption clip content pane: in-place text
                 # editor (title bar double-click: unchanged, nothing)
                 from sequence_timeline_captions import caption_pane_at, edit_caption_inline
                 pane_hit = caption_pane_at(self, dbl_pos)
@@ -1364,7 +1364,7 @@ class SequenceTimeline(QMainWindow):
                 # that clip (selection solo), Shift = add to the selection,
                 # empty clip-area space = clear
                 press_pos = event.position().toPoint()
-                # BUILD 126: triangle cell toggles collapsed (nothing else)
+                # Triangle cell toggles collapsed (nothing else)
                 if self._toggle_collapse_at(press_pos):
                     return True
                 # Name column: track selection, then the usual press handling
@@ -1376,7 +1376,7 @@ class SequenceTimeline(QMainWindow):
                 if marker_hit is not None:
                     marker_drag_start(self, marker_hit, press_pos)
                     return True
-                # BUILD 162: clip click selection -> sequence_timeline_clips
+                # Clip click selection -> sequence_timeline_clips
                 hit_clip = self._clip_press_select(event, press_pos)
                 from keyframe import hit_test_key
                 key_hit = self._hit_key(press_pos)
@@ -1392,10 +1392,10 @@ class SequenceTimeline(QMainWindow):
                         "dragging": False,
                     }
                     return True
-                # BUILD 162: clip edge trim / move drag start -> sequence_timeline_clips
+                # Clip edge trim / move drag start -> sequence_timeline_clips
                 if self._clip_press_drag(event):
                     return True
-                # BUILD 150: a left-click on empty track space (Clips area)
+                # A left-click on empty track space (Clips area)
                 # is not passed on to the table, so the track row is not
                 # selected / highlighted (it keeps its color); the clip
                 # selection was cleared above as before
@@ -1414,12 +1414,12 @@ class SequenceTimeline(QMainWindow):
                 if getattr(self, "_edge_drag", None) is not None:
                     self._edge_drag_move(pos)
                     return True
-                self._clip_edge_cursor(obj, pos)     # BUILD 162
+                self._clip_edge_cursor(obj, pos)
                 # Hovered marker: 3 px line; repaint only when it changes
                 from markers import hit_test_marker
                 mh = self._hit_marker(pos)
                 self._set_hover_marker(mh[1][0] if mh is not None else None)
-                # BUILD 331: whole-row track hover cue
+                # Whole-row track hover cue
                 self._set_hover_track_row(self.table.rowAt(pos.y()))
             if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if getattr(self, "_marker_drag", None) is not None:
@@ -1431,11 +1431,11 @@ class SequenceTimeline(QMainWindow):
                     key_drag_release(self)
                     return True
                 if getattr(self, "_edge_drag", None) is not None:
-                    self._clip_drag_release()     # BUILD 162
+                    self._clip_drag_release()
                     return True
             if etype == QEvent.Leave:
                 self._set_hover_marker(None)
-                self._set_hover_track_row(-1)   # BUILD 331
+                self._set_hover_track_row(-1)
             if etype == QEvent.Leave and self._edge_drag is None:
                 obj.unsetCursor()
         return super().eventFilter(obj, event)
@@ -1463,7 +1463,7 @@ class SequenceTimeline(QMainWindow):
     def _mark_preview_dirty(self, ranges):
         # Clean set drops these frames now (bar turns red); the database
         # UPDATE runs on the preview worker thread. refresh() wakes the worker.
-        # BUILD 146: per-edit marks are gone: every completed edit reaches
+        # Per-edit marks are gone: every completed edit reaches
         # refresh(), whose mile-marker diff marks exactly the spans that
         # differ (callers kept; this does nothing).
         return
@@ -1507,7 +1507,7 @@ class SequenceTimeline(QMainWindow):
         self._after_clip_change(f"Marker at frame {frame}")
 
     def _add_link_actions(self, menu, clip):
-        # BUILD 133: one of Link / Unlink (sequence_timeline_link.
+        # One of Link / Unlink (sequence_timeline_link.
         # link_menu_choice): all selected in one group -> Unlink; any
         # unlinked or a second group in the selection -> Link; a one-member
         # (dangling) link counts as unlinked. Returns (link, unlink) actions.
@@ -1522,7 +1522,7 @@ class SequenceTimeline(QMainWindow):
 
     def link_selected_clips(self, clip=None):
         # Link: every selected clip joins one link_id (footage clips /
-        # captions / keyframe_clips each store their own). BUILD 133: the
+        # captions / keyframe_clips each store their own). The
         # winner is the right-clicked clip's group, else the first selected
         # clip's group, else the first selected clip's id; every member of
         # each group the selection touches joins (groups merge).
@@ -1545,7 +1545,7 @@ class SequenceTimeline(QMainWindow):
                 if is_keyframe_clip_id(c[0]):
                     persist_keyframe_link_id(cur, c[0], new_link)
                 elif is_caption_id(c[0]) or is_text_clip_id(c[0]):
-                    # captions / BUILD 308 text_clips
+                    # captions / text_clips
                     persist_caption_link_id(cur, c[0], new_link)
                 else:
                     cur.execute("UPDATE clips SET link_id = ? WHERE id = ?",
@@ -1579,7 +1579,7 @@ class SequenceTimeline(QMainWindow):
                 if is_keyframe_clip_id(cid):
                     persist_keyframe_link_id(cur, cid, None)
                 elif is_caption_id(cid) or is_text_clip_id(cid):
-                    # captions / BUILD 308 text_clips
+                    # captions / text_clips
                     persist_caption_link_id(cur, cid, None)
                 else:
                     cur.execute("UPDATE clips SET link_id = NULL WHERE id = ?",
@@ -1685,14 +1685,14 @@ class SequenceTimeline(QMainWindow):
         # Every clip / track change and undo-redo reload comes through here:
         # keep the Sequence Manager counts current (no timer)
         self._refresh_sequence_manager()
-        # BUILD 153: no player request here: it ran before the diff marked
+        # No player request here: it ran before the diff marked
         # anything, so it re-read the old clean JPEG. The retarget below
         # redraws the shown frame when a dirty span covers it.
         # self._update_player()
-        # BUILD 135: completed edit / undo / reload: the audio mix may be
+        # Completed edit / undo / reload: the audio mix may be
         # stale (the scrub burst rechecks the signature; Play always does).
         # Drags never get here before the drop.
-        # BUILD 146: the mile markers of the new state, built once here and
+        # The mile markers of the new state, built once here and
         # used by both the audio bar ranges and the video dirty ranges
         markers = self._build_mile_markers()
         try:
@@ -1700,15 +1700,15 @@ class SequenceTimeline(QMainWindow):
                                                 audio_edit_ranges)
             if self.sequence_id is not None and self._project_db():
                 mark_preview_audio_dirty(self._project_db(), self.sequence_id)
-                # BUILD 140: the bar shows the edit's dirty ranges at once
+                # The bar shows the edit's dirty ranges at once
                 # (only what the next mix remixes; a pure move copies
                 # samples and stays green), not all red until the settle
                 audio_edit_ranges(self._project_db(), self.sequence_id,
                                   float(self.fps or 30), int(self.total_frames()),
                                   markers=markers)
-                # BUILD 137: audio bar red now; settle the true state with
+                # Audio bar red now; settle the true state with
                 # one signature check AUDIO_SETTLE_MS after the last refresh.
-                # BUILD 138: that check also starts the background mix.
+                # That check also starts the background mix.
                 # A new edit retries a failed mix.
                 self._audio_auto_failed = False
                 self._audio_bar_schedule()
@@ -1718,7 +1718,7 @@ class SequenceTimeline(QMainWindow):
         self._retarget_preview(force=True, markers=markers)
 
     def _footage_paths(self):
-        # BUILD 146: footage id -> original path (the video span descriptor:
+        # Footage id -> original path (the video span descriptor:
         # a relink or undo changes the picture under the same footage id)
         try:
             conn = sqlite3.connect(self._project_db())
@@ -1739,7 +1739,7 @@ class SequenceTimeline(QMainWindow):
         return VideoIndex(snap, self._footage_paths(), size)
 
     def _build_mile_markers(self, snap=None):
-        # BUILD 146: the mile markers (mile_markers.MarkerList) of the
+        # The mile markers (mile_markers.MarkerList) of the
         # timeline now: the preview snapshot's layer stacks and the audio
         # mix inputs. None on any failure (the caller falls back).
         if self.sequence_id is None or not hasattr(self, "table"):
@@ -1831,7 +1831,7 @@ class SequenceTimeline(QMainWindow):
             print(name)
 
     def _set_control_active(self, name, on):
-        # BUILD 163: dark green background while the control's action runs
+        # Dark green background while the control's action runs
         btn = getattr(self, "_control_buttons", {}).get(name)
         if btn is not None:
             btn.setStyleSheet("background-color: rgb(0, 125, 0);" if on else "")
@@ -1850,17 +1850,17 @@ class SequenceTimeline(QMainWindow):
         if total <= 0 or self.sequence_id is None:
             return
         self._stop_play()
-        self._set_control_active("Play", True)    # BUILD 163: until _stop_play
+        self._set_control_active("Play", True)    # Until _stop_play
         try:
             from sequence_player import open_player_for
             open_player_for(self)
         except Exception as e:
             print(f"Play could not open the player: {e}")
         self._play_from = int(self.current_frame)
-        # BUILD 136: a stale audio mix starts mixing in the background now,
+        # A stale audio mix starts mixing in the background now
         # alongside any video fill; the clock waits for it (_start_clock)
         mixing = self._audio_mix_kick()
-        # BUILD 168: a dirty preview (any not-clean frame in the sequence)
+        # A dirty preview (any not-clean frame in the sequence)
         # runs the F5 refresh first, in the Refreshing Preview window; the
         # clock starts once it is done (_play_ready waits for the refresh)
         dirty = not self._preview_all_clean()
@@ -1869,7 +1869,7 @@ class SequenceTimeline(QMainWindow):
                 self._show_refresh_dialog()
             self._start_clock()
             return
-        if self._export_refused():      # BUILD 318: no fill during a render
+        if self._export_refused():      # No fill during a render
             self._stop_play()
             return
         self._play_filling = True
@@ -1886,7 +1886,7 @@ class SequenceTimeline(QMainWindow):
         self._play_fill_status()
 
     def _preview_all_clean(self):
-        # BUILD 168: True when every frame of the sequence is a clean preview
+        # True when every frame of the sequence is a clean preview
         try:
             from sequence_preview import clean_set
             clean = clean_set(self._project_db(), self.sequence_id)
@@ -1896,7 +1896,7 @@ class SequenceTimeline(QMainWindow):
 
     def _play_ready(self):
         # True when every frame from the tick to the end is a clean preview
-        # (BUILD 168: and an explicit refresh pass, if any, has finished)
+        # (and an explicit refresh pass, if any, has finished)
         try:
             from sequence_preview_worker import _refresh_all
             if _refresh_all[0]:
@@ -1922,7 +1922,7 @@ class SequenceTimeline(QMainWindow):
         self.status_bar.showMessage(f"Filling preview: {left} frames left")
 
     def _audio_mix_kick(self):
-        # BUILD 136: start (or reuse) the background mix when the WAV does
+        # Start (or reuse) the background mix when the WAV does
         # not match the timeline. True when a mix is running for this Play.
         try:
             from sequence_preview_audio import (preview_audio_current, start_mix,
@@ -1933,7 +1933,7 @@ class SequenceTimeline(QMainWindow):
             fps = float(self.fps or 30)
             total = int(self.total_frames())
             wav, sig = preview_audio_current(db, self.sequence_id, fps, total)
-            self.ruler.viewport().update()     # BUILD 137: Play's check
+            self.ruler.viewport().update()     # Play's check
             if wav or not sig:
                 # Up to date: a mix of some other (older) state is useless
                 cancel_mix(db, self.sequence_id)
@@ -1953,7 +1953,7 @@ class SequenceTimeline(QMainWindow):
             return False
 
     def _audio_bar_schedule(self):
-        # BUILD 137: debounce (restart) the audio state check
+        # Debounce (restart) the audio state check
         if self._audio_bar_timer is None:
             self._audio_bar_timer = QTimer(self)
             self._audio_bar_timer.setSingleShot(True)
@@ -1966,9 +1966,9 @@ class SequenceTimeline(QMainWindow):
             pass
 
     def _audio_bar_check(self):
-        # BUILD 137: one signature check on the GUI thread (a few small
+        # One signature check on the GUI thread (a few small
         # queries); green when the WAV is current and no mix runs.
-        # BUILD 138: a stale / missing WAV starts the background mix here
+        # A stale / missing WAV starts the background mix here
         # (no Play needed); a running mix of an older state is restarted
         # (start_mix reuses a job that already mixes the current state).
         try:
@@ -1982,11 +1982,11 @@ class SequenceTimeline(QMainWindow):
             db = self._project_db()
             if db and self.sequence_id is not None:
                 if running_mix(db, self.sequence_id) is not None:
-                    # BUILD 139: settle the bar's dirty ranges, then restart
+                    # Settle the bar's dirty ranges, then restart
                     # / keep the running mix
                     settle_audio_state(db, self.sequence_id, float(self.fps or 30),
                                        int(self.total_frames()))
-                    # BUILD 166: no restart here (explicit refresh model:
+                    # No restart here (explicit refresh model:
                     # F5 or Play mixes)
                     # self._audio_mix_kick()
                 elif not settle_audio_state(db, self.sequence_id,
@@ -1999,7 +1999,7 @@ class SequenceTimeline(QMainWindow):
                         self._audio_auto_wanted = True
                     else:
                         self._audio_auto_wanted = False
-                        # BUILD 166: no background mix while editing; F5 or
+                        # No background mix while editing; F5 or
                         # Play starts it
                         # self._audio_mix_kick()
         except Exception as e:
@@ -2019,10 +2019,10 @@ class SequenceTimeline(QMainWindow):
         if status in ("stale", "cancelled") and pending:
             self._audio_mix_kick()
         elif status == "failed":
-            # BUILD 138: red, and no automatic retry loop
+            # Red, and no automatic retry loop
             self._audio_auto_failed = True
         elif status == "stale":
-            # BUILD 138: an edit landed during the auto mix: settle again
+            # An edit landed during the auto mix: settle again
             self._audio_bar_schedule()
         return status
 
@@ -2057,7 +2057,7 @@ class SequenceTimeline(QMainWindow):
         if self._audio_mix_timer is not None:
             self._audio_mix_timer.stop()
         self._preview_status_poll()
-        # BUILD 137: collect_mix settled the audio bar
+        # Collect_mix settled the audio bar
         self.ruler.viewport().update()
         if self._play_mixing:
             self._play_mixing = False
@@ -2066,7 +2066,7 @@ class SequenceTimeline(QMainWindow):
     def _start_clock(self):
         # Prime the start-frame batch, then audio, then the tick timer.
         # Do not start the WAV until play_has(start) is true.
-        # BUILD 136: the whole Play (video too) waits for a running audio
+        # The whole Play (video too) waits for a running audio
         # mix so A/V start together with the new WAV
         if self._audio_mix_wait():
             return
@@ -2083,7 +2083,7 @@ class SequenceTimeline(QMainWindow):
         self._play_last_shown = None
         self._play_audio_clock = False
         self._play_prime_tries = 0
-        self._play_resync_t = None      # BUILD 244: first resync 1 s after the first frame
+        self._play_resync_t = None      # First resync 1 s after the first frame
         self._playing = True
         self._play_timer.stop()
         self._play_prime_once()
@@ -2186,7 +2186,7 @@ class SequenceTimeline(QMainWindow):
         due = int(clock)
         batch = self._play_batch_n()
 
-        # BUILD 244: periodic resync (see RESYNC_INTERVAL_S). _play_cursor
+        # Periodic resync (see RESYNC_INTERVAL_S). _play_cursor
         # is the next frame to show; behind = it is before the due frame
         if self._play_audio_clock:
             now = time.perf_counter()
@@ -2219,7 +2219,7 @@ class SequenceTimeline(QMainWindow):
         if self._play_cursor > due:
             return
 
-        # BUILD 244: per-tick catch-up. When the next frame is already
+        # Per-tick catch-up. When the next frame is already
         # behind the due frame and the due frame is decoded, jump to it
         # (older queued frames are dropped) instead of showing the late
         # frames one per tick, which never closes the gap
@@ -2281,14 +2281,14 @@ class SequenceTimeline(QMainWindow):
 
     def _stop_play(self):
         was = self._playing or self._play_filling
-        # BUILD 136: Stop drops the pending start; a running mix finishes and
+        # Stop drops the pending start; a running mix finishes and
         # is kept when its signature is still current
         self._play_mixing = False
         self._playing = False
         self._play_filling = False
         self._play_prime_tries = 0
         self._play_timer.stop()
-        self._set_control_active("Play", False)   # BUILD 163
+        self._set_control_active("Play", False)
         try:
             from sequence_preview_worker import set_play_priority
             set_play_priority(False)
@@ -2400,7 +2400,7 @@ class SequenceTimeline(QMainWindow):
             pass
         if not force and frame == getattr(self, "_preview_center", None):
             return
-        cap_redraw = False      # BUILD 153: caption change seen
+        cap_redraw = False      # Caption change seen
         try:
             from sequence_preview_worker import get_worker
             from sequence_player import timeline_snapshot
@@ -2410,14 +2410,14 @@ class SequenceTimeline(QMainWindow):
             old_ml = getattr(self, "_preview_markers", None)
             new_ml = None
             if force or snap is None:
-                # BUILD 146: the refresh's mile markers carry the snapshot
+                # The refresh's mile markers carry the snapshot
                 if force and markers is not None and getattr(markers, "snap", None) is not None:
                     snap = markers.snap
                     new_ml = markers
                 else:
                     snap = timeline_snapshot(self)
                 self._preview_snapshot = snap
-                # BUILD 102: player caption overlay data, same refresh
+                # Player caption overlay data, same refresh
                 old_caps = getattr(self, "_caption_snapshot", None)
                 try:
                     from player_captions import caption_snapshot
@@ -2426,17 +2426,17 @@ class SequenceTimeline(QMainWindow):
                     self._caption_snapshot = None
                 if (self._caption_snapshot or []) != (old_caps or []):
                     # Redraw the shown frame so a caption edit appears now
-                    # BUILD 153: after the dirty marks (below), once
+                    # After the dirty marks (below), once
                     # self._update_player()
                     cap_redraw = True
             get_worker().retarget(self._project_db(), self.sequence_id, frame,
                                   self.total_frames(), snap,
                                   getattr(self, "fps", None))
             self._preview_center = frame
-            # BUILD 139: the frames this edit changes, from the snapshot
+            # The frames this edit changes, from the snapshot
             # before vs after (same data the worker composites from): only
             # those go dirty. A failure marks everything (safe).
-            # BUILD 146: mile markers: the new marker list diffed against
+            # Mile markers: the new marker list diffed against
             # the previous one (mile_markers.diff_video): differing spans
             # are dirty, a pure move found in the spans relocates its clean
             # JPEG rows (FramesRelocate, queued before the dirty marks);
@@ -2477,7 +2477,7 @@ class SequenceTimeline(QMainWindow):
                     # print(f"Preview relocate failed: {e}")
                     from sequence_preview_diff import _merge
                     diff = _merge(list(diff) + [(a + d, b + d) for a, b, d in relocs])
-            # BUILD 146: no per-edit shift plan any more (the marker diff
+            # No per-edit shift plan any more (the marker diff
             # finds pure moves); a stale one from an older path is dropped
             pending = getattr(self, "_preview_pending_shift", None)
             self._preview_pending_shift = None
@@ -2491,7 +2491,7 @@ class SequenceTimeline(QMainWindow):
                     from sequence_preview import FramesShift
                     from sequence_preview_diff import shift_ok, subtract
                     first, last, delta = pending[0]
-                    # BUILD 139: shift only when the snapshots prove every
+                    # Shift only when the snapshots prove every
                     # moved frame is the same picture at its new frame
                     if old_snap is None or not shift_ok(old_snap, snap,
                                                         first, last, delta):
@@ -2514,10 +2514,10 @@ class SequenceTimeline(QMainWindow):
                 from sequence_preview import FramesMarkDirty
                 FramesMarkDirty(self._project_db(), self.sequence_id, remark)
             if force and (diff or pending or remark or relocs):
-                # BUILD 141: the marks came after the retarget: wake the
+                # The marks came after the retarget: wake the
                 # worker so it sees them (no player needed to retrigger it)
                 get_worker().wake(self.sequence_id)
-            # BUILD 153: one hook after the diff: a dirty span (marker diff,
+            # One hook after the diff: a dirty span (marker diff
             # remarks, relocated targets) covering the tick redraws the
             # player now with the new composite. The worker was centered on
             # the tick above, so its JPEG is rebuilt first.
@@ -2533,7 +2533,7 @@ class SequenceTimeline(QMainWindow):
             self._update_player()
 
     def _redraw_tick(self, frame, snap):
-        # BUILD 153: the shown frame changed: compose it in the open player
+        # The shown frame changed: compose it in the open player
         # now (one frame, the GPU composite path). No player: nothing to
         # draw; the worker already starts at the tick.
         player = getattr(self, "_player", None)
@@ -2561,8 +2561,8 @@ class SequenceTimeline(QMainWindow):
                 self._start_clock()
 
     def _preview_status_poll(self):
-        # BUILD 129: worker progress -> status label (text set only on change)
-        # BUILD 317: a refresh aborted for lack of GPU memory while no
+        # Worker progress -> status label (text set only on change)
+        # A refresh aborted for lack of GPU memory while no
         # Refreshing Preview window is up shows its message here
         try:
             dlg = getattr(self, "_refresh_dialog", None)
@@ -2584,7 +2584,7 @@ class SequenceTimeline(QMainWindow):
                 text = status_text(_worker, self._project_db(), self.sequence_id)
         except Exception:
             text = ""
-        # BUILD 137: a source re-import (the _AudioTmp.db changed; one
+        # A source re-import (the _AudioTmp.db changed; one
         # os.stat per poll) turns the audio bar red, then a settle check
         try:
             from sequence_preview_audio import check_audio_source
@@ -2593,14 +2593,14 @@ class SequenceTimeline(QMainWindow):
                 self._audio_auto_failed = False     # new source: retry
                 self._audio_bar_schedule()
             elif db and self._audio_auto_wanted:
-                # BUILD 138: an auto mix waits for another sequence's mix
+                # An auto mix waits for another sequence's mix
                 from sequence_preview_audio import any_mix_running
                 if not any_mix_running(exclude=(db, self.sequence_id)):
                     self._audio_auto_wanted = False
                     self._audio_bar_check()
         except Exception:
             pass
-        # BUILD 136: both statuses when both run
+        # Both statuses when both run
         job = getattr(self, "_audio_mix_job", None)
         if job is not None and not job.done:
             text = (text + "   " if text else "") + "Mixing audio"
@@ -2714,7 +2714,7 @@ class SequenceTimeline(QMainWindow):
             self.ruler.viewport().update()
 
     def closeEvent(self, event):
-        # BUILD 131: slice mode ends with the window
+        # Slice mode ends with the window
         try:
             from sequence_timeline_slice import exit_slice_mode
             exit_slice_mode(self)
@@ -2734,7 +2734,7 @@ class SequenceTimeline(QMainWindow):
             self._preview_timer.stop()
         if hasattr(self, "_preview_status_timer"):
             self._preview_status_timer.stop()
-        # BUILD 136: no poll after close; the worker (no Qt) is cancelled
+        # No poll after close; the worker (no Qt) is cancelled
         # and exits on its own (daemon thread, nothing joined here)
         self._play_mixing = False
         if getattr(self, "_audio_mix_timer", None) is not None:

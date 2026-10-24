@@ -1,5 +1,5 @@
 # clip_gain.py
-# Gain... for audio / video clips: one dB value stored in clips.gain_db
+# Gain... For audio / video clips: one dB value stored in clips.gain_db
 # (REAL DEFAULT 0, new_project.py). ASCII only.
 
 import sqlite3
@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 GAIN_MIN_DB = -96.0
-# BUILD 341: Gain maximum is 120 dB
+# Gain maximum is 120 dB
 GAIN_MAX_DB = 120.0
 
 
@@ -27,7 +27,7 @@ def read_clip_gain(project_db, clip_id):
 
 
 def load_clip_gains(cur, sequence_id):
-    # BUILD 165: {clip_id: gain_db} for this sequence's clips with a
+    # {clip_id: gain_db} for this sequence's clips with a
     # non-zero gain (title bar label, waveform scale)
     cur.execute("SELECT c.id, c.gain_db FROM clips c JOIN tracks t ON t.id = c.track_id "
                 "WHERE t.sequence_id = ? AND COALESCE(c.gain_db, 0) != 0",
@@ -36,7 +36,7 @@ def load_clip_gains(cur, sequence_id):
 
 
 def gain_label(gain_db):
-    # BUILD 165: title bar suffix, e.g. " | (Gain -5db)"
+    # Title bar suffix, e.g. " | (Gain -5db)"
     return " | (Gain %gdb)" % round(float(gain_db), 1)
 
 

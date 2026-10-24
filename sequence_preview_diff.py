@@ -1,5 +1,5 @@
 # sequence_preview_diff.py
-# BUILD 139: which preview frames an edit changes, from the timeline
+# Which preview frames an edit changes, from the timeline
 # snapshot before and after it (sequence_player.timeline_snapshot, the same
 # data the preview worker composites from). Pure Python, no Qt, no db.
 # ASCII only.
@@ -50,12 +50,12 @@ def _bracket(pts, f, d=0):
 
 class _Effect(object):
     # One effect type (scale / position X / position Y / opacity / crop_x /
-    # crop_y, BUILD 147; gamma / brightness / contrast, BUILD 154; rotate,
-    # BUILD 219; border px and r / g / b / a channels, BUILD 222; move x and
-    # y, BUILD 294; crop_xy x and y, BUILD 295; crop_edges top / bottom /
-    # left / right, BUILD 296; chroma r / g / b / tolerance, BUILD 337): linked
+    # crop_y; gamma / brightness / contrast; rotate
+    # Border px and r / g / b / a channels; move x and
+    # y; crop_xy x and y; crop_edges top / bottom /
+    # left / right; chroma r / g / b / tolerance): linked
     # keyframe clips indexed by link_id, as keyframe._pick_above_keyframe.
-    # BUILD 339: stack=True keeps every clip above the layer (chroma), so
+    # Stack=True keeps every clip above the layer (chroma), so
     # editing any of them changes the descriptor.
     def __init__(self, clips, stack=False):
         self.stack = bool(stack)
@@ -78,7 +78,7 @@ class _Effect(object):
         return best
 
     def covering(self, link_id, f, clip_order):
-        # BUILD 339: every linked clip above clip_order that covers f.
+        # Every linked clip above clip_order that covers f.
         # Sorted so two snapshots with the same clips compare equal.
         if link_id is None or clip_order is None:
             return ()
@@ -106,7 +106,7 @@ class SnapshotIndex(object):
     # Per-frame layer descriptor of one snapshot, by segment. Layer
     # descriptor: (kind, footage id, src, proxy, conform, effects); src is
     # the source frame mapping of a video layer, the style tuple of a text
-    # layer (BUILD 309), else 0.
+    # layer, else 0.
     def __init__(self, snap):
         rows = snap[0]
         clips_by_track = snap[1]
@@ -115,34 +115,34 @@ class SnapshotIndex(object):
         # Frame rate conform by footage id (snap[19]): a changed footage or
         # sequence rate changes the source frames, so it is in desc
         self.fps_conform = snap[19] if len(snap) > 19 else {}
-        # BUILD 303: clip speed by clip id (snap[28], only != 100); a sped
+        # Clip speed by clip id (snap[28], only != 100); a sped
         # clip's source frame is not frame + constant, so its desc holds
         # (in, start - d, speed), which fixes the mapping for every frame
         self.speeds = snap[28] if len(snap) > 28 else {}
-        # BUILD 309: text clip styles (snap[29], {clip id: (text, font,
+        # Text clip styles (snap[29], {clip id: (text, font
         # size, color, x, y, shadow fields)}); a text layer's src in desc is its style, so
         # a text / style / position edit changes every frame of the clip.
         # Move and trim change the clip edges like any clip.
         self.text_styles = snap[29] if len(snap) > 29 else {}
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7)]
-        # BUILD 147: + crop_x (snap[8]) and crop_y (snap[9]): their clip
+        # + crop_x (snap[8]) and crop_y (snap[9]): their clip
         # edges and keys are mile markers and in every span descriptor
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7, 8, 9)]
-        # BUILD 154: + gamma / brightness / contrast (snap[10], [11], [12])
+        # + gamma / brightness / contrast (snap[10], [11], [12])
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7, 8, 9, 10, 11, 12)]
-        # BUILD 219: + rotate (snap[13])
+        # + rotate (snap[13])
         # self.effects = [_Effect(snap[i] if len(snap) > i else [])
         #                 for i in (2, 3, 5, 7, 8, 9, 10, 11, 12, 13)]
-        # BUILD 222: + border px and r / g / b / a (snap[14] .. [18]), so
+        # + border px and r / g / b / a (snap[14].. [18]), so
         # a border key edit (any channel) refreshes the frames it changes
-        # BUILD 294: + move x and y (snap[20], [21])
-        # BUILD 295: + crop_xy x and y (snap[22], [23])
-        # BUILD 296: + crop_edges top, bottom, left, right (snap[24] .. [27])
-        # BUILD 337: + chroma r, g, b, tolerance (snap[30] .. [33])
-        # BUILD 339: those four stack, so any linked chroma key dirties
+        # + move x and y (snap[20], [21])
+        # + crop_xy x and y (snap[22], [23])
+        # + crop_edges top, bottom, left, right (snap[24].. [27])
+        # + chroma r, g, b, tolerance (snap[30].. [33])
+        # Those four stack, so any linked chroma key dirties
         _idx = (2, 3, 5, 7, 8, 9, 10, 11, 12, 13,
                 14, 15, 16, 17, 18, 20, 21, 22, 23,
                 24, 25, 26, 27, 30, 31, 32, 33)

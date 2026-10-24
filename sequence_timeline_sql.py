@@ -26,7 +26,7 @@ OUT_ICON_MIN_PX = 4   # smallest visible out-icon block on narrow clips
 EMPTY_LENGTH_SECONDS = 60  # ruler length for an empty sequence; no maximum
 DEFAULT_FPS = 29.97
 DEFAULT_TRACK_HEIGHT = 64
-# BUILD 126: collapsible tracks. The triangle column is LOGICAL column 3,
+# Collapsible tracks. The triangle column is LOGICAL column 3
 # moved to VISUAL position 0 (far left) with QHeaderView.moveSection, so
 # Name (0), Type (1) and Clips (CLIPS_COL = 2) keep their logical indexes
 # everywhere (items, delegates, sectionViewportPosition, columnAt).
@@ -42,7 +42,7 @@ ROLE_OPEN_HEIGHT = Qt.UserRole + 6   # on the Name item: height_px when open
 CLIP_TRACK_TYPES = ("image", "video", "audio")
 # Track types whose clips can be hit, dragged, trimmed, sliced and deleted.
 # Caption / keyframe / text clips use negative in-memory ids (separate
-# ranges). "text" is the WYSIWYG Text track (BUILD 308, text_clip.py).
+# ranges). "text" is the WYSIWYG Text track (text_clip.py).
 EDIT_TRACK_TYPES = CLIP_TRACK_TYPES + ("caption", "keyframe", "text")
 TRACK_FOOTAGE_EXTENSIONS = {
     "image": IMAGE_EXTENSIONS,
@@ -236,7 +236,7 @@ def _add_track(self, track_type, title, name=None, language="", bg_color=None,
                 (self.sequence_id, name, track_type, sort_order, language or "")
             )
         if caption_type:
-            # BUILD 101: caption stream type (column from new_project._init_db)
+            # Caption stream type (column from new_project._init_db)
             cur.execute("UPDATE tracks SET caption_type = ? WHERE id = ?",
                         (caption_type, cur.lastrowid))
         conn.commit()
@@ -257,7 +257,7 @@ def refresh(self):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        # caption_type (BUILD 101; NULL shows as WebVTT), collapsed (BUILD 126)
+        # caption_type (; NULL shows as WebVTT), collapsed
         cur.execute(
             "SELECT id, name, track_type, COALESCE(enabled, 1), COALESCE(solo, 0), "
             "COALESCE(height_px, 64), COALESCE(bg_color, ''), "
@@ -291,7 +291,7 @@ def refresh(self):
                  os.path.basename(filename or ""), int(clip_enabled), int(clip_solo),
                  in_f, link_id]
             )
-        # BUILD 105: sequence clips (footage_id NULL, sequence_id_ref set):
+        # Sequence clips (footage_id NULL, sequence_id_ref set):
         # title is the child sequence name; clip id -> child id kept apart
         self._seq_refs = load_sequence_refs(cur, self.sequence_id)
         for track_clips in clips.values():
@@ -301,16 +301,16 @@ def refresh(self):
                     c[4] = ref[1]
         load_captions(cur, self.sequence_id, clips)
         load_keyframe_clips(cur, self.sequence_id, clips)
-        # BUILD 308: WYSIWYG Text clips (text_clip.py)
+        # WYSIWYG Text clips (text_clip.py)
         from text_clip import load_text_clips
         load_text_clips(cur, self.sequence_id, clips)
         for track_clips in clips.values():
             track_clips.sort(key=lambda c: (c[2], c[0]))
         self.clips_by_track = clips
-        # BUILD 165: clip gain (dB) for the title bar and waveform scale
+        # Clip gain (dB) for the title bar and waveform scale
         from clip_gain import load_clip_gains
         self._clip_gains = load_clip_gains(cur, self.sequence_id)
-        # BUILD 303: clip speed percent by clip id (only != 100), for
+        # Clip speed percent by clip id (only != 100), for
         # labels, trims, icons and the player snapshot (clip_speed.py)
         from clip_speed import load_clip_speeds
         self._clip_speeds = load_clip_speeds(cur, self.sequence_id)
@@ -318,7 +318,7 @@ def refresh(self):
         # (sequence_timeline_video.icon_source_frame)
         from sequence_player import load_fps_conform
         self._fps_conform = load_fps_conform(conn, getattr(self, "fps", None))
-        # BUILD 102: player caption overlay rebuilds from the new rows
+        # Player caption overlay rebuilds from the new rows
         self._caption_snapshot = None
         conn.close()
     except Exception as e:
@@ -364,7 +364,7 @@ def refresh(self):
             self.table.setItem(i, 0, name_item)
             self.table.setItem(i, 1, type_item)
             self.table.setItem(i, CLIPS_COL, clips_item)
-            # BUILD 126: triangle cell (painted by ClipDelegate)
+            # Triangle cell (painted by ClipDelegate)
             coll_item = QTableWidgetItem("")
             coll_item.setFlags(read_only)
             coll_item.setToolTip("Collapse / expand track")
@@ -442,7 +442,7 @@ def _move_track(self, track_id, direction):
 
 
 def reorder_track_ids(ids, track_id, where):
-    # BUILD 124: ids in sort_order (index 0 = top row, smallest sort_order;
+    # Ids in sort_order (index 0 = top row, smallest sort_order
     # 'Up' = toward index 0). where 'top' / 'bottom': track_id moved to that
     # end, the others keep their relative order. Returns the new list, or
     # None if track_id is missing or already there.
@@ -454,7 +454,7 @@ def reorder_track_ids(ids, track_id, where):
 
 
 def _move_track_to(self, track_id, where):
-    # BUILD 124: Move > To Top / To Bottom. Same undo label, renumbering
+    # Move > To Top / To Bottom. Same undo label, renumbering
     # (0..n-1) and refresh as _move_track (Up / Down); a no-op (already at
     # that end) writes nothing and pushes no undo step.
     project_db = self._project_db()
@@ -488,7 +488,7 @@ def _move_track_to(self, track_id, where):
 
 
 def track_row_height(open_height, collapsed):
-    # BUILD 126: the one row-height rule. Every y position (clip paint,
+    # The one row-height rule. Every y position (clip paint
     # hit tests, key boxes, markers, drop preview, header cells) comes from
     # QTableView rowViewportPosition / rowHeight / rowAt / visualRect, which
     # follow these per-row heights.
@@ -502,7 +502,7 @@ def track_row_height(open_height, collapsed):
 
 
 def _toggle_track_flag(self, track_id, column):
-    # BUILD 126: 'collapsed' too (no undo, like enabled / solo)
+    # 'collapsed' too (no undo, like enabled / solo)
     if column not in ("enabled", "solo", "collapsed"):
         return
     default = 1 if column == "enabled" else 0
@@ -525,7 +525,7 @@ def _toggle_track_flag(self, track_id, column):
 
 def drop_footage(self, footage_id, row, x_in_clips):
     # Insert a clip: image footage on image tracks (one second), video on
-    # video (full length, fitted to the room, BUILD 301), audio on audio
+    # video (full length, fitted to the room), audio on audio
     # (full length)
     if row < 0 or x_in_clips < 0:
         return False
@@ -563,8 +563,8 @@ def drop_footage(self, footage_id, row, x_in_clips):
             # footage duration column, else 1 second
             length_frames = self._audio_length_frames(cur, footage_id)
         # Video with stored peaks and an audio track in this sequence:
-        # also add a linked audio clip (BUILD 109: nearest audio track below
-        # the video, else above). BUILD 301: the video (and its linked
+        # also add a linked audio clip (: nearest audio track below
+        # the video, else above). The video (and its linked
         # audio) goes in at the footage's full length (footage_length_frames)
         # unless the room up to the next clip is shorter; then both fill
         # only that room, the tightest across the video and audio tracks
@@ -663,7 +663,7 @@ def delete_selected_clip(self):
 
 def delete_clip_ids(self):
     # Clip ids the Delete key / Delete / Ripple Delete remove: exactly
-    # the selection set. BUILD 329: no silent expand to link partners;
+    # the selection set. No silent expand to link partners
     # partners are in the set already after a normal or Shift select.
     # Alt / Alt+Shift pick individual clips, so Delete leaves unselected
     # partners alone.
@@ -671,15 +671,15 @@ def delete_clip_ids(self):
 
 
 def delete_clip_ids_db(cur, ids):
-    # The database part of Delete (BUILD 245: shared with Ripple Delete).
+    # The database part of Delete (shared with Ripple Delete).
     # No commit / undo here: the caller owns the transaction and undo step.
-    # BUILD 106: (parent, child) of deleted sequence clips, read first
+    # (parent, child) of deleted sequence clips, read first
     seq_pairs = sequence_pairs_for(cur, ids)
     for cid in ids:
         table, row_id = clip_table_and_id(cid)
         cur.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
         if table == "keyframe_clips":
-            # BUILD 222: its keys go with it (keyframes or, for a
+            # Its keys go with it (keyframes or, for a
             # border clip, keyframe_border rows; undo restores both)
             from keyframe import delete_clip_keys
             delete_clip_keys(cur, [row_id])
@@ -690,7 +690,7 @@ def delete_clip_ids_db(cur, ids):
 
 
 def ripple_delete_clips(self):
-    # BUILD 245 / 246: clip menu Ripple Delete. Removes the same clips as
+    # Clip menu Ripple Delete. Removes the same clips as
     # Delete (delete_clip_ids / delete_clip_ids_db), then closes the empty
     # time the deleted set leaves across ALL tracks of the sequence:
     # S / E = earliest start / latest end of the deleted clips (footage,
@@ -768,11 +768,11 @@ def slice_clip(self, clip, x_in_clips):
     # Split clip in two at the mark x (clips-column x where the menu
     # opened). Linked partners are sliced at the same timeline frame; the
     # left pieces keep the old link_id, the right pieces share a new one.
-    # BUILD 132: keyframe clips (the clip itself or a linked partner) are
-    # split by keyframe.slice_keyframe_clip_db (BUILD 243: each piece keeps
+    # Keyframe clips (the clip itself or a linked partner) are
+    # split by keyframe.slice_keyframe_clip_db (: each piece keeps
     # a copy of all the keys) instead of the footage path; captions' and
     # keyframe clips' right pieces join the new right link too, and so do
-    # linked captions (BUILD 242) and keyframe clips (BUILD 243) wholly
+    # linked captions and keyframe clips wholly
     # right of the cut. Still one push_undo for the whole cut.
     start, length = clip[2], clip[3]
     if length < 2:
@@ -811,16 +811,16 @@ def slice_members_db(self, cur, members, split_frame, linked):
     # commit / undo here: the caller owns the transaction and undo step
     # (slice_clip, and the Shift+drag insert in sequence_timeline_insert.py).
     right_ids = []
-    right_other = []   # BUILD 132: right caption / keyframe mem ids
+    right_other = []   # Right caption / keyframe mem ids
     for c in members:
         c_start, c_len, c_in = c[2], c[3], c[7]
         if not (c_start < split_frame < c_start + c_len):
-            # BUILD 242: a linked caption wholly right of the cut (start at
+            # A linked caption wholly right of the cut (start at
             # or after split_frame) joins the right pieces' new link;
             # captions ending at or before it stay with the left pieces.
-            # BUILD 243: linked keyframe clips the same way (their keys
+            # Linked keyframe clips the same way (their keys
             # are untouched)
-            # BUILD 308: linked text clips the same way as captions
+            # Linked text clips the same way as captions
             if (linked and (is_caption_id(c[0]) or is_keyframe_clip_id(c[0])
                             or is_text_clip_id(c[0]))
                     and c_start >= split_frame):
@@ -831,7 +831,7 @@ def slice_members_db(self, cur, members, split_frame, linked):
             continue
         left_length = split_frame - c_start
         right_length = c_len - left_length
-        # BUILD 303: at clip speed s the right piece starts on the source
+        # At clip speed s the right piece starts on the source
         # frame the left piece would show at split_frame (in + floor(rel *
         # s / 100), clip_speed.source_offset); both pieces keep s
         from clip_speed import source_offset, source_span, copy_speed, row_speed
@@ -859,7 +859,7 @@ def slice_members_db(self, cur, members, split_frame, linked):
             right_other.append(-cur.lastrowid)
             continue
         if is_text_clip_id(c[0]):
-            # BUILD 308: text clip: two rows, same text and style (the right
+            # Text clip: two rows, same text and style (the right
             # row starts unlinked; the link step below may join it)
             from timeline_clipboard import _copy_row
             _t, row_id = clip_table_and_id(c[0])
@@ -892,7 +892,7 @@ def slice_members_db(self, cur, members, split_frame, linked):
         cur.execute(
             "UPDATE clips SET proxy_percent = (SELECT proxy_percent FROM clips "
             "WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
-        # BUILD 105: right piece of a sequence clip stays a sequence clip
+        # Right piece of a sequence clip stays a sequence clip
         cur.execute(
             "UPDATE clips SET sequence_id_ref = (SELECT sequence_id_ref "
             "FROM clips WHERE id = ?) WHERE id = ?", (c[0], right_ids[-1]))
@@ -921,7 +921,7 @@ def slice_members_db(self, cur, members, split_frame, linked):
 
 
 def ripple_gap(self, track_id, click_frame):
-    # BUILD 297 / 340: the gap Ripple Delete at click_frame on one track,
+    # The gap Ripple Delete at click_frame on one track
     # without changing anything. The gap is the empty span on that track
     # from the end of the previous clip (or 0) to the start of the next
     # clip (the cut). How much to close is that span (wall - cut). BUILD
@@ -955,7 +955,7 @@ def ripple_gap(self, track_id, click_frame):
 
 
 def ripple_delete(self, track_id, click_frame):
-    # Close the gap at click_frame (ripple_gap). BUILD 340: every clip
+    # Close the gap at click_frame (ripple_gap). Every clip
     # that starts at or after the cut moves left by that gap, on every
     # track. Footage, caption, text and keyframe clips all move; one
     # undo step.
@@ -988,7 +988,7 @@ def ripple_delete(self, track_id, click_frame):
 def ripple_moving(self, right, delta, gone=(), expand_links=True):
     # Ripple rules shared by both Ripple Deletes. Moving set: the right
     # side clips plus their link partners (same link_id, any track), minus
-    # gone (clips being deleted). BUILD 340: expand_links False keeps
+    # gone (clips being deleted). expand_links False keeps
     # exactly the clips passed in (gap Ripple Delete passes every clip
     # that starts at or past the cut, so a partner before the cut stays
     # put and a partner past the cut is already in the set). delta
@@ -1041,7 +1041,7 @@ def _toggle_clip_flag(self, clip_id, column):
     self.table.viewport().update()
 
 
-# ---------------------------------------------------------------- BUILD 105
+# ----------------------------------------------------------------
 # Sequence clips: a clips row with sequence_id_ref = nested child sequence
 # (footage_id NULL), plus a sequence_children (parent, child) row. UI only:
 # the preview composite and audio mix skip them (no footage path).
@@ -1093,7 +1093,7 @@ def sequence_contains(cur, ancestor, target):
 
 def child_sequence_info(cur, child_id):
     # (length_frames, has_video, has_audio) of a sequence. Length is the
-    # Sequence Manager's duration (BUILD 100 sequence_stats: latest
+    # Sequence Manager's duration (sequence_stats: latest
     # out-point of clips, captions and keyframe clips). has_video: any clip
     # on a video or image track; has_audio: any clip on an audio track.
     from sequence_manager import sequence_stats
@@ -1123,7 +1123,7 @@ def _first_free_track(self, cur, kinds, start, length):
 
 
 def source_cap_frames(seconds, fps):
-    # BUILD 301: right-trim cap on a footage clip's source out-point
+    # Right-trim cap on a footage clip's source out-point
     # (in_frame + length_frames; edit points are sequence frames, i.e.
     # sequence time, also under fps conform - sequence_player
     # clip_source_frame). The reported duration rounded up to a whole
@@ -1158,7 +1158,7 @@ def footage_cap_map(cur, footage_ids, fps):
 
 
 def footage_length_frames(cur, footage_id, fps, peak_seconds=0.0):
-    # BUILD 301: full length of a video drop in sequence frames:
+    # Full length of a video drop in sequence frames:
     # round(footage.duration * fps), else the stored peaks duration, else
     # one second
     seconds = 0.0
@@ -1185,7 +1185,7 @@ def next_clip_room(cur, track_id, start):
 
 
 def fit_video_drop(self, cur, track_id, start, full, linked, room):
-    # BUILD 301: (length, audio_track_id, refused) for a video drop of
+    # (length, audio_track_id, refused) for a video drop of
     # full frames at start. refused "video": start is inside a clip on the
     # video track; "audio": linked and no audio track is free at start.
     # length is full, cut to room(track_id, start) (frames to the next
@@ -1215,7 +1215,7 @@ def fit_video_drop(self, cur, track_id, start, full, linked, room):
 
 
 def _nearest_free_track(self, cur, target_id, kinds, start, length, prefer_below):
-    # BUILD 109: on-screen stack order is ORDER BY sort_order, id (table
+    # On-screen stack order is ORDER BY sort_order, id (table
     # row 0 = top = smallest sort_order). Nearest track of kinds with no
     # clip in [start, start + length): scanning down from the target first
     # if prefer_below, else up first; then the other direction. None if
@@ -1310,7 +1310,7 @@ def drop_sequence(self, child_id, row, x_in_clips):
                                              "%s and this sequence has no %s track"
                                        % (kind, kind))
                 continue        # no track of that kind: skip, like footage
-            # BUILD 109: linked audio goes below a video target (else
+            # Linked audio goes below a video target (else
             # above); linked video goes above an audio target (else below)
             tid = _nearest_free_track(self, cur, track_id, kinds_of[kind],
                                       start_frame, length,
@@ -1352,7 +1352,7 @@ def drop_sequence(self, child_id, row, x_in_clips):
     return True
 
 
-# ---------------------------------------------------------------- BUILD 106
+# ----------------------------------------------------------------
 # sequence_children follows the sequence clips: a delete removes the
 # (parent, child) row once no sequence clip in parent still references child.
 
@@ -1386,12 +1386,12 @@ def prune_sequence_children(cur, pairs):
     return removed
 
 
-# ---------------------------------------------------------------- BUILD 107
+# ----------------------------------------------------------------
 # Delete Track (track header menu): the tracks row and everything on it, in
 # the caller's transaction / one undo snapshot.
 
 def delete_track_rows(cur, track_id):
-    # Deletes clips (+ their markers and BUILD 106 sequence_children
+    # Deletes clips (+ their markers and sequence_children
     # pruning), keyframe clips (+ their keys), captions, text clips and the
     # track row.
     # Returns [(first, last)] frame ranges of what was removed (for preview
@@ -1415,7 +1415,7 @@ def delete_track_rows(cur, track_id):
                    "WHERE track_id = ?", (tid,))
     if kf_rows:
         marks = ",".join("?" for _ in kf_rows)
-        # keyframes / keyframe_border rows (BUILD 222)
+        # keyframes / keyframe_border rows
         from keyframe import delete_clip_keys
         delete_clip_keys(cur, [int(r[0]) for r in kf_rows])
         cur.execute("DELETE FROM keyframe_clips WHERE track_id = ?", (tid,))
@@ -1424,7 +1424,7 @@ def delete_track_rows(cur, track_id):
                     "WHERE track_id = ?", (tid,))
     if cap_rows:
         cur.execute("DELETE FROM captions WHERE track_id = ?", (tid,))
-    # BUILD 308: WYSIWYG Text clips (picture: their ranges go dirty)
+    # WYSIWYG Text clips (picture: their ranges go dirty)
     txt_rows = _rows("SELECT start_frame, length_frames FROM text_clips "
                     "WHERE track_id = ?", (tid,))
     if txt_rows:

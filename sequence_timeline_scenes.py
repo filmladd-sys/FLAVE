@@ -12,7 +12,7 @@
 # cut or to either clip edge are skipped (flashes, strobes).
 #
 # Time mapping: clip edit points are sequence frames, which are time at
-# the sequence rate (BUILD 273 conform), so the source range starts at
+# the sequence rate (conform), so the source range starts at
 # in_frame / seq_fps seconds. A cut at source time t is the first source
 # frame K = round(t * footage_fps); the sequence frame that first shows it
 # is the smallest s with floor(s * footage_fps / seq_fps) >= K, i.e.
@@ -88,7 +88,7 @@ def cut_sequence_frame(t_rel, clip_start, in_frame, seq_fps, footage_fps=None,
                        speed=100):
     # Sequence frame of a cut found t_rel seconds into the clip's source
     # range (see the module comment); at a clip speed other than 100 the
-    # first timeline frame showing that source frame (BUILD 303)
+    # first timeline frame showing that source frame
     seq_fps = float(seq_fps or 30.0)
     t = int(in_frame) / seq_fps + max(0.0, float(t_rel))
     from sequence_player import fps_conform_ratio
@@ -266,7 +266,7 @@ def _clip_info(tl, clip):
         gpu = True
     seq_fps = float(getattr(tl, "fps", None) or 30.0)
     start, length, in_f = int(start), int(length), int(in_f)
-    # BUILD 303: the source range a sped clip covers (clip_speed)
+    # The source range a sped clip covers (clip_speed)
     from clip_speed import speed_of, source_span
     speed = speed_of(getattr(tl, "_clip_speeds", None), int(clip[0]))
     return {"track_id": track_id, "start": start, "end": start + length,
@@ -353,7 +353,7 @@ def scene_detect(tl, clip):
 
 
 def _open_progress(tl, job):
-    # Application-modal like Generate Captions (BUILD 277): blocks every
+    # Application-modal like Generate Captions: blocks every
     # FLAVE window and comes back to the front when FLAVE is activated
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication, QProgressDialog

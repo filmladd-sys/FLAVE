@@ -32,7 +32,7 @@ AUDIO_TMP_CREATE_SQL = """
 
 
 def audiotmp_db_path(project_db):
-    # BUILD 223: LaddTest.db -> LaddTest_AudioTmp.db in the same folder
+    # LaddTest.db -> LaddTest_AudioTmp.db in the same folder
     # (per project; sequence_preview.temp_file_path)
     from sequence_preview import temp_file_path
     return temp_file_path(project_db, "AudioTmp", "db")
@@ -144,7 +144,7 @@ def _bucket_peaks(samples, out):
 def extract_mono_pcm(path):
     # Shared import/backfill FFmpeg pass: mono 48 kHz s16le PCM bytes, or None
     # if ffmpeg fails or the file has no audio stream. Never raises.
-    # BUILD 118: first audio stream only (-map 0:a:0); ffmpeg's default
+    # First audio stream only (-map 0:a:0); ffmpeg's default
     # pick is the "best" stream (most channels), e.g. a second MKV track.
     # No video / subtitle / data streams are read.
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0",

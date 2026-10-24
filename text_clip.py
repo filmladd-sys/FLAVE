@@ -1,15 +1,15 @@
 # text_clip.py
-# WYSIWYG Text clips (BUILD 308): one text box per clip on a 'text' track
+# WYSIWYG Text clips: one text box per clip on a 'text' track
 # (WYSIWYG Text), stored in the text_clips table (new_project.TEXT_CLIPS_SQL).
 # Per-clip style: font family, font size (sequence px), color '#RRGGBB';
-# x / y are the box center in sequence pixels. BUILD 311: optional drop
+# x / y are the box center in sequence pixels. Optional drop
 # shadow (shadow_on, shadow_color '#RRGGBBAA', shadow_blur radius px,
 # shadow_angle, shadow_offset px; see new_project.TEXT_CLIPS_SQL and
 # shadow_delta). This module holds the ids,
 # the load / add / update helpers (link_id: sequence_timeline_captions.
 # persist_caption_link_id) and the text image (QPainter -> RGBA
 # QImage, cached). Timeline wiring: sequence_timeline_text.py. Style
-# window: text_style_window.py. BUILD 315: the last used text style
+# window: text_style_window.py. The last used text style
 # (REMEMBER_KEYS) is kept in the global settings (LAST_STYLE_PREFIX + key)
 # and is the style of every new text clip (remember_text_style /
 # remembered_text_style). ASCII only.
@@ -26,7 +26,7 @@ TEXT_ID_BASE = 2000000000
 DEFAULT_TEXT = "Text"
 DEFAULT_COLOR = "#ffffff"
 DEFAULT_SECONDS = 5
-# BUILD 311: the five shadow fields follow the six text fields (style
+# The five shadow fields follow the six text fields (style
 # tuples of load_text_styles, player_text.text_rgba)
 TEXT_STYLE_KEYS = ("text", "font_family", "font_size", "color", "x", "y",
                    "shadow_on", "shadow_color", "shadow_blur", "shadow_angle",
@@ -86,7 +86,7 @@ def insert_text_clip(cur, sequence_id, track_id, start_frame, length_frames,
                      seq_w, seq_h, family=None, style=None):
     # New text_clips row: 'Text', centered, with the defaults (default sans
     # font, size seq_h / 12, white, shadow off with the column defaults);
-    # BUILD 315: style ({REMEMBER_KEYS key: value}, e.g.
+    # Style ({REMEMBER_KEYS key: value}, e.g.
     # remembered_text_style) replaces the default of each key it has.
     # Returns the in-memory id.
     st = default_text_style(seq_h)
@@ -104,7 +104,7 @@ def insert_text_clip(cur, sequence_id, track_id, start_frame, length_frames,
     return text_mem_id(cur.lastrowid)
 
 
-# ---- BUILD 315: last used text style. Every style change of a text clip
+# ---- last used text style. Every style change of a text clip
 # made in the Text Style window (text_style_window.apply_text_field) stores
 # the clip's whole style (REMEMBER_KEYS: font, size, color and the five
 # shadow fields; not the text or the position) in the global settings, one
@@ -256,7 +256,7 @@ def write_text_field(cur, clip_mem_id, key, value):
 
 
 def load_text_styles(project_db, sequence_id):
-    # BUILD 309: {mem id: (text, font_family, font_size, color, x, y,
+    # {mem id: (text, font_family, font_size, color, x, y
     # shadow_on, shadow_color, shadow_blur, shadow_angle, shadow_offset)} of
     # every text clip of the sequence (TEXT_STYLE_KEYS order), the
     # compositor's text layers (timeline_snapshot index [29]). {} on any
@@ -283,7 +283,7 @@ def load_text_styles(project_db, sequence_id):
 # transparent frame (QImage ARGB32 premultiplied), the layer the
 # compositor blends like an image clip (player_text uploads it). Cached
 # per (clip, text, style, position, shadow, sequence size); a change of any of
-# them makes a new entry. BUILD 309: at most _IMAGE_CACHE_MAX host images
+# them makes a new entry. At most _IMAGE_CACHE_MAX host images
 # (one is seq_w x seq_h x 4 bytes, 8 MB at 1080p); the GUI thread and
 # the compositor threads share the cache under _IMAGE_LOCK.
 
@@ -453,7 +453,7 @@ def render_text_image(text, family, size_px, color, x, y, seq_w, seq_h,
                       clip_key=None, shadow=None):
     # Sequence-size RGBA image, transparent except the text (center-aligned
     # lines, box centered on x / y). clip_key (e.g. the clip id) only
-    # separates cache entries. BUILD 311: shadow (shadow_on, shadow_color,
+    # separates cache entries. Shadow (shadow_on, shadow_color
     # shadow_blur, shadow_angle, shadow_offset), when on, is drawn under
     # the text (_draw_shadow).
     from PySide6.QtGui import QImage, QPainter, QColor

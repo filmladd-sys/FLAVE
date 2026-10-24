@@ -1,5 +1,5 @@
 # sequence_timeline_tracks.py
-# BUILD 161: track parts of the Sequence Timeline window, split out of
+# Track parts of the Sequence Timeline window, split out of
 # sequence_timeline.py with no behavior change: the track table style (no
 # track highlight), the collapse triangle / column / toggle, the track
 # right-click items (Move, Enable / Disable, Solo, Track Display
@@ -23,15 +23,15 @@ from sequence_timeline_sql import (
 )
 
 
-# BUILD 158: no track highlight from the platform. The track table draws
+# No track highlight from the platform. The track table draws
 # every cell with a row panel (QTableView drawCell -> PE_PanelItemViewRow)
 # and the item panel (CE_ItemViewItem -> PE_PanelItemViewItem) carrying
 # the Selected / MouseOver / HasFocus states; the platform style paints
 # those light grey / lighter on hover. This style drops those states for
 # the track table only so a row paints plain; the focus rectangle is not
-# drawn. BUILD 331: our own subtle hover fill (TRACK_HOVER_BG) is painted
+# drawn. Our own subtle hover fill (TRACK_HOVER_BG) is painted
 # instead when table._hover_track_row matches the row.
-# BUILD 331: subtle mouse-over fill for the whole track row
+# Subtle mouse-over fill for the whole track row
 TRACK_HOVER_BG = QColor(50, 50, 50)
 
 _TRACK_STRIP_STATES = (QStyle.State_Selected | QStyle.State_MouseOver
@@ -62,7 +62,7 @@ class _NoTrackHighlightStyle(QProxyStyle):
         if element in (QStyle.PE_PanelItemViewRow, QStyle.PE_PanelItemViewItem):
             option = _plain_option(option)
             super().drawPrimitive(element, option, painter, widget)
-            # BUILD 331: full-row hover cue after the plain panel
+            # Full-row hover cue after the plain panel
             if (widget is not None
                     and _hover_row_of(widget, option)
                     == getattr(widget, "_hover_track_row", -1)
@@ -89,7 +89,7 @@ def _track_table_style(table):
 
 
 def _set_hover_track_row(self, row):
-    # BUILD 331: which track row the mouse is over (-1 = none). Drives the
+    # Which track row the mouse is over (-1 = none). Drives the
     # subtle TRACK_HOVER_BG fill across the whole row; no selection change.
     row = -1 if row is None else int(row)
     if getattr(self, "_hover_track_row", -1) == row:
@@ -100,7 +100,7 @@ def _set_hover_track_row(self, row):
         self.table.viewport().update()
 
 
-# BUILD 163: yellow outline around the Name cell of the track whose
+# Yellow outline around the Name cell of the track whose
 # right-click menu is open, so the user sees which track the menu acts on.
 # Same yellow as the selected clip outline (sequence_timeline_clips.py).
 MENU_TRACK_OUTLINE = QColor(255, 255, 160)
@@ -129,7 +129,7 @@ class NameCellDelegate(QStyledItemDelegate):
 # ---------------------------------------------------------------- collapse
 
 def paint_collapse_triangle(painter, rect, collapsed):
-    # BUILD 126: small filled triangle centered in the cell
+    # Small filled triangle centered in the cell
     from PySide6.QtGui import QPolygon
     from PySide6.QtCore import QPoint
     s = max(4, min(10, rect.height() - 6, rect.width() - 6))
@@ -148,7 +148,7 @@ def paint_collapse_triangle(painter, rect, collapsed):
 
 
 def paint_collapse_cell(tl, painter, option, index):
-    # BUILD 161: the triangle part of ClipDelegate.paint's COLLAPSE_COL
+    # The triangle part of ClipDelegate.paint's COLLAPSE_COL
     # branch (the delegate still paints the cell with super().paint first)
     name_item = tl.table.item(index.row(), 0)
     coll = bool(name_item.data(ROLE_COLLAPSED)) if name_item is not None else False
@@ -156,7 +156,7 @@ def paint_collapse_cell(tl, painter, option, index):
 
 
 def _setup_collapse_column(self):
-    # BUILD 161: the collapse column / collapsed row lines of
+    # The collapse column / collapsed row lines of
     # SequenceTimeline.__init__ (called at the same spot)
     # Fixed 18 px triangle column (the header's font-based minimum
     # section size would widen it) and 16 px collapsed rows (same for
@@ -172,7 +172,7 @@ def _setup_collapse_column(self):
 
 
 def _toggle_collapse_at(self, pos):
-    # BUILD 126: click in the triangle cell -> toggle tracks.collapsed
+    # Click in the triangle cell -> toggle tracks.collapsed
     # (same path as Disable / Solo: no undo step, refresh)
     # On a selected track it inverts all selected tracks instead
     if self.table.columnAt(pos.x()) != COLLAPSE_COL:
@@ -261,9 +261,9 @@ def _track_row_height(self, track_id):
     # QTableView trims the grid line (1px) off each cell's rect, so the
     # painted height is rowHeight - 1 when the grid is shown. Using plain
     # rowHeight here made the out icon cache key miss paint's key.
-    # BUILD 126: a collapsed track draws no icons; icons are made for
+    # A collapsed track draws no icons; icons are made for
     # its open height so they are ready when it opens
-    # BUILD 128: open clips draw thumbnails in the content rect below
+    # Open clips draw thumbnails in the content rect below
     # the title bar, so the icon height is the content height
     from keyframe import title_heights
     grid = 1 if self.table.showGrid() else 0
@@ -279,7 +279,7 @@ def _track_row_height(self, track_id):
 
 # ---------------------------------------------------------------- menus
 
-# BUILD 123: the Tracks menu items, in order: (label, handler name).
+# The Tracks menu items, in order: (label, handler name).
 # Shared by the Tracks menu bar menu and the empty-space right-click.
 TRACK_ADD_ITEMS = (
     ("+ Video", "_add_video_track"),
@@ -288,7 +288,7 @@ TRACK_ADD_ITEMS = (
     ("+ Image", "_add_image_track"),
     ("+ Caption", "_add_caption_track"),
     ("+ Keyframe", "_add_keyframe_track"),
-    ("+ WYSIWYG Text", "_add_text_track"),     # BUILD 308
+    ("+ WYSIWYG Text", "_add_text_track"),
 )
 
 
@@ -310,9 +310,9 @@ def _add_track_actions(self, menu):
 
 
 def _add_track_menu_items(self, menu, name_item, enabled):
-    # BUILD 161: the track right-click items of _track_context_menu, added
+    # The track right-click items of _track_context_menu, added
     # to menu at the same spot; returns their actions by name
-    # BUILD 124: Move > Up / Down / To Top / To Bottom (Up = toward the
+    # Move > Up / Down / To Top / To Bottom (Up = toward the
     # top row, smaller sort_order). Never disabled, like the old Move
     # Up / Move Down items; at an end they do nothing.
     move_menu = menu.addMenu("Move")
@@ -330,7 +330,7 @@ def _add_track_menu_items(self, menu, name_item, enabled):
     collapse_action = coll_menu.addAction("Collapse")
     invert_action = coll_menu.addAction("Invert")
     display_action = menu.addAction("Track Display Properties")
-    # BUILD 262: empty copies of the selected tracks (see _duplicate_tracks)
+    # Empty copies of the selected tracks (see _duplicate_tracks)
     dup_menu = menu.addMenu("Duplicate Track(s)")
     dup_above_action = dup_menu.addAction("Above")
     dup_below_action = dup_menu.addAction("Below")
@@ -343,7 +343,7 @@ def _add_track_menu_items(self, menu, name_item, enabled):
 
 
 def _run_track_menu_action(self, action, acts, track_id):
-    # BUILD 161: the matching dispatch of _track_context_menu (same order);
+    # The matching dispatch of _track_context_menu (same order)
     # True when action was one of acts
     up_action, down_action = acts["up"], acts["down"]
     top_action, bottom_action = acts["top"], acts["bottom"]
@@ -373,7 +373,7 @@ def _run_track_menu_action(self, action, acts, track_id):
     return True
 
 
-# BUILD 262: Duplicate Track(s) > Above / Below. The selected tracks
+# Duplicate Track(s) > Above / Below. The selected tracks
 # (_selected_track_ids; a right-click outside the selection selects just
 # that track) are copied as tracks only: no clips, captions, keyframe
 # clips or markers. Each copy keeps every track setting (type, height,
@@ -400,7 +400,7 @@ def insert_track_copies(cur, sequence_id, src_rows):
     # of its source except id, sequence_id, name (a new default name per
     # type, unique in sequence_id), sort_order (0; the caller renumbers),
     # enabled (on) and solo (off). Returns the new ids in source order.
-    # Used by Duplicate Track(s) and Paste w/New Tracks (BUILD 288).
+    # Used by Duplicate Track(s) and Paste w/New Tracks.
     from track_names import next_default_name
     names = [r[0] for r in cur.execute(
         "SELECT name FROM tracks WHERE sequence_id = ?", (sequence_id,))]

@@ -49,12 +49,12 @@ def import_footage(project_db, media_path):
         except Exception:
             pass
 
-    # BUILD 272: frame rate of v:0 into footage.fps (video only; images
+    # Frame rate of v:0 into footage.fps (video only; images
     # and audio stay NULL)
     if ext in _VISUAL_EXTS and ext not in IMAGE_EXTS:
         store_footage_fps(project_db, new_id, media_path)
 
-    # BUILD 326: sample / pixel aspect of v:0 into footage.pixel_aspect
+    # Sample / pixel aspect of v:0 into footage.pixel_aspect
     # ("N:D", including 1:1); images and audio stay NULL
     if ext in _VISUAL_EXTS and ext not in IMAGE_EXTS:
         try:
@@ -72,7 +72,7 @@ def import_footage(project_db, media_path):
         except Exception:
             pass
 
-    # BUILD 119: MKV field order (progressive / interlaced / telecine /
+    # MKV field order (progressive / interlaced / telecine /
     # unknown) into footage.field_order. Other files stay NULL.
     if ext == "mkv":
         try:
@@ -125,7 +125,7 @@ def _probe_duration(path):
     return 0.0
 
 
-# ---- BUILD 119: field order probe (MKV import)
+# ---- field order probe (MKV import)
 #
 # 1) ffprobe V:0 field_order (tt / bb / tb / bt = interlaced, progressive,
 #    else unknown) plus r_frame_rate / avg_frame_rate.
@@ -172,7 +172,7 @@ IMAGE_EXTS = {"png", "jpg", "jpeg", "bmp", "gif", "webp"}
 
 
 def probe_fps(path):
-    # BUILD 272: frames per second of stream V:0 (avg_frame_rate, the rate
+    # Frames per second of stream V:0 (avg_frame_rate, the rate
     # the frames actually play at; r_frame_rate when that is missing), or
     # None when ffprobe gives neither
     _fo, r_fps, avg_fps = ffprobe_field_info(path)

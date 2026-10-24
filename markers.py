@@ -1,12 +1,12 @@
 # markers.py
 # Clip markers (Marker table, created only in new_project.py _init_db).
-# Marker.clip_id is clips.id of a video / image / audio clip. Marker.frame is in SOURCE terms (BUILD 95): clip in_frame + offset
+# Marker.clip_id is clips.id of a video / image / audio clip. Marker.frame is in SOURCE terms: clip in_frame + offset
 # at add time, so trims and slices never move it on the picture. Timeline
 # frame = clip start + (frame - clip in_frame); markers outside the clip's
 # visible range are hidden. Markers are only for video / audio / image
 # clips (clips.id > 0); rows with a negative clip_id (old caption markers)
-# are skipped everywhere (BUILD 96). ASCII only.
-# Clip speed (BUILD 303, clip_speed.py): a sped clip shows source
+# are skipped everywhere. ASCII only.
+# Clip speed (clip_speed.py): a sped clip shows source
 # in + floor(rel * speed / 100) at timeline offset rel, so a marker sits at
 # the first offset showing its source frame (timeline_offset); the speed
 # arguments default to 100 (1:1, as above).

@@ -72,7 +72,7 @@ def ripple_insert_db(tl, cur, at, span, cuts, rows=None):
         "UPDATE captions SET start_frame = start_frame + ? "
         "WHERE start_frame >= ? AND sequence_id = ?" + sql,
         [span, at, seq] + extra)
-    # BUILD 308: WYSIWYG Text clips (text_clips)
+    # WYSIWYG Text clips (text_clips)
     sql, extra = _not_in("id", rows.get("text_clips", ()))
     cur.execute(
         "UPDATE text_clips SET start_frame = start_frame + ? "
@@ -86,7 +86,7 @@ def ripple_insert_db(tl, cur, at, span, cuts, rows=None):
     for kid in kf_ids:
         cur.execute("UPDATE keyframe_clips SET in_frame = in_frame + ?, "
                     "out_frame = out_frame + ? WHERE id = ?", (span, span, kid))
-        # keyframes / keyframe_border rows (BUILD 222)
+        # keyframes / keyframe_border rows
         shift_clip_keys(cur, kid, span)
 
 

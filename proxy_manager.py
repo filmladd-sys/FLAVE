@@ -137,9 +137,9 @@ def proxy_rows(db_path, footage_id):
 
 
 PROXY_PERCENTAGES = (75, 50, 25, 10)
-MKV_PROXY_PERCENTAGES = (100, 75, 50, 25, 10)   # BUILD 119: 100% for MKV only
+MKV_PROXY_PERCENTAGES = (100, 75, 50, 25, 10)   # 100% for MKV only
 
-# BUILD 119: proxy modes. 'deint' keeps the source frame count; 'deint2x'
+# Proxy modes. 'deint' keeps the source frame count; 'deint2x'
 # (one frame per field) and 'ivtc' (3:2 pulldown removed, 24000/1001)
 # change it, so the composite maps source frames to proxy frames by time.
 PROXY_MODES = ("normal", "deint", "deint2x", "ivtc")
@@ -169,7 +169,7 @@ def proxy_rows_full(db_path, footage_id):
 
 
 def footage_field_order(db_path, footage_id):
-    # footage.field_order (BUILD 119 MKV probe) or None
+    # footage.field_order (MKV probe) or None
     try:
         conn = sqlite3.connect(db_path)
         try:
@@ -246,14 +246,14 @@ def available_percentages(db_path, footage_id):
 
 
 def set_default_after_generate(db_path, footage_id, percentage, ok, out_path=None):
-    # BUILD 122: after a successful generate, footage.proxy_percent (the
+    # After a successful generate, footage.proxy_percent (the
     # Footage Manager 'Proxy Default') = the new percent, written through
     # clip_proxy.set_footage_proxy_percent (same path as the Proxy Default
     # menu: undo snapshot 'Proxy default').
     # Video: ok and the proxy file exists. Image: ok (placeholder row, no
     # file). Clips keep their own proxy_percent. Only the percent is stored;
     # with Normal and Deinterlace at that percent the composite and the
-    # BUILD 120 label use the preferred mode (e.g. '50% (deint)').
+    # Label use the preferred mode (e.g. '50% (deint)').
     # Returns True if the default was written.
     if not ok:
         return False
@@ -281,7 +281,7 @@ def add_proxy_row(db_path, footage_id, percentage):
         conn.close()
 
 
-# ---- video proxies (FFmpeg CUDA decode + scale_cuda + hevc_nvenc, BUILD 87)
+# ---- video proxies (FFmpeg CUDA decode + scale_cuda + hevc_nvenc)
 
 _VIDEO_EXTS = (".mov", ".mp4", ".mkv", ".avi", ".m4v", ".webm")
 
@@ -292,7 +292,7 @@ def is_video_path(path):
 
 def video_proxy_path(proxy_dir, source_path, percentage, mode="normal"):
     # <ProxyPath>/<source basename>.<pct>.mp4, e.g. VidTest.mov.50.mp4.
-    # BUILD 119: deint / ivtc -> .<pct>.deint.mp4; double rate (same
+    # Deint / ivtc ->.<pct>.deint.mp4; double rate (same
     # percent as a deint one) -> .<pct>.deint2x.mp4
     tail = {"deint": ".deint", "ivtc": ".deint", "deint2x": ".deint2x"}.get(mode, "")
     return os.path.join(proxy_dir, os.path.basename(source_path) + "." +
@@ -382,7 +382,7 @@ def nvenc_available(encoder=PROXY_ENCODER, w=None, h=None):
 
 def probe_size(src):
     # (width, height) of the first video stream via ffprobe, or None
-    # (BUILD 118: V:0 skips attached pictures / cover art)
+    # (V:0 skips attached pictures / cover art)
     try:
         code, out, _err = _run([
             "ffprobe", "-v", "error", "-select_streams", "V:0",
@@ -428,7 +428,7 @@ def ivtc_rate(source_fps):
 
 
 def build_proxy_cmd(src, out, w, h, mode="normal", source_fps=None):
-    # BUILD 119 modes (all: first real video stream, no audio / subs):
+    # Modes (all: first real video stream, no audio / subs):
     #   deint   / deint2x: GPU decode, yadif_cuda mode 0 / 1 (one frame per
     #           field), scale_cuda, hevc_nvenc
     #   ivtc:   CPU fieldmatch + yadif (leftover combed frames) + decimate,
@@ -452,7 +452,7 @@ def build_proxy_cmd(src, out, w, h, mode="normal", source_fps=None):
     return _build_normal_cmd(src, out, w, h)
 
 
-# BUILD 121: CPU-decode fallback. Sources NVDEC cannot take (e.g. a bgra
+# CPU-decode fallback. Sources NVDEC cannot take (e.g. a bgra
 # PNG-in-AVI logo: GPU decode silently falls back to software frames and
 # scale_cuda then fails with 'Error reinitializing filters' / 'Function not
 # implemented') are decoded and scaled on the CPU, still encoded with
@@ -558,7 +558,7 @@ def _build_normal_cmd(src, out, w, h):
     # so MP4 players recognise the HEVC track. No CPU filter; the 8-bit
     # conversion is scale_cuda format=yuv420p (no -pix_fmt: it would force a
     # software auto_scale from CUDA frames and fail).
-    # BUILD 118: first real video stream only (0:V:0 skips cover art); no
+    # First real video stream only (0:V:0 skips cover art); no
     # audio, subtitle, data or attachment streams (MKV safe).
     return ["ffmpeg", "-y", "-hide_banner", "-hwaccel", "cuda",
             "-hwaccel_output_format", "cuda", "-i", src, "-map", "0:V:0", "-an",
@@ -674,11 +674,11 @@ def _ffmpeg_error_text(code, cmd, err, title=None):
 def generate_video_proxy(db_path, footage_id, percentage, wait=None, mode="normal",
                          cancelled=None):
     # Run ffmpeg; on success save the Proxies row. Returns (ok, message).
-    # BUILD 121: GPU command first unless the ffprobe codec / pix_fmt is not
+    # GPU command first unless the ffprobe codec / pix_fmt is not
     # NVDEC-decodable (then CPU decode + CPU scale only). A GPU failure whose
     # stderr names a filter / hwaccel error is retried once on the CPU path
     # (partial output deleted first); both failing shows both commands.
-    # BUILD 333: cancelled() True -> drop partial, return "cancelled",
+    # Cancelled True -> drop partial, return "cancelled"
     # no CPU retry.
     src, _name = footage_source(db_path, footage_id)
     if not src or not os.path.isfile(src):
@@ -755,7 +755,7 @@ _ALL_CLIPS_WHERE = (
 
 
 def set_all_clips_proxy(db_path, footage_id, pct):
-    # BUILD 291: clips.proxy_percent = pct for every video / image clip of
+    # Clips.proxy_percent = pct for every video / image clip of
     # footage_id in every sequence (0 = None: the original). One undo step, taken only
     # when some clip changes. Returns the number of clips changed.
     conn = sqlite3.connect(db_path)
@@ -853,14 +853,14 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             row.addWidget(QLabel("Generate"))
             self.combo = QComboBox()
             row.addWidget(self.combo, 1)
-            # BUILD 119: Mode (Normal / Deinterlace / double rate / IVTC),
+            # Mode (Normal / Deinterlace / double rate / IVTC)
             # shown only when the footage has more than Normal
             self.mode_label = QLabel("Mode")
             row.addWidget(self.mode_label)
             self.mode_combo = QComboBox()
             row.addWidget(self.mode_combo, 1)
             layout.addLayout(row)
-            # BUILD 332: Generate All to the right of Generate
+            # Generate All to the right of Generate
             btn_row = QHBoxLayout()
             self.gen_btn = QPushButton("Generate")
             self.gen_btn.clicked.connect(self._generate)
@@ -868,7 +868,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.gen_all_btn = QPushButton("Generate All")
             self.gen_all_btn.clicked.connect(self._generate_all)
             btn_row.addWidget(self.gen_all_btn)
-            # BUILD 333: Cancel only while generating
+            # Cancel only while generating
             self.cancel_btn = QPushButton("Cancel")
             self.cancel_btn.clicked.connect(self._cancel_generate)
             self.cancel_btn.setVisible(False)
@@ -887,7 +887,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.table.setSelectionBehavior(QTableWidget.SelectRows)
             self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
             layout.addWidget(self.table, 1)
-            # BUILD 291: Set All Clips: None (original) or a percent that
+            # Set All Clips: None (original) or a percent that
             # already has a proxy for this footage (clip_proxy.proxy_options;
             # nothing is generated here). Refilled by _reload.
             box = QGroupBox("Set All Clips")
@@ -983,7 +983,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.gen_btn.setEnabled(not busy
                                     and self.combo.currentData() is not None
                                     and self.mode_combo.currentData() is not None)
-            # BUILD 332: Generate All when any size/mode is still missing
+            # Generate All when any size/mode is still missing
             self.gen_all_btn.setEnabled(not busy and bool(self._pending_pairs()))
 
         def _generate(self):
@@ -1002,7 +1002,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                     elif out != "cancelled":
                         show_message(self, "Proxy Manager", out)
                 else:
-                    # Images: BUILD 82 placeholder row only (no file written)
+                    # Images: placeholder row only (no file written)
                     try:
                         add_proxy_row(db_path, footage_id, int(pct))
                     except Exception as e:
@@ -1021,9 +1021,9 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                     pass
 
         def _generate_all(self):
-            # BUILD 332: walk every missing percentage/mode and reuse the
+            # Walk every missing percentage/mode and reuse the
             # same generate path as Generate; skip sizes already present.
-            # BUILD 333: app-wide busy + Cancel stops the queue.
+            # App-wide busy + Cancel stops the queue.
             if getattr(self, "_generating", False):
                 return
             pending = self._pending_pairs()
@@ -1070,7 +1070,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
                         pass
 
         def _begin_generate(self):
-            # BUILD 333: app-wide block (other top-levels off, this window
+            # App-wide block (other top-levels off, this window
             # ApplicationModal, override wait cursor) and show Cancel.
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import Qt
@@ -1101,7 +1101,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self.activateWindow()
 
         def _end_generate(self):
-            # BUILD 333: hide Cancel, unblock other windows, restore UI
+            # Hide Cancel, unblock other windows, restore UI
             from PySide6.QtWidgets import QApplication
             from PySide6.QtCore import Qt
             self._ffmpeg_proc = None
@@ -1131,7 +1131,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             self._update_button()
 
         def _cancel_generate(self):
-            # BUILD 333: stop current ffmpeg and the rest of Generate All
+            # Stop current ffmpeg and the rest of Generate All
             if not getattr(self, "_generating", False):
                 return
             self._cancel_requested = True
@@ -1178,7 +1178,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
             return ok, msg
 
         def closeEvent(self, event):
-            # BUILD 333: closing while generating cancels; stay open until done
+            # Closing while generating cancels; stay open until done
             if getattr(self, "_generating", False):
                 self._cancel_generate()
                 event.ignore()
@@ -1191,7 +1191,7 @@ def open_proxy_manager(parent, db_path, footage_id, footage_name, on_change=None
 
     win = ProxyManagerWindow()
     _open_windows.append(win)
-    # BUILD 229: under the opener's menu bar (Footage Manager; no geometry
+    # Under the opener's menu bar (Footage Manager; no geometry
     # memory: every new window)
     from window_place import place_under_parent
     place_under_parent(win, parent, "proxy_manager")

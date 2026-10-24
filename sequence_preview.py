@@ -1,7 +1,7 @@
 # sequence_preview.py
 # Preview cache database for Ladd Video Editor: one JPEG per sequence frame.
 # File lives next to the project file as {ProjectName}_{sequence_id}_Preview.db
-# (BUILD 223, temp_file_path).
+# (temp_file_path).
 # No decoder, no worker, no UI. ASCII only.
 
 import os
@@ -16,7 +16,7 @@ def project_name(project_path):
 
 
 def temp_file_path(project_path, kind, ext, sequence_id=None):
-    # BUILD 223: the one naming rule for FLAVE's temp / cache files next to
+    # The one naming rule for FLAVE's temp / cache files next to
     # the project file. ProjectName = the project db file name without its
     # extension. Per sequence: {ProjectName}_{sequence_id}_{Kind}.{ext};
     # per project (sequence_id None): {ProjectName}_{Kind}.{ext}.
@@ -33,21 +33,21 @@ def preview_db_path(project_path, sequence_id):
     return temp_file_path(project_path, "Preview", "db", sequence_id)
 
 
-# Preview file layout (BUILD 251):
+# Preview file layout:
 #   preview (frame INTEGER PRIMARY KEY, jpeg BLOB): one JPEG per frame
 #   DirtyImage (frame INTEGER PRIMARY KEY): frames whose JPEG is stale
-#   PreviewInfo (key TEXT PRIMARY KEY, value TEXT): "ImageSize" (BUILD 255,
+# PreviewInfo (key TEXT PRIMARY KEY, value TEXT): "ImageSize" (
 #     see sync_image_size), "FpsConform" (see sync_fps_conform)
 # A frame is clean when its preview row has a JPEG and it is not in
 # DirtyImage. The dirty list is its own small table so marking frames dirty
 # never rewrites the rows that hold the JPEGs. (A future DirtyAudio table
-# would follow the same pattern.) Files from before BUILD 251 keep an unused
+# would follow the same pattern.) Older preview files keep an unused
 # preview.dirty column; _connect copies its marks into DirtyImage once.
 CLEAN_SQL = ("NOT EXISTS (SELECT 1 FROM DirtyImage d "
              "WHERE d.frame = preview.frame)")
 
 
-# Journal (BUILD 257): the preview file is a rebuildable cache, so it is
+# Journal: the preview file is a rebuildable cache, so it is
 # written for the fewest bytes, not for crash safety. journal_mode=MEMORY
 # keeps the rollback journal in RAM (a failed transaction still rolls
 # back) and every JPEG page goes to the file once, at commit. WAL wrote
@@ -108,7 +108,7 @@ def _open(path, timeout):
     # One connection: journal mode, pragmas, tables (see _connect)
     conn = sqlite3.connect(path, timeout=timeout)
     try:
-        # A file still in WAL (written before BUILD 257) leaves WAL here:
+        # A file still in WAL mode leaves WAL here:
         # SQLite checkpoints the -wal into the file and deletes it. That
         # needs no other connection on the file, so it is tried without
         # waiting; when busy, this connection simply works in WAL and a
@@ -215,7 +215,7 @@ def set_preview_size_percent(project_path, pct):
     return pct
 
 
-# BUILD 320: a sequence can override the project Preview Size (Sequence
+# A sequence can override the project Preview Size (Sequence
 # Settings > Preview Size). Kept in the project db as sequences.preview_size;
 # NULL (or a missing column / bad value) = Project Default. Read from the db
 # on every call so a Sequence Settings save or an undo restore is seen at
@@ -239,10 +239,6 @@ def sequence_preview_size_override(project_path, sequence_id):
                                (sid,)).fetchone()
         finally:
             conn.close()
-    except sqlite3.OperationalError as e:
-        if "no such column" in str(e).lower():
-            return None
-        return _SEQ_PCT_LAST.get(key)
     except sqlite3.Error:
         return _SEQ_PCT_LAST.get(key)
     pct = None
@@ -531,13 +527,13 @@ def FramesShift(project_path, sequence_id, first, last, delta):
 
 
 def FramesRelocate(project_path, sequence_id, relocs):
-    # BUILD 146: mile-marker relocations [(first, last, delta)] (a pure move
+    # Mile-marker relocations [(first, last, delta)] (a pure move
     # proved span by span): the clean rows of first..last are copied to
     # first+delta..last+delta. GUI thread. The targets are logged dirty, so
     # an in-flight worker batch built before the edit cannot land there as
     # clean. The sources keep their rows (the marker diff marks them if
     # their own picture changed, queued after this).
-    # BUILD 258: the clean set moves with the rows at once (a ripple delete
+    # The clean set moves with the rows at once (a ripple delete
     # keeps its bar green right of the cut): each clean source frame is
     # clean at its target now; the worker copies the rows
     # (_apply_relocate) and then sets the targets from what it moved.
@@ -561,13 +557,13 @@ def FramesRelocate(project_path, sequence_id, relocs):
         del _DIRTY_LOG[:-256]
 
 
-# Frames copied per commit by _apply_relocate (BUILD 258): the memory
+# Frames copied per commit by _apply_relocate: the memory
 # journal and the page cache hold one chunk, not the whole move
 RELOCATE_CHUNK = 64
 
 
 def _relocate_order(relocs):
-    # BUILD 258: (ordered, rest). A relocation is copied when its targets
+    # (ordered, rest). A relocation is copied when its targets
     # miss the sources of every relocation not yet copied, so no copy
     # writes over a frame still to be read (a relocation's overlap with its
     # own source is handled by the copy direction). rest: relocations that
@@ -692,7 +688,7 @@ def apply_dirty_queue():
         if not os.path.isfile(preview_db_path(project_path, sequence_id)):
             continue
         if len(item) > 4 and isinstance(item[4], tuple) and item[4][0] == "relocate":
-            # BUILD 146: (project, sequence, None, None, ("relocate", relocs),
+            # (project, sequence, None, None, ("relocate", relocs)
             # seq). On a failure the targets not copied leave the clean
             # set (_apply_relocate), so the worker rebuilds them.
             try:
@@ -844,7 +840,7 @@ class PreviewBatch(object):
     # commit writes them in one transaction (one bulk JPEG insert, one bulk
     # DirtyImage delete) and only then adds them to the in-memory clean set
     # (bar moves). Used by the preview worker on its own thread.
-    # BUILD 254: commit_async() hands the frames to a writer thread (its own
+    # Commit_async hands the frames to a writer thread (its own
     # connection) and returns, so the card builds the next frames while they
     # are written. commit() and close() first wait for every handed-off
     # write, so their callers still see everything on disk.
@@ -886,7 +882,7 @@ class PreviewBatch(object):
         with _CLEAN_LOCK:
             stale = set(f for f, q in zip(frames, seqs)
                         if _dirty_since(key, q, f))
-        # Built before an edit marked them dirty: not written (BUILD 258).
+        # Built before an edit marked them dirty: not written.
         # A dirty JPEG is never shown, and the row there may already hold
         # the edit's own result (a relocated clean frame); the edit's queued
         # mark dirties an old row.

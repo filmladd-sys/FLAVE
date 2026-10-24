@@ -1,5 +1,5 @@
 # sequence_resize.py
-# BUILD 316: Sequence Settings resolution presets and the rescale that runs
+# Sequence Settings resolution presets and the rescale that runs
 # when an existing sequence changes size (sequence_add.SequenceAddDialog).
 # ASCII only.
 #
@@ -15,7 +15,7 @@
 #     (a footage clip's 100% is its native pixel size, so it must grow by k)
 # Video / image clips with no scale key (and keyless scale keyframe clips)
 # stay at their native 100% size, centered when they have no position key:
-# nothing is added for them (user decision, BUILD 316).
+# nothing is added for them (user decision).
 # Left alone: crops (source px), captions, opacity, color, rotate, volume,
 # sequence clips, keys of scale keyframe clips that govern only text clips
 # (text is drawn on a sequence-size canvas with its font already scaled).
@@ -24,9 +24,9 @@ import math
 
 # (label, width, height) in drop-down order
 PRESETS = (
-    # BUILD 322: 480p presets, square pixels (Wide: 480 * 16 / 9 = 853.33,
+    # 480p presets, square pixels (Wide: 480 * 16 / 9 = 853.33
     # rounded to the even 854 the encoders need; aspect 1.779 vs 1.778)
-    # BUILD 324: NTSC is the real 720x480 frame (3:2), still square pixels;
+    # NTSC is the real 720x480 frame (3:2), still square pixels
     # non-square-pixel footage is stretched to its display size on playback
     ("NTSC 480p (720x480)", 720, 480),
     ("Wide 480p (854x480)", 854, 480),

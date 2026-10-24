@@ -30,11 +30,11 @@ class CaptionEditDialog(QDialog):
         form.addRow("Text:", self.text_edit)
         self.font_edit = QLineEdit(values.get("font_family") or DEFAULT_FONT_FAMILY)
         form.addRow("Font family:", self.font_edit)
-        # BUILD 104: NULL font size stays blank (player default size)
+        # NULL font size stays blank (player default size)
         self.size_edit = QLineEdit(self._blank(values.get("font_size")))
         self.size_edit.setPlaceholderText("default")
         form.addRow("Font size:", self.size_edit)
-        # BUILD 103: NULL position stays blank (player default); clear a
+        # NULL position stays blank (player default); clear a
         # field to return that axis to default
         self.x_edit = QLineEdit(self._blank(values.get("pos_x")))
         self.x_edit.setPlaceholderText("default (center)")

@@ -1,21 +1,21 @@
 # sequence_timeline_rubber.py
-# BUILD 148: rubber-band selection on the Sequence Timeline track rows.
-# BUILD 149: on the LEFT button. A left-press in empty clip-area space (no
+# Rubber-band selection on the Sequence Timeline track rows.
+# On the LEFT button. A left-press in empty clip-area space (no
 # clip body / edge, key box or marker under the mouse; never in slice
 # mode) arms it. Moving past the drag threshold draws a white-bordered box
 # (PlayheadOverlay paints tl._rubber_rect) that follows the mouse; the
 # release selects every clip (video, audio, image, caption, keyframe)
 # whose painted bounds intersect the box, replacing the selection. A plain
-# left-click (no drag past the threshold) is unchanged. The BUILD 148
+# left-click (no drag past the threshold) is unchanged. The
 # right-button arm, its menu-on-release and the context-menu swallowing
-# were removed: right-click opens the menu through Qt as before BUILD 148,
+# were removed: right-click opens the menu through Qt as before,
 # and a right-drag draws nothing.
-# BUILD 150: the box also selects the link partners of the clips it
+# The box also selects the link partners of the clips it
 # touches; the selection (yellow borders) follows the box live while
 # dragging; dragging into / past the left or right edge scrolls the view
 # (scrub edge rule, stops at frame 0 / the sequence end) with the box
 # anchored in sequence frames.
-# BUILD 336: Shift+left-drag adds the box (and link partners) onto the
+# Shift+left-drag adds the box (and link partners) onto the
 # selection instead of replacing it. The kept ids are snapshotted when the
 # box is armed, so each new drag while Shift is still held starts a fresh
 # box and adds again. Mouse release does not end that. Releasing Shift
@@ -29,7 +29,7 @@ from sequence_timeline_ruler import CLIPS_COL
 
 def _empty_space(tl, pos):
     # Empty track space inside the Clips area: not a clip, clip edge, key
-    # box or marker (BUILD 149: those keep their own left-press drags)
+    # box or marker (those keep their own left-press drags)
     if tl._x_in_clips(pos) < 0:
         return False
     if tl._hit_key(pos) is not None or tl._hit_marker(pos) is not None:
@@ -47,7 +47,7 @@ def _clips_span(tl):
 
 
 def _box(tl):
-    # BUILD 150: the anchor is kept in sequence frames (rb["frame"]), so the
+    # The anchor is kept in sequence frames (rb["frame"]), so the
     # box keeps its start while the view scrolls; the moving corner is the
     # mouse, held inside the visible Clips area
     rb = tl._rubber
@@ -86,7 +86,7 @@ def clips_in_rect(tl, rect):
 
 
 def clips_with_partners(tl, clips):
-    # BUILD 150: the box's clips plus their link-group partners (the same
+    # The box's clips plus their link-group partners (the same
     # _linked_clips the plain click uses), box order first, no duplicates
     out = []
     seen = set()
@@ -99,7 +99,7 @@ def clips_with_partners(tl, clips):
 
 
 def _order_adding(base, hits):
-    # BUILD 336: prior selection first, then clips this box hits that are
+    # Prior selection first, then clips this box hits that are
     # not already in it. base is the snapshot from when the box was armed,
     # so shrinking the box drops only this box's clips.
     order = []
@@ -112,11 +112,11 @@ def _order_adding(base, hits):
 
 
 def select_rect(tl, rect, live=False, base=None):
-    # Replace the selection with the clips in rect and (BUILD 150) their
+    # Replace the selection with the clips in rect and their
     # link partners; an empty box clears the selection, like a click on
     # empty space. live=True (during the drag): the selection borders
     # follow the box; the edit actions update on the release.
-    # BUILD 336: base is the selection to keep (Shift held when the box
+    # Base is the selection to keep (Shift held when the box
     # was armed). None replaces, the same as a plain drag.
     clips = clips_with_partners(tl, clips_in_rect(tl, rect))
     order = [c[0] for c in clips]
@@ -132,7 +132,7 @@ def select_rect(tl, rect, live=False, base=None):
     return clips
 
 
-# BUILD 150: edge auto-scroll while the box is dragged, with the scrub's
+# Edge auto-scroll while the box is dragged, with the scrub's
 # pan rule (sequence_timeline_ruler.scrub_edge: pans by the mouse travel
 # into / past the margin, plus a timer tick while held there; stops at
 # frame 0 and at the end of the sequence). RUBBER_EDGE_PX: the margin
@@ -222,12 +222,12 @@ def _finish(tl, rb):
 
 
 def rubber_event(tl, obj, event, was_slice=False):
-    # BUILD 149: left button. Viewport events. True = consumed, None = not
+    # Left button. Viewport events. True = consumed, None = not
     # ours (the normal handling runs). The press is not consumed here, so
     # a plain left-click on empty space does what it did before (clear the
     # selection); only a drag past the threshold becomes a box. Right-click
     # is not handled here at all (the track / empty-space menu opens
-    # through Qt as before BUILD 148).
+    # through Qt as before).
     etype = event.type()
     rb = getattr(tl, "_rubber", None)
     if etype == QEvent.MouseButtonPress:
@@ -246,7 +246,7 @@ def rubber_event(tl, obj, event, was_slice=False):
             return None
         left, _right = _clips_span(tl)
         frame = tl.view_start_frame + (pos.x() - left) / float(tl.pixels_per_frame)
-        # BUILD 336: snapshot before the press falls through. A second
+        # Snapshot before the press falls through. A second
         # drag while Shift is still held adds onto this, including clips
         # a previous box in this Shift hold already selected.
         mods = event.modifiers() | QApplication.queryKeyboardModifiers()

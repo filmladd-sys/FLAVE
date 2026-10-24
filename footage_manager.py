@@ -15,15 +15,15 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QPoint, QMimeData
 from PySide6.QtGui import QAction, QDrag, QCursor
 
-PXA_COL = 10  # BUILD 327: logical column of PxA (after Codec)
-FPS_COL = 11   # BUILD 272: logical column of FPS (shown after Size)
+PXA_COL = 10  # Logical column of PxA (after Codec)
+FPS_COL = 11   # Logical column of FPS (shown after Size)
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 VIDEO_EXTENSIONS = (".mov", ".mp4", ".mkv", ".avi", ".m4v", ".webm")
 
 
 def footage_usage(cur, footage_id):
-    # BUILD 235: [(sequence_id, name)] of sequences with clips of this
+    # [(sequence_id, name)] of sequences with clips of this
     # footage (any proxy of it is the same footage row; sequence clips carry
     # footage_id NULL and never match), by sequence id
     rows = cur.execute(
@@ -202,7 +202,7 @@ class FootageManager(QMainWindow):
         # Columns: 0 Icon, 1 Name, 2 #Proxies, 3 Proxy Default, 4 Type,
         # 5 Size, 6 Length, 7 Height, 8 Width, 9 Codec, 10 PxA, 11 FPS
         # (FPS is appended and shown right after Size by moving its header
-        # section, BUILD 272; PxA sits after Codec, BUILD 327)
+        # section; PxA sits after Codec)
         self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels(
             ["Icon", "Name", "#Proxies", "Proxy Default", "Type", "Size", "Length",
@@ -241,14 +241,14 @@ class FootageManager(QMainWindow):
     def _create_menus(self):
         menubar = self.menuBar()
 
-        # Top-level Import (BUILD 299: kept as self._import_action and also
+        # Top-level Import (: kept as self._import_action and also
         # shown at the top of the table's right-click menu)
         import_action = QAction("Import", self)
         import_action.triggered.connect(self._import_footage)
         menubar.addAction(import_action)
         self._import_action = import_action
 
-        # Slug menu (BUILD 304: generated PNGs, footage_slug.py); the same
+        # Slug menu (generated PNGs, footage_slug.py); the same
         # QMenu is the right-click menu's Slug submenu
         slug_menu = menubar.addMenu("Slug")
         bar_action = QAction("Color Bar", self)
@@ -372,20 +372,14 @@ class FootageManager(QMainWindow):
     def _media_info(self):
         # {footage_id: (height, width, codec, fps, pixel_aspect)}; {} on a
         # read error. pixel_aspect is the stored DB text (or None).
-        # BUILD 272: video footage imported before fps was stored is probed
+        # Video footage imported before fps was stored is probed
         # once here (ffprobe) and its fps saved.
         try:
             conn = sqlite3.connect(self.project_db)
             try:
-                try:
-                    rows = conn.execute(
-                        "SELECT id, height, width, codec, fps, file_type, "
-                        "original_path, pixel_aspect FROM footage").fetchall()
-                except Exception:
-                    # Pre-BUILD 326 DB (column not yet migrated)
-                    rows = [r + (None,) for r in conn.execute(
-                        "SELECT id, height, width, codec, fps, file_type, "
-                        "original_path FROM footage").fetchall()]
+                rows = conn.execute(
+                    "SELECT id, height, width, codec, fps, file_type, "
+                    "original_path, pixel_aspect FROM footage").fetchall()
             finally:
                 conn.close()
         except Exception:
@@ -402,7 +396,7 @@ class FootageManager(QMainWindow):
             if (ftype or "").lower() in IMAGE_EXTS:
                 fps = None
             elif w and path and str(path).lower().endswith(VIDEO_EXTENSIONS):
-                # BUILD 325/326: non-square-pixel video shows its display
+                # Non-square-pixel video shows its display
                 # width (720x480 SAR 32:27 -> 854); stored width unchanged.
                 # Prefer footage.pixel_aspect; probe + write back only when
                 # the DB value is missing.
@@ -429,13 +423,13 @@ class FootageManager(QMainWindow):
             item = QTableWidgetItem("" if v is None else str(v))
             item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 7 + k, item)
-        # BUILD 327: PxA from footage.pixel_aspect (DB only, no re-probe);
+        # PxA from footage.pixel_aspect (DB only, no re-probe)
         # blank for stills / audio / NULL, same as Codec and FPS
         pa = vals[4] if vals is not None and len(vals) > 4 else None
         item = QTableWidgetItem("" if not pa else str(pa))
         item.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(row, PXA_COL, item)
-        # BUILD 272: FPS, up to 3 decimals without trailing zeros (29.97,
+        # FPS, up to 3 decimals without trailing zeros (29.97
         # 23.976, 30); empty for images, audio and unknown rates
         fps = vals[3] if vals is not None and len(vals) > 3 else None
         text = ("%.3f" % float(fps)).rstrip("0").rstrip(".") if fps else ""
@@ -488,7 +482,7 @@ class FootageManager(QMainWindow):
         self.refresh()
 
     def _cell_clicked(self, row, col):
-        # #Proxies cell (video / image only): cellClicked fires for a click
+        # Proxies cell (video / image only): cellClicked fires for a click
         # anywhere in the cell; audio cells carry no id and stay inert
         if col == 3:
             self._proxy_default_menu(row)
@@ -509,9 +503,9 @@ class FootageManager(QMainWindow):
             QMessageBox.warning(self, "Proxies", f"Could not open Proxies: {e}")
 
     def _row_context_menu(self, pos):
-        # BUILD 299: Import (the menu bar's own QAction, so its triggered
+        # Import (the menu bar's own QAction, so its triggered
         # handler runs) is first, then the menu bar's Slug menu as a
-        # submenu (BUILD 304); on a footage row they are followed by a
+        # submenu; on a footage row they are followed by a
         # separator, Replace and Remove. Empty space shows Import and Slug.
         footage_id = None
         item = self.table.itemAt(pos)
@@ -539,7 +533,7 @@ class FootageManager(QMainWindow):
         QMessageBox.information(self, "Replace", f"Replace stub for id {footage_id}")
 
     def _remove_footage(self, footage_id):
-        # BUILD 234: the only removal path (row context menu Remove; no menu
+        # The only removal path (row context menu Remove; no menu
         # item or Delete key). Refused while any Generate Captions run is active
         try:
             from sequence_timeline_captions import any_caption_job_active
@@ -550,7 +544,7 @@ class FootageManager(QMainWindow):
             QMessageBox.information(self, "Remove", "Generate Captions is running; "
                                     "try again when it is done.")
             return
-        # BUILD 235: footage used in sequences -> warning naming them (Cancel
+        # Footage used in sequences -> warning naming them (Cancel
         # default / Confirm Remove); unused -> the plain Yes / No question
         try:
             conn = sqlite3.connect(self.project_db)

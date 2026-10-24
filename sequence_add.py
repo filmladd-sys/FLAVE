@@ -43,11 +43,11 @@ class SequenceAddDialog(QDialog):
         self.setWindowTitle("Sequence Settings" if self.edit_mode else "Add Sequence")
         self.project_db = project_db or _get_global_setting("current_project", "")
         self.new_id = None
-        # BUILD 316: set by a Save that changed the size (rescaled)
+        # Set by a Save that changed the size (rescaled)
         self.size_changed = False
         self.rescale_stats = None
         self._loaded_size = None
-        # BUILD 320: Preview Size override loaded (None = Project Default)
+        # Preview Size override loaded (None = Project Default)
         self._loaded_preview = None
         self.preview_changed = False
 
@@ -56,7 +56,7 @@ class SequenceAddDialog(QDialog):
             # Prefill the next free SequenceNN (editable)
             self.name_edit.setText(next_sequence_name(self.project_db))
 
-        # BUILD 316: resolution drop-down (sequence_resize.PRESETS) instead
+        # Resolution drop-down (sequence_resize.PRESETS) instead
         # of Width / Height fields; item data = (width, height). A loaded
         # size that matches no preset adds a "Custom (WxH)" item at the end.
         from sequence_resize import PRESETS, DEFAULT_SIZE, preset_index
@@ -66,7 +66,7 @@ class SequenceAddDialog(QDialog):
         self.size_combo.setCurrentIndex(preset_index(*DEFAULT_SIZE) or 0)
         self.fps_edit = QLineEdit("29.97")
 
-        # BUILD 320: Preview Size override (sequences.preview_size); item
+        # Preview Size override (sequences.preview_size); item
         # data = percent, None = Project Default (the project's Preview Size)
         from sequence_preview import PREVIEW_SIZE_CHOICES, preview_size_percent
         self.preview_combo = QComboBox()
@@ -135,7 +135,7 @@ class SequenceAddDialog(QDialog):
         self.size_combo.setCurrentIndex(i)
 
     def selected_preview(self):
-        # BUILD 320: the chosen Preview Size override, None = Project Default
+        # The chosen Preview Size override, None = Project Default
         data = self.preview_combo.currentData()
         return int(data) if data is not None else None
 
@@ -164,7 +164,7 @@ class SequenceAddDialog(QDialog):
             QMessageBox.warning(self, "Add Sequence", "FPS must be greater than 0")
             return
 
-        # BUILD 316: an existing sequence changing size. Another aspect
+        # An existing sequence changing size. Another aspect
         # ratio is not implemented: popup, nothing saved, dialog stays open.
         # Same aspect: one undo step, then the size and every sequence-pixel
         # value (sequence_resize.rescale_sequence) in one transaction.
@@ -201,7 +201,7 @@ class SequenceAddDialog(QDialog):
                     (name, width, height, fps)
                 )
                 self.new_id = cur.lastrowid
-            # BUILD 320: Preview Size override, written only when it changed
+            # Preview Size override, written only when it changed
             # (Project Default on a new sequence leaves the column NULL)
             if preview_set:
                 cur.execute("UPDATE sequences SET preview_size = ? WHERE id = ?",
@@ -215,7 +215,7 @@ class SequenceAddDialog(QDialog):
             return
 
         if preview_set and self.edit_mode:
-            # BUILD 320: a new Preview Size for this sequence: wake the
+            # A new Preview Size for this sequence: wake the
             # preview worker like a Project Settings Preview Size change (its
             # size check marks this sequence's stored frames dirty)
             self.preview_changed = True
@@ -233,7 +233,7 @@ def add_sequence(parent=None, project_db=None):
 
 
 def refresh_open_views(project_db, sequence_id, message):
-    # BUILD 316: after a size change, the open timeline of that sequence
+    # After a size change, the open timeline of that sequence
     # reloads and its open Sequence Player is rebuilt at the new size
     # (sequence_player.sync_player_size); stored previews are marked dirty
     # by the preview worker's size check (_sync_preview_size)

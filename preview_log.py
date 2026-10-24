@@ -1,4 +1,4 @@
-# BUILD 247: console timing of preview generation startup. Lines look like
+# Console timing of preview generation startup. Lines look like
 #   [preview] +0.123s <step> (dt 0.045s)
 # +: seconds since the session start (an F5 refresh request, or the start
 # of a full worker pass: refresh or Play fill); dt: seconds since the
@@ -16,7 +16,7 @@ import time
 # RENDER_LOG: the one switch for the verbose render / preview console
 # instrumentation: these [preview] lines, the WORKER refresh states /
 # decoders / plan / range / pool / batch lines, DECODER open / close and
-# RENDER decoders, and (BUILD 312) the one-line 'WORKER preview' pass and
+# RENDER decoders, and the one-line 'WORKER preview' pass and
 # 'WORKER render' summaries. False (default): silent; errors,
 # cancellations, warnings and the VRAM fatal stop still print. Set True
 # to re-enable the instrumentation.

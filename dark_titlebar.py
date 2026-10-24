@@ -1,5 +1,5 @@
 # dark_titlebar.py
-# BUILD 115: immersive dark title bar on Windows in dark mode.
+# Immersive dark title bar on Windows in dark mode.
 # DwmSetWindowAttribute(hwnd, 20 DWMWA_USE_IMMERSIVE_DARK_MODE, BOOL) on
 # every top-level window's HWND; if 20 fails (Windows 10 before 20H1) it
 # is retried once with 19, the older value of the same attribute. No
@@ -21,7 +21,7 @@ DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19     # Windows 10 1809 .. 1909
 SWP_REDRAW_FRAME = 0x0020 | 0x0002 | 0x0001 | 0x0004 | 0x0010
 # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
 
-SKIP_PROPS = ("_ladd_snapshot_skip",)      # the BUILD 114 snapshot helper
+SKIP_PROPS = ("_ladd_snapshot_skip",)      # the snapshot helper
 TITLE_TYPES = (Qt.Window, Qt.Dialog)       # window types with a title bar
 
 _state = {"dark": None}                    # last applied theme (None: unknown)

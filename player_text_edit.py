@@ -1,4 +1,4 @@
-# BUILD 310: on-player interaction with WYSIWYG text clips in the Sequence
+# On-player interaction with WYSIWYG text clips in the Sequence
 # Player (a QWindow; sequence_player.py forwards its mouse events here).
 #
 # Target: the one selected text clip (text_style_window.selected_text_clip_id)

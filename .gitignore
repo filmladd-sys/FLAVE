@@ -9,3 +9,9 @@ __pycache__/
 *.tmp
 flave_capture.json
 models/
+# Local / env (not part of the app)
+.venv/
+venv/
+.env
+.DS_Store
+Thumbs.db

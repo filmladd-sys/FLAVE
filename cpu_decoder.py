@@ -1,5 +1,5 @@
 # cpu_decoder.py
-# BUILD 342: when NVDEC cannot open one footage file, decode that file on
+# When NVDEC cannot open one footage file, decode that file on
 # the CPU. The decision is per path (this file only). Other footage keeps
 # opening NVDEC. There is no process-wide CPU mode.
 # Software decode is ffmpeg (the same CPU decode the proxy generator
@@ -280,7 +280,7 @@ class CpuDecoder(object):
             # index are dropped inside ffmpeg; the pipe then yields index,
             # index + 1, ... in order.
             cmd += ["-vf", "select=gte(n\\,%d),format=rgb24" % int(index)]
-        # BUILD 343: passthrough, spelled so this ffmpeg accepts it.
+        # Passthrough, spelled so this ffmpeg accepts it.
         cmd += _output_sync_args()
         cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
         return cmd

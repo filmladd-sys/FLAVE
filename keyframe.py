@@ -12,26 +12,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# Stored on keyframe_clips.type. BUILD 147: one type per keyframe clip;
+# Stored on keyframe_clips.type. One type per keyframe clip
 # it can change only while the clip has no keys (add_key, set_clip_type).
 # KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity")
-# BUILD 147: crop_x / crop_y (source pixels, default 0, CUDA blend only)
+# Crop_x / crop_y (source pixels, default 0, CUDA blend only)
 # KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
 #                        "crop_x", "crop_y")
-# BUILD 154: gamma / brightness / contrast (color, CUDA blend only)
-# BUILD 219: rotate (degrees, default 0, CUDA blend only)
-# BUILD 222: border (border outline: width in sequence px plus an RGBA
+# Gamma / brightness / contrast (color, CUDA blend only)
+# Rotate (degrees, default 0, CUDA blend only)
+# Border (border outline: width in sequence px plus an RGBA
 # color per key, CUDA blend only). Its keys are keyframe_border rows, not
-# keyframes rows (see BORDER_TYPE). It replaces the BUILD 220 outline /
+# keyframes rows (see BORDER_TYPE). It replaces the outline /
 # outline_r / _g / _b / _a types, which are no longer offered.
-# BUILD 294: move (layer center X and Y in sequence px in one key, CUDA
+# Move (layer center X and Y in sequence px in one key, CUDA
 # blend only). Its keys are keyframe_move rows (see MOVE_TYPE).
-# BUILD 295: crop_xy (crop_x and crop_y in source pixels in one key, CUDA
+# Crop_xy (crop_x and crop_y in source pixels in one key, CUDA
 # blend only). Its keys are keyframe_crop rows (see CROP_XY_TYPE).
-# BUILD 296: crop_edges (top, bottom, left, right crop in source pixels in
+# Crop_edges (top, bottom, left, right crop in source pixels in
 # one key, CUDA blend only). Its keys are keyframe_crop_edges rows (see
 # CROP_EDGES_TYPE).
-# BUILD 337: chroma (key color r, g, b plus a tolerance, CUDA blend only).
+# Chroma (key color r, g, b plus a tolerance, CUDA blend only).
 # Its keys are keyframe_chroma rows (see CHROMA_TYPE). Jokey classic
 # chroma, not a matte: pixels near the key color go transparent.
 KEYFRAME_CLIP_TYPES = ("position X", "position Y", "scale", "volume", "opacity",
@@ -45,42 +45,42 @@ UNLINKED_MARK = "(unlinked)"
 KEYFRAME_TYPE_CHOICES = (
     ("X", "position X"),
     ("Y", "position Y"),
-    ("Move", "move"),                 # BUILD 294
+    ("Move", "move"),
     ("Scale", "scale"),
     ("Volume", "volume"),
     ("Opacity", "opacity"),
-    ("X Crop", "crop_x"),     # BUILD 147
-    ("Y Crop", "crop_y"),     # BUILD 147
-    ("XY Crop", "crop_xy"),           # BUILD 295
-    ("Edge Crop", "crop_edges"),      # BUILD 296
-    ("Chroma Key", "chroma"),         # BUILD 337
-    ("Gamma", "gamma"),               # BUILD 154
-    ("Brightness", "brightness"),     # BUILD 154
-    ("Contrast", "contrast"),         # BUILD 154
-    ("Rotate", "rotate"),             # BUILD 219
-    ("Border", "border"),             # BUILD 222
+    ("X Crop", "crop_x"),
+    ("Y Crop", "crop_y"),
+    ("XY Crop", "crop_xy"),
+    ("Edge Crop", "crop_edges"),
+    ("Chroma Key", "chroma"),
+    ("Gamma", "gamma"),
+    ("Brightness", "brightness"),
+    ("Contrast", "contrast"),
+    ("Rotate", "rotate"),
+    ("Border", "border"),
 )
 
 # Value range per stored type (others unbounded). Volume and opacity are
 # percent 0..100.
 # KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0)}
-# BUILD 154: gamma 0.1..5 (1 = none), brightness percent -100..100 (0 =
+# Gamma 0.1..5 (1 = none), brightness percent -100..100 (0 =
 # none), contrast 0..5 (1 = none); the blend clamps the same way
 KEY_VALUE_RANGES = {"volume": (0.0, 100.0), "opacity": (0.0, 100.0),
                     "gamma": (0.1, 5.0), "brightness": (-100.0, 100.0),
                     "contrast": (0.0, 5.0), "border": (0.0, 1000.0),
                     "chroma": (0.0, 255.0)}
-# BUILD 219: rotate is degrees and unbounded (any angle; 360 = a full
+# Rotate is degrees and unbounded (any angle; 360 = a full
 # turn, so keys like 0 -> 720 spin twice). Its Add / Edit Key spin box
-# steps 1 degree; BUILD 222: border px steps 1 (whole pixels; its R, G, B,
-# A fields also step 1); BUILD 294: move X and Y step 1 (unbounded);
-# every other type steps 0.1 (BUILD 295: crop_xy X and Y too, unbounded
-# like crop_x / crop_y; BUILD 296: crop_edges Top, Bottom, Left, Right
-# too; BUILD 337: chroma R steps 1, and its G, B and Tolerance fields
+# steps 1 degree;: border px steps 1 (whole pixels; its R, G, B
+# A fields also step 1);: move X and Y step 1 (unbounded)
+# every other type steps 0.1 (: crop_xy X and Y too, unbounded
+# like crop_x / crop_y;: crop_edges Top, Bottom, Left, Right
+# too;: chroma R steps 1, and its G, B and Tolerance fields
 # step 1).
 KEY_VALUE_STEPS = {"rotate": 1.0, "border": 1.0, "move": 1.0, "chroma": 1.0}
 
-# BUILD 222: a "border" clip's keys live in keyframe_border (id,
+# A "border" clip's keys live in keyframe_border (id
 # keyframe_clip_id, frame, px, r, g, b, a; frame absolute like
 # keyframes.frame), every other type's in keyframes (id, keyframe_clip_id,
 # frame, value). Both are keyed by keyframe_clip_id, so a clip-level edit
@@ -88,20 +88,20 @@ KEY_VALUE_STEPS = {"rotate": 1.0, "border": 1.0, "move": 1.0, "chroma": 1.0}
 # (only the clip's own table has its rows). In memory a border clip's keys
 # stay (key_id, frame, px) in entry[9], so draw / hit / drag / graph work
 # as for any type, and entry[11] maps key_id -> (r, g, b, a).
-# BUILD 294: a "move" clip's keys live in keyframe_move (id,
+# A "move" clip's keys live in keyframe_move (id
 # keyframe_clip_id, frame, x, y; x / y the absolute layer center in
 # sequence px like position X / Y). In memory its keys stay (key_id,
 # frame, x) in entry[9] and entry[11] maps key_id -> y.
-# BUILD 295: a "crop_xy" clip's keys live in keyframe_crop (same columns;
+# A "crop_xy" clip's keys live in keyframe_crop (same columns
 # x / y the crop_x / crop_y values in source pixels, 0 = no crop), in
 # memory the same way as move. XY_KEY_TYPES are the types with an x and y
 # per key.
-# BUILD 296: a "crop_edges" clip's keys live in keyframe_crop_edges (id,
+# A "crop_edges" clip's keys live in keyframe_crop_edges (id
 # keyframe_clip_id, frame, top, bottom, left, right; each edge crop in
 # source pixels of the original footage, 0 = no crop). In memory its keys
 # stay (key_id, frame, top) in entry[9] and entry[11] maps key_id ->
 # (bottom, left, right).
-# BUILD 337: a "chroma" clip's keys live in keyframe_chroma (id,
+# A "chroma" clip's keys live in keyframe_chroma (id
 # keyframe_clip_id, frame, r, g, b, tolerance). r / g / b are the key
 # color, 0..255. tolerance is Euclidean distance in that same RGB space
 # (0 = only the exact color, 442 = every pixel). In memory its keys stay
@@ -169,14 +169,14 @@ def border_rgba(clip, key_id):
 
 
 def default_chroma_gbt():
-    # BUILD 337: (g, b, tolerance) of a new chroma key. With R = 0 this is
+    # (g, b, tolerance) of a new chroma key. With R = 0 this is
     # green 0, 255, 0 and tolerance 80 (see CHROMA_DEFAULT_TOLERANCE).
     return (CHROMA_DEFAULT_G, CHROMA_DEFAULT_B, CHROMA_DEFAULT_TOLERANCE)
 
 
 def key_y(clip, key_id):
-    # BUILD 294: y of a move (BUILD 295: or crop_xy) clip's key; BUILD 296:
-    # (bottom, left, right) of a crop_edges clip's key; BUILD 337:
+    # Y of a move (or crop_xy) clip's key;:
+    # (bottom, left, right) of a crop_edges clip's key;:
     # (g, b, tolerance) of a chroma clip's key. None if unknown or
     # another type.
     if len(clip) <= 10 or clip[10] not in XY_KEY_TYPES + (CROP_EDGES_TYPE,
@@ -243,13 +243,13 @@ def load_keyframe_clips(cur, sequence_id, clips):
     # Into clips_by_track like captions: list
     # [mem_id, None, start, length, name, enabled, solo, in_src, link_id,
     #  keys, type] where keys is [(key_id, absolute_frame, value), ...]
-    # BUILD 222: a border clip's entry also has [11] = {key_id: (r, g, b,
+    # A border clip's entry also has [11] = {key_id: (r, g, b
     # a)}; its keys come from keyframe_border with value = px
-    # BUILD 294: a move clip's entry has [11] = {key_id: y}; its keys come
-    # from keyframe_move with value = x. BUILD 295: crop_xy the same from
-    # keyframe_crop. BUILD 296: a crop_edges clip's entry has [11] =
+    # A move clip's entry has [11] = {key_id: y}; its keys come
+    # from keyframe_move with value = x. Crop_xy the same from
+    # keyframe_crop. A crop_edges clip's entry has [11] =
     # {key_id: (bottom, left, right)}; its keys come from
-    # keyframe_crop_edges with value = top. BUILD 337: a chroma clip's
+    # keyframe_crop_edges with value = top. A chroma clip's
     # entry has [11] = {key_id: (g, b, tolerance)}; its keys come from
     # keyframe_chroma with value = r
     by_db = {}
@@ -329,10 +329,10 @@ def load_keyframe_clips(cur, sequence_id, clips):
 
 
 def format_key_value(value, stored_type, y=None):
-    # Position X/Y, scale and volume: two decimal places. BUILD 294: a move
-    # (BUILD 295: or crop_xy) key with its y given shows "x, y". BUILD 296:
+    # Position X/Y, scale and volume: two decimal places. A move
+    # (or crop_xy) key with its y given shows "x, y".:
     # a crop_edges key with y = (bottom, left, right) shows "t, b, l, r".
-    # BUILD 337: a chroma key (value = r, y = (g, b, tolerance)) shows a
+    # A chroma key (value = r, y = (g, b, tolerance)) shows a
     # short "r,g,b" plus tolerance, e.g. "0,255,0 80.00".
     if (stored_type == CHROMA_TYPE and isinstance(y, (tuple, list))
             and len(y) >= 3):
@@ -446,7 +446,7 @@ def position_y_offset(pos_y_clips, clip_link_id, frame, clip_order, seq_h):
 
 def move_offset_for_link(move_x_clips, move_y_clips, clip_link_id, frame,
                          clip_order, seq_w, seq_h):
-    # BUILD 294: linked type-move keyframe clip above this clip (same rule
+    # Linked type-move keyframe clip above this clip (same rule
     # as position X / Y): (dx, dy) = (x - seq_w/2, y - seq_h/2) with x and y
     # the absolute layer center, each axis linear between its keys and flat
     # outside them. move_x_clips / move_y_clips are the same clips with
@@ -462,7 +462,7 @@ def move_offset_for_link(move_x_clips, move_y_clips, clip_link_id, frame,
 
 def crop_xy_for_link(crop_x_clips, crop_y_clips, clip_link_id, frame,
                      clip_order):
-    # BUILD 295: linked type-crop_xy keyframe clip above this clip (same
+    # Linked type-crop_xy keyframe clip above this clip (same
     # rule as crop_x / crop_y): (crop_x, crop_y) in source pixels of the
     # original footage, 0 = no crop (the same neutral as the crop_x /
     # crop_y types), each axis linear between its keys and flat outside
@@ -473,7 +473,7 @@ def crop_xy_for_link(crop_x_clips, crop_y_clips, clip_link_id, frame,
 
 
 def crop_edges_for_link(edge_clips, clip_link_id, frame, clip_order):
-    # BUILD 296: linked type-crop_edges keyframe clip above this clip (same
+    # Linked type-crop_edges keyframe clip above this clip (same
     # rule as crop_x / crop_y): (top, bottom, left, right) crop in source
     # pixels of the original footage, 0 = no crop, each edge linear between
     # its keys and flat outside them. edge_clips: the four lists of
@@ -491,9 +491,9 @@ def crop_edges_for_link(edge_clips, clip_link_id, frame, clip_order):
 
 
 def chroma_for_link(chroma_clips, clip_link_id, frame, clip_order):
-    # BUILD 337: linked type-chroma keyframe clips above this clip (same
+    # Linked type-chroma keyframe clips above this clip (same
     # link-below rule as crop_edges: same link_id, track order strictly
-    # above the clip, covering frame). BUILD 339: every such clip, not
+    # above the clip, covering frame). Every such clip, not
     # only the nearest. Each entry is (r, g, b, tolerance), channels
     # linear between that clip's keys and flat outside them. chroma_clips
     # is the four lists from collect_chroma_clips (r, g, b, tolerance),
@@ -565,7 +565,7 @@ def opacity_for_link(opacity_clips, clip_link_id, frame, clip_order):
 
 
 def crop_offset_for_link(crop_clips, clip_link_id, frame, clip_order):
-    # BUILD 147: linked type-crop_x / crop_y keyframe above this clip (same
+    # Linked type-crop_x / crop_y keyframe above this clip (same
     # rule as scale / position): the crop offset in source pixels of the
     # original footage (0 = none), or None when there is no effect.
     keys = _pick_above_keyframe(crop_clips, clip_link_id, frame, clip_order)
@@ -578,7 +578,7 @@ def crop_offset_for_link(crop_clips, clip_link_id, frame, clip_order):
 
 
 def color_value_for_link(color_clips, clip_link_id, frame, clip_order):
-    # BUILD 154: linked type-gamma / brightness / contrast keyframe above
+    # Linked type-gamma / brightness / contrast keyframe above
     # this clip (same rule as scale / position / crop): the raw key value
     # (linear, flat outside the first / last key), or None = no effect.
     keys = _pick_above_keyframe(color_clips, clip_link_id, frame, clip_order)
@@ -617,7 +617,7 @@ def _collect_keyframe_clips_of_type(clips_by_track, track_order, stored_type):
 
 
 def rotate_degrees_for_link(rotate_clips, clip_link_id, frame, clip_order):
-    # BUILD 219: linked type-rotate keyframe above this clip (same rule as
+    # Linked type-rotate keyframe above this clip (same rule as
     # scale / position / crop): the angle in degrees (positive = clockwise
     # on screen, about the layer center), or None when there is no effect.
     keys = _pick_above_keyframe(rotate_clips, clip_link_id, frame, clip_order)
@@ -631,7 +631,7 @@ def rotate_degrees_for_link(rotate_clips, clip_link_id, frame, clip_order):
 
 def outline_for_link(outline_clips, color_clips, clip_link_id, frame,
                      clip_order):
-    # BUILD 222: linked type-border keyframe clip above this clip (same rule
+    # Linked type-border keyframe clip above this clip (same rule
     # as scale / position / crop / rotate): (width, r, g, b, a) with width
     # the outline thickness in whole sequence pixels (px rounded, >= 1) and
     # r, g, b, a 0..255 ints. outline_clips holds each border clip with its
@@ -680,43 +680,37 @@ def collect_opacity_clips(clips_by_track, track_order=None):
 
 
 def collect_crop_x_clips(clips_by_track, track_order=None):
-    # BUILD 147
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "crop_x")
 
 
 def collect_crop_y_clips(clips_by_track, track_order=None):
-    # BUILD 147
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "crop_y")
 
 
 def collect_gamma_clips(clips_by_track, track_order=None):
-    # BUILD 154
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "gamma")
 
 
 def collect_brightness_clips(clips_by_track, track_order=None):
-    # BUILD 154
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "brightness")
 
 
 def collect_contrast_clips(clips_by_track, track_order=None):
-    # BUILD 154
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "contrast")
 
 
 def collect_rotate_clips(clips_by_track, track_order=None):
-    # BUILD 219
     return _collect_keyframe_clips_of_type(
         clips_by_track, track_order, "rotate")
 
 
 def collect_outline_clips(clips_by_track, track_order=None):
-    # BUILD 222: (outline_clips, (r_clips, g_clips, b_clips, a_clips)) from
+    # (outline_clips, (r_clips, g_clips, b_clips, a_clips)) from
     # the linked border clips: the same (link_id, in, out, keys, order)
     # entries, keys (key_id, frame, px) and per channel (key_id, frame, c)
     # with c from entry[11]. The snapshot keeps them at [14] .. [18].
@@ -742,19 +736,19 @@ def collect_outline_clips(clips_by_track, track_order=None):
 
 
 def collect_move_clips(clips_by_track, track_order=None):
-    # BUILD 294: the move clips' (x_clips, y_clips); the snapshot keeps
+    # The move clips' (x_clips, y_clips); the snapshot keeps
     # them at [20] and [21]
     return collect_xy_clips(clips_by_track, track_order, MOVE_TYPE)
 
 
 def collect_crop_xy_clips(clips_by_track, track_order=None):
-    # BUILD 295: the crop_xy clips' (x_clips, y_clips); the snapshot keeps
+    # The crop_xy clips' (x_clips, y_clips); the snapshot keeps
     # them at [22] and [23]
     return collect_xy_clips(clips_by_track, track_order, CROP_XY_TYPE)
 
 
 def collect_crop_edge_clips(clips_by_track, track_order=None):
-    # BUILD 296: (top_clips, bottom_clips, left_clips, right_clips) from the
+    # (top_clips, bottom_clips, left_clips, right_clips) from the
     # linked crop_edges clips: the same (link_id, in, out, keys, order)
     # entries, keys (key_id, frame, top) and per other edge (key_id, frame,
     # v) with v from entry[11]. The snapshot keeps them at [24] .. [27].
@@ -780,7 +774,7 @@ def collect_crop_edge_clips(clips_by_track, track_order=None):
 
 
 def collect_chroma_clips(clips_by_track, track_order=None):
-    # BUILD 337: (r_clips, g_clips, b_clips, tolerance_clips) from the
+    # (r_clips, g_clips, b_clips, tolerance_clips) from the
     # linked chroma clips: the same (link_id, in, out, keys, order)
     # entries, keys (key_id, frame, r) and per other channel (key_id,
     # frame, v) with v from entry[11] (g, b, tolerance). The snapshot
@@ -807,7 +801,7 @@ def collect_chroma_clips(clips_by_track, track_order=None):
 
 
 def collect_xy_clips(clips_by_track, track_order, stored_type):
-    # BUILD 294: (x_clips, y_clips) from the linked clips of an x / y type
+    # (x_clips, y_clips) from the linked clips of an x / y type
     # (XY_KEY_TYPES): the same (link_id, in, out, keys, order) entries,
     # keys (key_id, frame, x) and (key_id, frame, y) with y from entry[11]
     x_clips = []
@@ -831,7 +825,7 @@ def collect_xy_clips(clips_by_track, track_order, stored_type):
 
 
 def mark_keyframe_clip_preview_dirty(timeline, clip):
-    # BUILD 139: no mark here. The edit's refresh diffs the timeline
+    # No mark here. The edit's refresh diffs the timeline
     # snapshot (sequence_preview_diff), which includes every linked
     # keyframe clip's keys, so only the frames whose key pair / value
     # changed go dirty (between the neighbour keys of the edited key), not
@@ -850,8 +844,8 @@ def key_square_size(text, font_metrics):
 def key_mark_layout(clip_rect, frame, value, clip_start, ppf, stored_type,
                     font_metrics, y=None):
     # (text, square QRect, center_x) for one key; line is full body height.
-    # y: a move key's y (text "x, y"); BUILD 296: a crop_edges key's
-    # (bottom, left, right) (text "t, b, l, r"); BUILD 337: a chroma key's
+    # y: a move key's y (text "x, y");: a crop_edges key's
+    # (bottom, left, right) (text "t, b, l, r");: a chroma key's
     # (g, b, tolerance) (text "r,g,b tol")
     text = format_key_value(value, stored_type, y)
     w, h = key_square_size(text, font_metrics)
@@ -877,7 +871,7 @@ def graph_points(keys, stored_type, clip_start, length, ppf, left, top, height,
     # Polyline points [(x, y)] for the key value graph, or [] when there are
     # fewer than two keys or all values are equal. Flat before the first and
     # after the last key (clip in..out). value_range (low, high) replaces
-    # graph_value_range (BUILD 294: move x and y share one range).
+    # graph_value_range (move x and y share one range).
     pts = []
     for item in keys or []:
         if len(item) >= 3:
@@ -917,7 +911,7 @@ def graph_points(keys, stored_type, clip_start, length, ppf, left, top, height,
 
 
 def sticky_name_rect(text_rect, visible_rect=None, pad=4):
-    # BUILD 127: clip names are left-aligned with a small padding and stick
+    # Clip names are left-aligned with a small padding and stick
     # to the visible left edge of the Clips area when the clip starts off
     # screen; the right side stops at the clip (or visible) right edge.
     # None if no room.
@@ -934,11 +928,11 @@ def sticky_name_rect(text_rect, visible_rect=None, pad=4):
     return QRect(left, text_rect.top(), right - left + 1, text_rect.height())
 
 
-TITLE_MIN_CONTENT = 8   # BUILD 128: rows too short for bar + content: no bar
+TITLE_MIN_CONTENT = 8   # Rows too short for bar + content: no bar
 
 
 def title_heights(clip_h):
-    # BUILD 128: (title bar height, content height) for an open video /
+    # (title bar height, content height) for an open video /
     # audio / image / caption / sequence clip of height clip_h. Rows shorter
     # than TITLE_BAR_H + TITLE_MIN_CONTENT get no bar (0, clip_h).
     clip_h = int(clip_h)
@@ -959,8 +953,8 @@ def split_title_rect(clip_rect):
 
 def paint_title_bar(painter, title_rect, title, visible_rect=None):
     # Black bar, 1 px white border, white name: left-aligned, sticky to the
-    # visible left edge, elided at the right (BUILD 127). Shared by keyframe
-    # clips and (BUILD 128) the other open-track clip types.
+    # visible left edge, elided at the right. Shared by keyframe
+    # clips and the other open-track clip types.
     painter.fillRect(title_rect, QColor(0, 0, 0))
     painter.setPen(QPen(QColor(255, 255, 255)))
     painter.drawRect(title_rect.adjusted(0, 0, -1, -1))
@@ -979,18 +973,18 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
     # Caption-like body fill, plus a 15 px title bar. Keys: full-height white
     # vertical line, then a sized white square with black border and light
     # grey value text, clipped to the clip rect.
-    # BUILD 294: extra is the clip's entry[11]; for a move clip it maps
+    # Extra is the clip's entry[11]; for a move clip it maps
     # key_id -> y: the graph draws x amber and y cyan on one shared
-    # min..max of both, and each key shows "x, y". BUILD 296: for a
+    # min..max of both, and each key shows "x, y". For a
     # crop_edges clip it maps key_id -> (bottom, left, right); four lines,
-    # each key shows "t, b, l, r". BUILD 337: a chroma clip maps key_id ->
+    # each key shows "t, b, l, r". A chroma clip maps key_id ->
     # (g, b, tolerance); four lines the same way, each key shows
     # "r,g,b tol".
     body = QColor(30, 110, 110)
     painter.fillRect(clip_rect, body)
     h = min(TITLE_BAR_H, max(1, clip_rect.height()))
     title_rect = clip_rect.adjusted(0, 0, 0, -(clip_rect.height() - h))
-    # BUILD 127 / 128: shared title bar painter (unchanged look)
+    # Shared title bar painter (unchanged look)
     # title is the full caller-built text (keyframe_clip_title + speed);
     # it already carries the link state, so linked is not drawn here
     paint_title_bar(painter, title_rect, title or "", visible_rect)
@@ -1014,8 +1008,8 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
         graphs = [(keys, rng, QColor(255, 210, 90)),
                   (ykeys, rng, QColor(90, 220, 255))]
     elif stored_type in (CROP_EDGES_TYPE, CHROMA_TYPE) and isinstance(extra, dict):
-        # BUILD 296: top amber, bottom cyan, left green, right magenta on
-        # one shared min..max of all four. BUILD 337: chroma the same way
+        # Top amber, bottom cyan, left green, right magenta on
+        # one shared min..max of all four. Chroma the same way
         # (R amber, G cyan, B green, tolerance magenta).
         ys = extra
         ekeys = [[(k[0], k[1], tuple(ys.get(k[0], (0.0, 0.0, 0.0)))[i])
@@ -1048,7 +1042,7 @@ def paint_keyframe_clip(painter, clip_rect, title, keys=None,
             frame, value = item[0], item[1]
         text, sq, x, body_top = key_mark_layout(
             clip_rect, frame, value, clip_start, ppf, stored_type, fm, ky)
-        # BUILD 271: the key whose right-click menu is open is selected:
+        # The key whose right-click menu is open is selected:
         # black line and a 2 px black outline instead of white
         selected = (selected_key_id is not None and len(item) >= 3
                     and int(item[0]) == int(selected_key_id))
@@ -1103,7 +1097,7 @@ def persist_keyframe_clip_time(cur, clip, shift_keys=True):
         (in_f, in_f + length, db_id)
     )
     if delta != 0 and shift_keys:
-        # keyframes or (border) keyframe_border rows, BUILD 222
+        # keyframes or (border) keyframe_border rows
         shift_clip_keys(cur, db_id, delta)
         if len(clip) > 9 and clip[9]:
             clip[9][:] = [
@@ -1114,15 +1108,15 @@ def persist_keyframe_clip_time(cur, clip, shift_keys=True):
 
 
 def slice_keyframe_clip_db(cur, clip_mem_id, split):
-    # BUILD 132: split one keyframe clip at absolute sequence frame split
+    # Split one keyframe clip at absolute sequence frame split
     # (in_frame < split < out_frame). The clip keeps [in, split); a new
     # keyframe_clips row (same sequence, track, type, name and link_id)
-    # gets [split, out). BUILD 243: both pieces hold an exact copy of ALL
+    # gets [split, out). Both pieces hold an exact copy of ALL
     # the original keys, including keys outside the piece's own range
     # (hidden), so each piece evaluates exactly like the original clip at
     # every frame and a later trim or move can reveal them again. Keys
     # store absolute sequence frames, so the copies are not re-based; no
-    # boundary keys are added. Every key table (keyframes, BUILD 222
+    # boundary keys are added. Every key table (keyframes
     # keyframe_border) and every key column is copied.
     # No commit / undo here (the caller owns the transaction and undo step).
     # Returns the new piece's mem id, or None when not sliceable.
@@ -1143,7 +1137,7 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (seq_id, track_id, ktype, link_id, split, int(out_f), name))
     new_db = cur.lastrowid
-    # BUILD 303: the new piece keeps the clip speed
+    # The new piece keeps the clip speed
     from clip_speed import copy_speed
     copy_speed(cur, "keyframe_clips", db_id, new_db)
     cur.execute("UPDATE keyframe_clips SET out_frame = ? WHERE id = ?",
@@ -1158,7 +1152,7 @@ def slice_keyframe_clip_db(cur, clip_mem_id, split):
             "INSERT INTO %s (keyframe_clip_id, %s) SELECT ?, %s FROM %s "
             "WHERE keyframe_clip_id = ? ORDER BY frame, id"
             % (table, col_sql, col_sql, table), (new_db, db_id))
-    # BUILD 267: a clip with exactly one key gets that key centered in each
+    # A clip with exactly one key gets that key centered in each
     # piece (value unchanged; one key is a flat value, so nothing renders
     # differently), so neither piece is left with a key beyond its range
     for table in key_tables(cur):
@@ -1279,13 +1273,13 @@ def add_keyframe_clip(timeline, track_id, click_frame):
         QMessageBox.warning(
             timeline, "Add Keyframe Clip", "Could not add clip: %s" % e)
         return
-    # BUILD 139: a new keyframe clip is unlinked (no effect until linked);
+    # A new keyframe clip is unlinked (no effect until linked)
     # the refresh's snapshot diff marks whatever changes (nothing here)
     timeline._after_clip_change(
         "Added keyframe clip at frame %d" % in_frame)
 
 
-# BUILD 338: chroma Pick. One frameless top-most tool window per screen,
+# Chroma Pick. One frameless top-most tool window per screen
 # parented to the modal Add / Edit dialog so that dialog's modality does
 # not eat the click. Alpha 1 (not 0): on Windows a fully transparent
 # layered window is click-through. Left click hides the layers, then
@@ -1497,7 +1491,7 @@ class _ChromaPickOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
-        # BUILD 338: plain Qt crosshair. No custom eyedropper pixmap.
+        # Plain Qt crosshair. No custom eyedropper pixmap.
         self.setCursor(Qt.CrossCursor)
 
     def place(self):
@@ -1694,26 +1688,26 @@ class _ChromaPickSession(QObject):
 
 class AddKeyDialog(QDialog):
     # One numeric value labeled with the clip type (X / Y / Scale)
-    # BUILD 147: choose_type=True (the clip has no keys): a Type drop-down
+    # Choose_type=True (the clip has no keys): a Type drop-down
     # preset to the clip's type; this key sets the clip's type. defaults:
     # callable stored_type -> initial value when the type is changed.
-    # BUILD 222: type border shows the value as "Border px" plus R, G, B, A
+    # Type border shows the value as "Border px" plus R, G, B, A
     # fields (0..255, step 1; rgba = their initial values, default 255);
     # border_rgba() reads them. Other types hide the R, G, B, A row.
-    # BUILD 294: type move shows the value as "X:" plus a "Y:" field
+    # Type move shows the value as "X:" plus a "Y:" field
     # (unbounded, step 1; y = its initial value); key_y() reads it. Other
-    # types hide the Y row. BUILD 295: type crop_xy shows "X Crop:" and
+    # types hide the Y row. type crop_xy shows "X Crop:" and
     # "Y Crop:" (unbounded, step 0.1 like crop_x / crop_y). y_defaults:
     # callable stored_type -> initial Y when the type is changed.
-    # BUILD 296: type crop_edges shows the value as "Top:" plus Bottom,
+    # Type crop_edges shows the value as "Top:" plus Bottom
     # Left, Right fields (unbounded, step 0.1; edges = their initial
     # values, default 0); crop_edges() reads them. Other types hide that
     # row.
-    # BUILD 337: type chroma shows the value as "R:" plus G, B and
+    # Type chroma shows the value as "R:" plus G, B and
     # Tolerance (R/G/B 0..255, tolerance 0..442, step 1; chroma = the
     # initial (g, b, tolerance), default green 255, 0 and tolerance 80);
     # chroma_extra() reads them. Other types hide that row.
-    # BUILD 338: chroma also has Pick. It lays a transparent window over
+    # Chroma also has Pick. It lays a transparent window over
     # every screen; left click samples that pixel into R, G, B (tolerance
     # stays). Escape or right-click cancels and leaves R, G, B alone.
     def __init__(self, parent, type_label, initial=None, title="Add Key",
@@ -1828,7 +1822,7 @@ class AddKeyDialog(QDialog):
             self.type_combo.currentIndexChanged.connect(self._type_changed)
 
     def _type_changed(self, idx):
-        # BUILD 147: new type: its label, value range and default value
+        # New type: its label, value range and default value
         if idx < 0 or idx >= len(KEYFRAME_TYPE_CHOICES):
             return
         label, stored = KEYFRAME_TYPE_CHOICES[idx]
@@ -1854,9 +1848,9 @@ class AddKeyDialog(QDialog):
                 sp.setValue(float(v))
 
     def _show_border(self, stored):
-        # BUILD 222: R, G, B, A row only for type border; value label
-        # "Border px:" there. BUILD 294: Y row only for type move; value
-        # label "X:" there. BUILD 295: also for crop_xy, labels "X Crop:" /
+        # R, G, B, A row only for type border; value label
+        # "Border px:" there. Y row only for type move; value
+        # label "X:" there. Also for crop_xy, labels "X Crop:" /
         # "Y Crop:"
         border = stored == BORDER_TYPE
         self.rgba_row.setVisible(border)
@@ -1870,27 +1864,27 @@ class AddKeyDialog(QDialog):
         elif xy:
             self.value_label.setText("X:")
             self.y_label.setText("Y:")
-        # BUILD 296: Bottom, Left, Right row only for type crop_edges
+        # Bottom, Left, Right row only for type crop_edges
         edges = stored == CROP_EDGES_TYPE
         self.edges_row.setVisible(edges)
         if edges:
             self.value_label.setText("%s:" % CROP_EDGE_LABELS[0])
-        # BUILD 337: G, B, Tolerance row only for type chroma; value is R
+        # G, B, Tolerance row only for type chroma; value is R
         chroma = stored == CHROMA_TYPE
         self.chroma_row.setVisible(chroma)
         if chroma:
             self.value_label.setText("R:")
 
     def key_y(self):
-        # BUILD 294: y from the Y field (move, crop_xy)
+        # Y from the Y field (move, crop_xy)
         return float(self.y_spin.value())
 
     def crop_edges(self):
-        # BUILD 296: (bottom, left, right) from the Bottom, Left, Right fields
+        # (bottom, left, right) from the Bottom, Left, Right fields
         return tuple(float(sp.value()) for sp in self.edge_spins)
 
     def chroma_extra(self):
-        # BUILD 337: (g, b, tolerance) from the G, B, Tolerance fields
+        # (g, b, tolerance) from the G, B, Tolerance fields
         g = max(0.0, min(255.0, float(self.chroma_spins[0].value())))
         b = max(0.0, min(255.0, float(self.chroma_spins[1].value())))
         tol = max(0.0, min(CHROMA_TOLERANCE_MAX,
@@ -1898,7 +1892,7 @@ class AddKeyDialog(QDialog):
         return (g, b, tol)
 
     def _pick_chroma(self):
-        # BUILD 338: eyedropper. Tolerance is not touched. Cancel leaves
+        # Eyedropper. Tolerance is not touched. Cancel leaves
         # R, G, B as they were.
         if self._chroma_pick is not None:
             return
@@ -1926,11 +1920,11 @@ class AddKeyDialog(QDialog):
         super().done(result)
 
     def border_rgba(self):
-        # BUILD 222: (r, g, b, a) from the R, G, B, A fields
+        # (r, g, b, a) from the R, G, B, A fields
         return tuple(float(sp.value()) for sp in self.rgba_spins)
 
     def chosen_type(self):
-        # BUILD 147: the type this key is for (the clip's, or the drop-down's)
+        # The type this key is for (the clip's, or the drop-down's)
         return self.stored_type
 
     def value(self):
@@ -1944,7 +1938,7 @@ def clip_type_from_db(cur, db_id):
 
 
 def key_count_from_db(cur, db_id):
-    # BUILD 147; BUILD 222: keyframes plus keyframe_border rows
+    # keyframes plus keyframe_border rows
     n = 0
     for table in key_tables(cur):
         cur.execute("SELECT COUNT(*) FROM %s WHERE keyframe_clip_id = ?"
@@ -1955,7 +1949,7 @@ def key_count_from_db(cur, db_id):
 
 
 def set_clip_type(cur, db_id, stored_type):
-    # BUILD 147: the one-type rule. A keyframe clip's type changes only while
+    # The one-type rule. A keyframe clip's type changes only while
     # it has no keys; returns True when the clip has (now) that type.
     if stored_type not in KEYFRAME_CLIP_TYPES:
         return False
@@ -1974,7 +1968,7 @@ def clip_type_label_from_db(cur, db_id):
 
 def default_key_value(timeline, stored_type):
     # position X/Y = sequence center; scale = 100
-    # BUILD 294: move = sequence center X (its Y field defaults to the
+    # Move = sequence center X (its Y field defaults to the
     # center Y, add_key)
     if stored_type in ("position X", MOVE_TYPE):
         w, _h = timeline._sequence_size()
@@ -1988,24 +1982,24 @@ def default_key_value(timeline, stored_type):
         return 100.0
     if stored_type == "opacity":
         return 100.0
-    # BUILD 154: gamma 1.0, contrast 1.0 (no change); brightness 0 below
+    # Gamma 1.0, contrast 1.0 (no change); brightness 0 below
     if stored_type in ("gamma", "contrast"):
         return 1.0
-    # BUILD 222: border px 4 (its R, G, B, A fields default 255, opaque
+    # Border px 4 (its R, G, B, A fields default 255, opaque
     # white, in AddKeyDialog)
     if stored_type == BORDER_TYPE:
         return 4.0
-    # BUILD 147: crop_x / crop_y = 0 (no crop); BUILD 219: rotate = 0
-    # (upright); BUILD 295: crop_xy X = 0 (no crop); BUILD 296: crop_edges
+    # Crop_x / crop_y = 0 (no crop);: rotate = 0
+    # (upright);: crop_xy X = 0 (no crop);: crop_edges
     # Top = 0 (no crop; its other edges default 0 in AddKeyDialog);
-    # BUILD 337: chroma R = 0 (G 255, B 0, tolerance 80 in AddKeyDialog:
+    # Chroma R = 0 (G 255, B 0, tolerance 80 in AddKeyDialog:
     # pure green, a modest Euclidean green-screen gag); others 0
     # as before
     return 0.0
 
 
 def default_key_y(timeline, stored_type):
-    # BUILD 294: the Y field default: move = sequence center Y; BUILD 295:
+    # The Y field default: move = sequence center Y;:
     # crop_xy = 0 (no crop)
     if stored_type == MOVE_TYPE:
         _w, h = timeline._sequence_size()
@@ -2072,7 +2066,7 @@ def add_key(timeline, clip, click_frame):
         cur = conn.cursor()
         stored_type = clip_type_from_db(cur, db_id)
         type_label = type_display_label(stored_type) or "Value"
-        # BUILD 147: no keys yet = the type may be chosen with this key
+        # No keys yet = the type may be chosen with this key
         no_keys = key_count_from_db(cur, db_id) == 0
         conn.close()
     except Exception as e:
@@ -2094,7 +2088,7 @@ def add_key(timeline, clip, click_frame):
     try:
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
-        # BUILD 147: one type per clip. A different type is set only while
+        # One type per clip. A different type is set only while
         # the clip has no keys (checked again in this transaction).
         if new_type != stored_type and not set_clip_type(cur, db_id, new_type):
             conn.close()
@@ -2103,26 +2097,26 @@ def add_key(timeline, clip, click_frame):
                 3000)
             return
         if new_type == BORDER_TYPE:
-            # BUILD 222: a border key is a keyframe_border row
+            # A border key is a keyframe_border row
             cur.execute(
                 "INSERT INTO keyframe_border (keyframe_clip_id, frame, px, "
                 "r, g, b, a) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (db_id, frame, value) + dlg.border_rgba())
         elif new_type in XY_KEY_TYPES:
-            # BUILD 294: a move key is a keyframe_move row (BUILD 295:
+            # A move key is a keyframe_move row (:
             # crop_xy a keyframe_crop row)
             cur.execute(
                 "INSERT INTO %s (keyframe_clip_id, frame, x, y) "
                 "VALUES (?, ?, ?, ?)" % key_table_for_type(new_type),
                 (db_id, frame, value, dlg.key_y()))
         elif new_type == CROP_EDGES_TYPE:
-            # BUILD 296: a crop_edges key is a keyframe_crop_edges row
+            # A crop_edges key is a keyframe_crop_edges row
             cur.execute(
                 "INSERT INTO keyframe_crop_edges (keyframe_clip_id, frame, "
                 "top, bottom, left, right) VALUES (?, ?, ?, ?, ?, ?)",
                 (db_id, frame, value) + dlg.crop_edges())
         elif new_type == CHROMA_TYPE:
-            # BUILD 337: a chroma key is a keyframe_chroma row (r plus
+            # A chroma key is a keyframe_chroma row (r plus
             # g, b, tolerance)
             cur.execute(
                 "INSERT INTO keyframe_chroma (keyframe_clip_id, frame, "
@@ -2144,7 +2138,7 @@ def add_key(timeline, clip, click_frame):
 
 
 def persist_keyframe_frame(cur, key_id, frame, table="keyframes"):
-    # table: the clip's key table (key_table_for_type, BUILD 222)
+    # table: the clip's key table (key_table_for_type)
     cur.execute(
         "UPDATE %s SET frame = ? WHERE id = ?" % table,
         (int(frame), int(key_id))
@@ -2176,9 +2170,9 @@ def edit_key(timeline, clip, key_id, frame, value):
                 pass
     rgba = border_rgba(clip, key_id) if stored_type == BORDER_TYPE else None
     ky = key_y(clip, key_id)
-    # BUILD 296: a crop_edges key's (bottom, left, right) go to its fields
+    # A crop_edges key's (bottom, left, right) go to its fields
     edges = ky if stored_type == CROP_EDGES_TYPE else None
-    # BUILD 337: a chroma key's (g, b, tolerance) go to its fields
+    # A chroma key's (g, b, tolerance) go to its fields
     chroma = ky if stored_type == CHROMA_TYPE else None
     if edges is not None or chroma is not None:
         ky = None
@@ -2198,25 +2192,25 @@ def edit_key(timeline, clip, key_id, frame, value):
         conn = sqlite3.connect(project_db)
         cur = conn.cursor()
         if stored_type == BORDER_TYPE:
-            # BUILD 222: px and R, G, B, A of the keyframe_border row
+            # Px and R, G, B, A of the keyframe_border row
             cur.execute(
                 "UPDATE keyframe_border SET px = ?, r = ?, g = ?, b = ?, "
                 "a = ? WHERE id = ?",
                 (new_val,) + dlg.border_rgba() + (int(key_id),))
         elif stored_type in XY_KEY_TYPES:
-            # BUILD 294: x and y of the keyframe_move (BUILD 295: or
+            # X and y of the keyframe_move (: or
             # keyframe_crop) row
             cur.execute("UPDATE %s SET x = ?, y = ? WHERE id = ?"
                         % key_table_for_type(stored_type),
                         (new_val, dlg.key_y(), int(key_id)))
         elif stored_type == CROP_EDGES_TYPE:
-            # BUILD 296: top, bottom, left, right of the keyframe_crop_edges
+            # Top, bottom, left, right of the keyframe_crop_edges
             # row
             cur.execute("UPDATE keyframe_crop_edges SET top = ?, bottom = ?, "
                         "left = ?, right = ? WHERE id = ?",
                         (new_val,) + dlg.crop_edges() + (int(key_id),))
         elif stored_type == CHROMA_TYPE:
-            # BUILD 337: r, g, b, tolerance of the keyframe_chroma row
+            # R, g, b, tolerance of the keyframe_chroma row
             cur.execute("UPDATE keyframe_chroma SET r = ?, g = ?, b = ?, "
                         "tolerance = ? WHERE id = ?",
                         (new_val,) + dlg.chroma_extra() + (int(key_id),))
@@ -2368,7 +2362,7 @@ def delete_key(timeline, key_id, clip=None):
     timeline._after_clip_change("Deleted keyframe")
 
 
-# BUILD 260: Key > Delete Keys Beyond Event Horizon. Keys store absolute
+# Key > Delete Keys Beyond Event Horizon. Keys store absolute
 # sequence frames; the horizon is the keyframe clip's own range on the
 # timeline, [in, out) (in_frame up to and including the last frame of the
 # clip, the same range add_key clamps to). Keys before in or at / after
@@ -2421,11 +2415,11 @@ def delete_keys_beyond_horizon(timeline, clips):
     timeline._after_clip_change("Deleted %d key(s) beyond the clip range" % count)
 
 
-# BUILD 263 / 266: Key > Center Key Beyond Event Horizon, shown when a
+# Key > Center Key Beyond Event Horizon, shown when a
 # keyframe clip in the menu's scope (the right-clicked clip, plus the other
 # selected keyframe clips when it is selected, as for Delete Keys Beyond
 # Event Horizon) has a key outside [in, out). A clip holds one type
-# (BUILD 147), so its keys are the rows of one key table (keyframes, or
+# so its keys are the rows of one key table (keyframes, or
 # keyframe_border for a border clip). Of the keys outside the range, the one
 # nearest the clip (frames from the in point, or from the last frame
 # out - 1; the earlier key on a tie) moves to the middle frame
@@ -2508,11 +2502,11 @@ def center_key_beyond_horizon(timeline, clips):
     timeline._after_clip_change(msg)
 
 
-# BUILD 270: key clipboard. Copy Keyframe on a key box keeps its type and
+# Key clipboard. Copy Keyframe on a key box keeps its type and
 # value (and a border key's colour); the keyframe clip Key > Paste submenu
 # adds that key to a clip at the mouse click, the playhead or the clip's
 # center frame (clamped to [in, out)). Pasting needs a clip of the same
-# type, or a clip with no keys yet (it takes the copied type, BUILD 147).
+# type, or a clip with no keys yet (it takes the copied type).
 # A key already on that frame takes the pasted value instead of a second
 # key being added. One undo step per paste.
 _key_clipboard = None
@@ -2523,8 +2517,8 @@ def copy_key(timeline, key_hit):
     clip = key_hit["clip"]
     stored_type = clip[10] if len(clip) > 10 else ""
     rgba = border_rgba(clip, key_hit["key_id"]) if stored_type == BORDER_TYPE else None
-    # BUILD 294: a move (BUILD 295: or crop_xy) key's y; BUILD 296: a
-    # crop_edges key's (bottom, left, right); BUILD 337: a chroma key's
+    # A move (or crop_xy) key's y;: a
+    # crop_edges key's (bottom, left, right);: a chroma key's
     # (g, b, tolerance) (None for other types)
     ky = key_y(clip, key_hit["key_id"])
     _key_clipboard = {"type": stored_type, "value": float(key_hit["value"]),
@@ -2593,7 +2587,7 @@ def paste_key(timeline, clip, frame):
                     "r, g, b, a) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (db_id, int(frame), data["value"]) + rgba)
         elif stored_type in XY_KEY_TYPES:
-            # BUILD 294: x and y (y = its default_key_y if unknown); BUILD
+            # X and y (y = its default_key_y if unknown); BUILD
             # 295: crop_xy in keyframe_crop
             ky = data.get("y")
             if ky is None:
@@ -2607,7 +2601,7 @@ def paste_key(timeline, clip, frame):
                     "VALUES (?, ?, ?, ?)" % table,
                     (db_id, int(frame), data["value"], ky))
         elif stored_type == CROP_EDGES_TYPE:
-            # BUILD 296: top, bottom, left, right (other edges 0 if unknown)
+            # Top, bottom, left, right (other edges 0 if unknown)
             edges = tuple(data.get("y") or (0.0, 0.0, 0.0))
             if row is not None:
                 cur.execute("UPDATE keyframe_crop_edges SET top = ?, "
@@ -2619,7 +2613,7 @@ def paste_key(timeline, clip, frame):
                     "top, bottom, left, right) VALUES (?, ?, ?, ?, ?, ?)",
                     (db_id, int(frame), data["value"]) + edges)
         elif stored_type == CHROMA_TYPE:
-            # BUILD 337: r, g, b, tolerance (green 0, 255, 0 / 80 if unknown)
+            # R, g, b, tolerance (green 0, 255, 0 / 80 if unknown)
             gbt = data.get("y")
             if not isinstance(gbt, (tuple, list)) or len(gbt) < 3:
                 gbt = default_chroma_gbt()
@@ -2654,7 +2648,7 @@ def paste_key(timeline, clip, frame):
 
 
 def center_key(timeline, key_hit):
-    # BUILD 271: move this key to its clip's middle frame in + (out - in) // 2
+    # Move this key to its clip's middle frame in + (out - in) // 2
     # (value unchanged); when another key is there, the nearest free frame
     # inside [in, out), the earlier frame first on a tie
     clip = key_hit["clip"]
@@ -2699,13 +2693,13 @@ def center_key(timeline, key_hit):
 
 def key_context_menu(timeline, key_hit, pos):
     # Right-click on a key box: Edit / Copy / Center / Delete. While the
-    # menu is open the key box is drawn as selected (BUILD 271:
+    # menu is open the key box is drawn as selected (:
     # timeline._menu_key_id, black outline, see paint_keyframe_clip).
     from PySide6.QtWidgets import QMenu
     menu = QMenu(timeline)
     edit_action = menu.addAction("Edit")
-    copy_action = menu.addAction("Copy")     # BUILD 270
-    center_action = menu.addAction("Center")     # BUILD 271
+    copy_action = menu.addAction("Copy")
+    center_action = menu.addAction("Center")
     delete_action = menu.addAction("Delete")
     timeline._menu_key_id = int(key_hit["key_id"])
     timeline.table.viewport().update()
