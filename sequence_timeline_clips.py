@@ -1751,7 +1751,13 @@ def _clip_press_select(self, event, press_pos):
     mods = event.modifiers() | QApplication.queryKeyboardModifiers()
     if hit_clip is None:
         if self._x_in_clips(press_pos) >= 0:
-            self._clear_selection()
+            # BUILD 336: a Shift marquee was just armed on this press.
+            # Leave the selection so the box adds to it, and so the next
+            # drag while Shift is still held can add again. A plain click
+            # (no Shift) still clears.
+            rb = getattr(self, "_rubber", None)
+            if not (rb is not None and rb.get("add")):
+                self._clear_selection()
     elif (mods & Qt.AltModifier) and (mods & Qt.ShiftModifier):
         # BUILD 329: Alt+Shift = toggle ONLY this clip into the multi-set
         # (not its linked stack). Accumulate across stacks; toggle off if
