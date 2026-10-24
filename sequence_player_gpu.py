@@ -569,6 +569,13 @@ GL_QUADS = 0x0007
 # clamp 0..1; 2 brightness c + brightness (-1..1), clamp 0..1; 4 gamma
 # c ** inv_gamma (inv_gamma = 1 / gamma). Back to round(c * 255). Alpha and
 # the opacity blend after it are unchanged; flags 0 skips it all.
+# BUILD 337: chroma_on / chroma_r / chroma_g / chroma_b / chroma_tol. Jokey
+# classic chroma key on the source RGB, before color and the opacity
+# blend. chroma_on 0 skips it (bit-exact). Otherwise a pixel whose
+# Euclidean distance to (chroma_r, chroma_g, chroma_b) is <= chroma_tol
+# (all in 0..255; compare squared so the kernel skips sqrt) gets alpha 0.
+# No spill suppression. Edges stay rough. The outline band is not keyed
+# (it joins at COLOR_DONE, after this test).
 # BUILD 152: crop_y is the same real crop on y: drawn only if the source
 # pixel center lies in [crop_y, sh - crop_y] (top and bottom; picture in
 # place; <= 0 = no crop; >= sh / 2 hides the layer). The BUILD 147 y shift
@@ -597,7 +604,9 @@ PTX = b"""
     .param .f32 crop_x, .param .f32 crop_y,
     .param .u32 color_flags, .param .f32 contrast, .param .f32 brightness,
     .param .f32 inv_gamma, .param .f32 rot_cos, .param .f32 rot_sin,
-    .param .f32 outline_w, .param .u32 outline_rgba)
+    .param .f32 outline_w, .param .u32 outline_rgba,
+    .param .u32 chroma_on, .param .f32 chroma_r, .param .f32 chroma_g,
+    .param .f32 chroma_b, .param .f32 chroma_tol)
 {
     .reg .pred p;
     .reg .u32 idx, x, y, dwv, dhv, swv, shv, ssv, bppv, pix;
@@ -610,7 +619,8 @@ PTX = b"""
     .reg .f32 fcon, fbri, figm, fcc;
     .reg .f32 frc, frs, frns, fru, frv;
     .reg .f32 fow, fol, fohi, foe, fod, fodb;
-    .reg .u32 orgba;
+    .reg .u32 orgba, ckon;
+    .reg .f32 fckr, fckg, fckb, fckt, fcd;
     .reg .u64 srcv, dstv, addr;
     mov.u32 idx, %tid.x;
     mov.u32 x, %ctaid.x;
@@ -727,6 +737,31 @@ PTX = b"""
     @p bra BLEND;
     ld.global.u8 a, [addr+3];
 BLEND:
+    // BUILD 337: jokey chroma key. chroma_on 0 skips (bit-exact). Else a
+    // source pixel with (dr*dr + dg*dg + db*db) <= tol*tol gets alpha 0.
+    // No spill suppression.
+    ld.param.u32 ckon, [chroma_on];
+    setp.eq.u32 p, ckon, 0;
+    @p bra CHROMA_DONE;
+    ld.param.f32 fckr, [chroma_r];
+    ld.param.f32 fckg, [chroma_g];
+    ld.param.f32 fckb, [chroma_b];
+    ld.param.f32 fckt, [chroma_tol];
+    cvt.rn.f32.u32 fcd, r;
+    sub.rn.f32 fcd, fcd, fckr;
+    mul.rn.f32 fcd, fcd, fcd;
+    cvt.rn.f32.u32 fckr, g;
+    sub.rn.f32 fckr, fckr, fckg;
+    mul.rn.f32 fckr, fckr, fckr;
+    add.rn.f32 fcd, fcd, fckr;
+    cvt.rn.f32.u32 fckr, b;
+    sub.rn.f32 fckr, fckr, fckb;
+    mul.rn.f32 fckr, fckr, fckr;
+    add.rn.f32 fcd, fcd, fckr;
+    mul.rn.f32 fckt, fckt, fckt;
+    setp.le.f32 p, fcd, fckt;
+    @p mov.u32 a, 0;
+CHROMA_DONE:
     // BUILD 154: color keyframes on the source RGB (not alpha), before the
     // opacity / alpha blend. flags 0 (all identity): skipped, bit-exact.
     // c = channel / 255; bit 1: contrast (c - 0.5) * contrast + 0.5, clamp

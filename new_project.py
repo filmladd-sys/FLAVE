@@ -29,7 +29,9 @@ ICONS_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_icons_lookup "
 # keyframe clips (absolute sequence frame, x and y the crop_x / crop_y
 # values in source pixels). BUILD 296: keys of type-crop_edges keyframe
 # clips (absolute sequence frame, top, bottom, left, right crop in source
-# pixels). Other types keep their keys in
+# pixels). BUILD 337: keys of type-chroma keyframe clips (absolute sequence
+# frame, r / g / b the key color 0..255, tolerance the Euclidean distance
+# in that same 0..255 RGB space). Other types keep their keys in
 # keyframes. Run by _init_db.
 KEYFRAME_BORDER_SQL = """
     CREATE TABLE IF NOT EXISTS keyframe_border (
@@ -70,6 +72,22 @@ KEYFRAME_CROP_EDGES_SQL = """
         bottom REAL NOT NULL,
         left REAL NOT NULL,
         right REAL NOT NULL
+    )
+"""
+# BUILD 337: one row per chroma key. r / g / b are the key color (0..255).
+# tolerance is Euclidean distance in that RGB space. A new key defaults to
+# green 0, 255, 0 and tolerance 80 (keyframe.py): a modest green-screen gag.
+# The farthest 0..255 RGB color is sqrt(3) * 255, about 441.67, so a
+# tolerance of 442 keys every pixel. Run by _init_db.
+KEYFRAME_CHROMA_SQL = """
+    CREATE TABLE IF NOT EXISTS keyframe_chroma (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        keyframe_clip_id INTEGER NOT NULL,
+        frame INTEGER NOT NULL,
+        r REAL NOT NULL,
+        g REAL NOT NULL,
+        b REAL NOT NULL,
+        tolerance REAL NOT NULL
     )
 """
 # BUILD 308: WYSIWYG Text clips (track_type 'text'): one text box per clip,
@@ -131,6 +149,24 @@ def project_path_for(folder, name):
         name = name[:-len(PROJECT_EXT)]
     return os.path.join(folder, name + PROJECT_EXT)
 
+
+
+def ensure_project_schema(db_path):
+    # BUILD 337: project-load schema check, run by Project Manager when a
+    # project is opened (startup autoload and File > Open) before any window
+    # reads the project. Never raises.
+    # TEMP MIGRATION (BUILD 337): creates keyframe_chroma on old projects. Safe to delete once all projects have been opened in BUILD 337+; new_project.py _init_db already creates it.
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(KEYFRAME_CHROMA_SQL)
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    # END TEMP MIGRATION (BUILD 337)
+    return None
 
 
 def create_project_db(db_path):
@@ -362,11 +398,12 @@ class NewProjectWindow(QMainWindow):
 
         # BUILD 222 / 294: keys of type-border and type-move keyframe clips
         # (KEYFRAME_BORDER_SQL, KEYFRAME_MOVE_SQL, KEYFRAME_CROP_SQL,
-        # KEYFRAME_CROP_EDGES_SQL above)
+        # KEYFRAME_CROP_EDGES_SQL, KEYFRAME_CHROMA_SQL above)
         cur.execute(KEYFRAME_BORDER_SQL)
         cur.execute(KEYFRAME_MOVE_SQL)
         cur.execute(KEYFRAME_CROP_SQL)
         cur.execute(KEYFRAME_CROP_EDGES_SQL)
+        cur.execute(KEYFRAME_CHROMA_SQL)
         # BUILD 308: WYSIWYG Text clips
         cur.execute(TEXT_CLIPS_SQL)
 

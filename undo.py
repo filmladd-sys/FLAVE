@@ -22,6 +22,7 @@ SNAP_TABLES = ("clips", "keyframe_clips", "keyframes", "tracks", "footage",
                "keyframe_move",       # BUILD 294: move clip keys
                "keyframe_crop",       # BUILD 295: crop_xy clip keys
                "keyframe_crop_edges",  # BUILD 296: crop_edges clip keys
+               "keyframe_chroma",     # BUILD 337: chroma clip keys
                "text_clips")          # BUILD 308: WYSIWYG Text clips
 # Thumbnails follow footage only through a Footage Manager remove (BUILD
 # 235): that snapshot holds the icon rows of the removed footage ids

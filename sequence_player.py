@@ -657,6 +657,10 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
     # (snapshot[24] .. [27]) (keyframe.collect_crop_edge_clips)
     from keyframe import collect_crop_edge_clips
     crop_edge_clips = collect_crop_edge_clips(tl.clips_by_track, track_order)
+    # BUILD 337: chroma keyframe clips, r, g, b, tolerance
+    # (snapshot[30] .. [33]) (keyframe.collect_chroma_clips)
+    from keyframe import collect_chroma_clips
+    chroma_clips = collect_chroma_clips(tl.clips_by_track, track_order)
     # BUILD 303: clip speed percent by clip id, only clips != 100
     # (snapshot[28], clip_speed.load_clip_speeds; _layer_items)
     clip_speeds = dict(getattr(tl, "_clip_speeds", None) or {})
@@ -674,7 +678,7 @@ def timeline_snapshot(tl, use_proxies=True, render_deint=False):
             outline_clips) + tuple(outline_rgba_clips) + (
                 fps_conform, move_x_clips, move_y_clips,
                 crop_xy_x_clips, crop_xy_y_clips) + tuple(crop_edge_clips) + (
-                clip_speeds, text_styles)
+                clip_speeds, text_styles) + tuple(chroma_clips)
 
 
 # ---------------------------------------------------------------- window
@@ -1146,6 +1150,11 @@ class SequencePlayer(QWindow):
         crop_edge_clips = tuple(snapshot[i] if len(snapshot) > i else []
                                 for i in (24, 25, 26, 27))
         from keyframe import crop_edges_for_link
+        # BUILD 337: chroma keyframes (snapshot[30] .. [33]); layer items
+        # gain (r, g, b, tolerance) or None ([18])
+        chroma_clips = tuple(snapshot[i] if len(snapshot) > i else []
+                             for i in (30, 31, 32, 33))
+        from keyframe import chroma_for_link
         # BUILD 303: clip speed (snapshot[28], {clip id: percent != 100})
         speeds = snapshot[28] if len(snapshot) > 28 else {}
         from clip_speed import source_pos
@@ -1225,6 +1234,8 @@ class SequencePlayer(QWindow):
                         crop_y = (crop_y or 0.0) + crop_xy[1]
                     crop_edges = crop_edges_for_link(
                         crop_edge_clips, link_id, frame, clip_order)
+                    chroma = chroma_for_link(
+                        chroma_clips, link_id, frame, clip_order)
                     gamma = color_value_for_link(
                         gamma_clips, link_id, frame, clip_order)
                     brightness = color_value_for_link(
@@ -1241,7 +1252,7 @@ class SequencePlayer(QWindow):
                                    crop_x, crop_y, gamma, brightness, contrast,
                                    rotate, outline,
                                    instances.get(clip[0], (0, path)),
-                                   crop_edges))
+                                   crop_edges, chroma))
                 break
         return layers
 
@@ -1405,7 +1416,8 @@ class SequencePlayer(QWindow):
     def _blend(self, src_ptr, sw, sh, stride, bpp, sync=True, scale=None,
                pos_dx=None, pos_dy=None, orig_size=None, opacity=None,
                crop_x=None, crop_y=None, gamma=None, brightness=None,
-               contrast=None, rotate=None, outline=None, crop_edges=None):
+               contrast=None, rotate=None, outline=None, crop_edges=None,
+               chroma=None):
         # scale: percent from linked keyframes (None = 100). Factor =
         # scale/100. pos_dx/pos_dy: free placement shift in sequence pixels
         # (None = 0). inv_scale, pos_dx, pos_dy go to blend_layer on the GPU.
@@ -1533,6 +1545,26 @@ class SequencePlayer(QWindow):
                               << (8 * i))
             except (TypeError, ValueError, IndexError):
                 ow, orgba = 0.0, 0
+        # BUILD 337: chroma key (r, g, b, tolerance) or None = off. The
+        # kernel punches source pixels within Euclidean distance tolerance
+        # of (r, g, b) (0..255) down to alpha 0. chroma_on 0 skips it
+        # (bit-exact with no chroma key). Jokey and rough: no spill
+        # suppression. Tolerance 80 on green 0, 255, 0 is the new-key
+        # default (a modest green-screen gag).
+        ck_on = 0
+        ck = (0.0, 0.0, 0.0, 0.0)
+        if chroma is not None:
+            try:
+                from keyframe import CHROMA_TOLERANCE_MAX
+                ckr = max(0.0, min(255.0, float(chroma[0])))
+                ckg = max(0.0, min(255.0, float(chroma[1])))
+                ckb = max(0.0, min(255.0, float(chroma[2])))
+                ckt = max(0.0, min(float(CHROMA_TOLERANCE_MAX), float(chroma[3])))
+                if ckr == ckr and ckg == ckg and ckb == ckb and ckt == ckt:
+                    ck_on = 1
+                    ck = (ckr, ckg, ckb, ckt)
+            except (TypeError, ValueError, IndexError):
+                ck_on = 0
         try:
             pdx = int(round(float(pos_dx))) if pos_dx is not None else 0
         except (TypeError, ValueError):
@@ -1561,7 +1593,10 @@ class SequencePlayer(QWindow):
                  opacity_f, crops[0], crops[1], ctypes.c_uint32(cflags),
                  ctypes.c_float(k_), ctypes.c_float(b_), ctypes.c_float(1.0 / g_),
                  ctypes.c_float(rot_cs[0]), ctypes.c_float(rot_cs[1]),
-                 ctypes.c_float(ow), ctypes.c_uint32(orgba)]
+                 ctypes.c_float(ow), ctypes.c_uint32(orgba),
+                 ctypes.c_uint32(ck_on), ctypes.c_float(ck[0]),
+                 ctypes.c_float(ck[1]), ctypes.c_float(ck[2]),
+                 ctypes.c_float(ck[3])]
         ptrs = [src, dst] + vals
         args = (ctypes.c_void_p * len(ptrs))(
             *[ctypes.cast(ctypes.pointer(v), ctypes.c_void_p) for v in ptrs])
@@ -2008,6 +2043,7 @@ class SequencePlayer(QWindow):
             rotate = layer[14] if len(layer) > 14 else None    # BUILD 219
             outline = layer[15] if len(layer) > 15 else None   # BUILD 220
             crop_edges = layer[17] if len(layer) > 17 else None  # BUILD 296
+            chroma = layer[18] if len(layer) > 18 else None      # BUILD 337
             if kind == "image":
                 item = self._image(path)
                 if item is not None:
@@ -2017,7 +2053,7 @@ class SequencePlayer(QWindow):
                                 crop_x=crop_x, crop_y=crop_y,
                                 gamma=gamma, brightness=brightness, contrast=contrast,
                                 rotate=rotate, outline=outline,
-                                crop_edges=crop_edges)
+                                crop_edges=crop_edges, chroma=chroma)
                 continue
             if kind == "text":
                 # BUILD 309: the text clip's image (player_text), blended
@@ -2033,7 +2069,7 @@ class SequencePlayer(QWindow):
                                 crop_x=crop_x, crop_y=crop_y,
                                 gamma=gamma, brightness=brightness, contrast=contrast,
                                 rotate=rotate, outline=outline,
-                                crop_edges=crop_edges)
+                                crop_edges=crop_edges, chroma=chroma)
                 continue
             if not os.path.isfile(path):
                 continue
@@ -2049,7 +2085,7 @@ class SequencePlayer(QWindow):
                             crop_x=crop_x, crop_y=crop_y,
                             gamma=gamma, brightness=brightness, contrast=contrast,
                             rotate=rotate, outline=outline,
-                            crop_edges=crop_edges)
+                            crop_edges=crop_edges, chroma=chroma)
                 continue
             dec = self._decoder(dkey, frame)
             if not source_index_ok(self, dkey, dec, src_frame):
@@ -2116,7 +2152,7 @@ class SequencePlayer(QWindow):
                         crop_x=crop_x, crop_y=crop_y,
                         gamma=gamma, brightness=brightness, contrast=contrast,
                         rotate=rotate, outline=outline,
-                        crop_edges=crop_edges)
+                        crop_edges=crop_edges, chroma=chroma)
         self._sync()
         self._target = None
         if target is self.dst:
