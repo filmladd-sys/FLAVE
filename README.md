@@ -18,6 +18,8 @@ FLAVE runs on Windows with an NVIDIA GPU today. The design should be
 portable to Linux or Mac, but that has not been tested; see the stack
 notes below for the Windows-specific pieces.
 
+Find me: [X / FilmLadd](https://x.com/FilmLadd) · [YouTube](https://www.youtube.com/@FilmLadd)
+
 **License:** free to use (including commercially), modify, and share
 with attribution; see [LICENSE](LICENSE). The software itself may not
 be sold.
